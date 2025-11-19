@@ -1,0 +1,43 @@
+{{- if .Values.prometheus.rules.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "kubetty.fullname" . }}-log-cleanup
+  labels:
+    app.kubernetes.io/name: {{ include "kubetty.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- range $k, $v := .Values.prometheus.rules.ruleLabels }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+spec:
+  groups:
+    - name: kubetty-log-cleanup
+      rules:
+        {{- $rules := .Values.prometheus.rules }}
+        {{- $labels := $rules.labels | default dict }}
+        {{- $ann := $rules.annotations | default dict }}
+        {{- $stalledHours := int (default 12 $rules.stalledHours) }}
+        - alert: KubeTTYLogCleanupStalled
+          expr: time() - kubetty_log_cleanup_last_run_timestamp_seconds > {{ mul $stalledHours 3600 }}
+          for: {{ $rules.stalledFor | default "30m" }}
+          labels:
+            release: {{ .Release.Name }}
+            {{- range $k, $v := $labels }}
+            {{ $k }}: {{ $v | quote }}
+            {{- end }}
+          annotations:
+            summary: {{ default "KubeTTY log cleanup stalled" (index $ann "stalledSummary") | quote }}
+            description: {{ default (printf "No log cleanup run has completed in over %d hours for release %s." $stalledHours .Release.Name) (index $ann "stalledDescription") | quote }}
+        {{- $windowMinutes := int (default 30 $rules.errorWindowMinutes) }}
+        - alert: KubeTTYLogCleanupErrors
+          expr: increase(kubetty_log_cleanup_errors_total[{{ printf "%dm" $windowMinutes }}]) > 0
+          for: {{ $rules.errorFor | default "5m" }}
+          labels:
+            release: {{ .Release.Name }}
+            {{- range $k, $v := $labels }}
+            {{ $k }}: {{ $v | quote }}
+            {{- end }}
+          annotations:
+            summary: {{ default "KubeTTY log cleanup errors" (index $ann "errorSummary") | quote }}
+            description: {{ default (printf "Log cleanup has thrown errors within the past %d minutes for release %s." $windowMinutes .Release.Name) (index $ann "errorDescription") | quote }}
+{{- end }}

@@ -1,0 +1,143 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kubetty.fullname" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "kubetty.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "kubetty.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "kubetty.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- $scrape := .Values.prometheus.scrape | default dict }}
+      {{- if or .Values.podAnnotations $scrape.enabled }}
+      annotations:
+        {{- range $k, $v := .Values.podAnnotations }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+        {{- if $scrape.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: {{ default "/metrics" $scrape.path | quote }}
+        {{- $scrapePort := printf "%v" (default .Values.service.port $scrape.port) }}
+        prometheus.io/port: {{ $scrapePort | quote }}
+        {{- if $scrape.scheme }}
+        prometheus.io/scheme: {{ $scrape.scheme | quote }}
+        {{- end }}
+        {{- range $k, $v := $scrape.annotations }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+        {{- end }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kubetty.serviceAccountName" . }}
+      securityContext:
+        supplementalGroups:
+          - 0
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+{{- end }}
+      {{- end }}
+{{- if .Values.homePVC.enabled }}
+      initContainers:
+        - name: fix-home-perms
+          image: ubuntu:22.04
+          command: ["/bin/bash","-c","chown -R 1000:1000 /home/mmattox || true"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: home
+              mountPath: /home/mmattox
+{{- end }}
+      containers:
+        - name: docker
+          image: docker:24.0.5-dind
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          args:
+            - --host=unix:///var/run/docker/docker.sock
+            - --host=tcp://0.0.0.0:2375
+          volumeMounts:
+            - name: dind-storage
+              mountPath: /var/lib/docker
+            - name: dind-sock
+              mountPath: /var/run/docker
+        - name: kubetty
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: DEPLOYMENT_ID
+              value: {{ .Values.deploymentId | quote }}
+            - name: SESSION_ID
+              value: {{ .Values.env.sessionID | quote }}
+            - name: CLAUDE_CODE_MAX_OUTPUT_TOKENS
+              value: {{ .Values.env.claudeMaxTokens | quote }}
+            - name: ANTHROPIC_BASE_URL
+              value: {{ .Values.env.anthropicBaseURL | quote }}
+            - name: NODE_OPTIONS
+              value: {{ .Values.env.nodeOptions | quote }}
+            - name: CLAUDE_CONFIG_DIR
+              value: {{ .Values.env.claudeConfigDir | quote }}
+            - name: CNPG_HOST
+              value: {{ .Values.cnpg.host | quote }}
+            - name: CNPG_PORT
+              value: {{ .Values.cnpg.port | quote }}
+            - name: CNPG_DATABASE
+              value: {{ .Values.cnpg.database | quote }}
+            - name: CNPG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cnpg.userSecret }}
+                  key: {{ .Values.cnpg.usernameKey | default "username" }}
+            - name: CNPG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cnpg.userSecret }}
+                  key: {{ .Values.cnpg.passwordKey }}
+            - name: DOCKER_HOST
+              value: unix:///var/run/docker/docker.sock
+          envFrom:
+            - secretRef:
+                name: env-secrets
+                optional: true
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+{{- if .Values.homePVC.enabled }}
+          volumeMounts:
+            - name: home
+              mountPath: /home/mmattox
+{{- end }}
+          volumeMounts:
+            - name: dind-sock
+              mountPath: /var/run/docker
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+      {{- if .Values.homePVC.enabled }}
+        - name: home
+          persistentVolumeClaim:
+            claimName: {{ if .Values.homePVC.create }}{{ default (printf "%s-home" (include "kubetty.fullname" .)) .Values.homePVC.name }}{{ else }}{{ .Values.homePVC.existingClaim | quote }}{{ end }}
+      {{- end }}
+        - name: dind-storage
+          emptyDir: {}
+        - name: dind-sock
+          emptyDir: {}

@@ -1,0 +1,37 @@
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                                                                   ║
+║   ██╗  ██╗██╗   ██╗██████╗ ███████╗████████╗████████╗██╗   ██╗   ║
+║   ██║ ██╔╝██║   ██║██╔══██╗██╔════╝╚══██╔══╝╚══██╔══╝╚██╗ ██╔╝   ║
+║   █████╔╝ ██║   ██║██████╔╝█████╗     ██║      ██║    ╚████╔╝    ║
+║   ██╔═██╗ ██║   ██║██╔══██╗██╔══╝     ██║      ██║     ╚██╔╝     ║
+║   ██║  ██╗╚██████╔╝██████╔╝███████╗   ██║      ██║      ██║      ║
+║   ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝   ╚═╝      ╚═╝      ╚═╝      ║
+║                                                                   ║
+║          Cloud-Native Terminal Environment for Kubernetes        ║
+║                                                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+  Welcome to your persistent development environment!
+
+  📦  Tools Available:
+      • kubectl, helm, k9s, kustomize - Kubernetes tooling
+      • docker - Container management
+      • git, gh - Version control
+      • terraform, aws - Infrastructure as Code
+      • go, node, python - Development runtimes
+      • tmux, screen, zsh - Terminal multiplexers
+      • vim, nano - Text editors
+      • claude - AI-powered development assistant
+
+  🚀  Quick Start:
+      • Run 'kubectl get pods' to explore your cluster
+      • Use 'claude' for AI-assisted development
+      • Check ~/.bash_profile for environment setup
+      • Session logs: ~/claude_logs/
+
+  📚  Documentation:
+      https://github.com/supporttools/KubeTTY
+
+  ⚡  Tip: Your session persists across reconnections!
+

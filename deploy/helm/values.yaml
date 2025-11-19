@@ -1,0 +1,103 @@
+image:
+  repository: harbor.support.tools/kubetty/kubetty
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+deploymentId: kubetty-dev
+
+env:
+  sessionID: "00000000-0000-0000-0000-000000000000"
+  claudeMaxTokens: "64000"
+  anthropicBaseURL: "http://172.25.1.66:8080"
+  nodeOptions: "--max-old-space-size=32768"
+  claudeConfigDir: "/home/mmattox/.claude"
+  extra: {}
+
+cnpg:
+  host: 172.28.58.5
+  port: 5432
+  database: kubetty
+  userSecret: kubetty-shared-app
+  usernameKey: username
+  passwordKey: password
+
+# API Secrets Configuration
+# These secrets should be created manually via kubectl before deploying
+# See SECRETS.md for detailed setup instructions
+apiSecrets:
+  # Name of existing Kubernetes secret containing API keys
+  # Leave empty to disable secret injection
+  existingSecret: ""
+
+  # Secret keys expected in the secret (for reference)
+  # The secret should contain these keys:
+  #   - github-token: GitHub personal access token
+  #   - openai-api-key: OpenAI API key
+  #   - google-cloud-project: Google Cloud project ID
+  #   - nexmonyx-access-key: Nexmonyx access key
+  #   - nexmonyx-access-secret: Nexmonyx access secret
+  #   - anthropic-base-url: (Optional) Anthropic API base URL override
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources: {}
+
+serviceAccount:
+  create: true
+  name: ""
+
+rbac:
+  create: true
+  adminNamespaces: []
+  readNamespaces: []
+
+homePVC:
+  enabled: false
+  create: false
+  existingClaim: ""
+  name: ""
+  storageClass: longhorn
+  accessModes:
+    - ReadWriteOnce
+  size: 20Gi
+
+ingress:
+  enabled: false
+  className: nginx
+  tlsSecret: star-support-tools-tls
+  hosts:
+    - host: example-kubetty.support.tools
+      path: /
+  annotations: {}
+podAnnotations: {}
+
+prometheus:
+  scrape:
+    enabled: true
+    path: /metrics
+    port: 8080
+    scheme: http
+    annotations: {}
+  podMonitor:
+    enabled: true
+    portName: http
+    path: /metrics
+    scheme: http
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+  rules:
+    enabled: true
+    ruleLabels: {}
+    labels:
+      severity: warning
+    stalledHours: 12
+    stalledFor: 30m
+    errorWindowMinutes: 30
+    errorFor: 5m
+    annotations: {}

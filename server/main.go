@@ -26,16 +26,22 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/supporttools/KubeTTY/server/internal/config"
+	"github.com/supporttools/KubeTTY/server/internal/gateway/manager"
+	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
 )
 
 //go:embed ui/dist ui/dist/*
 var embeddedUI embed.FS
+
+const clientCookieName = "kubetty_client"
 
 func main() {
 	ctx := context.Background()
@@ -55,6 +61,26 @@ func main() {
 	}
 	defer store.Close()
 
+	var (
+		tabStore   tabs.Store
+		tabManager *manager.Manager
+		tabPool    *pgxpool.Pool
+	)
+	if len(cfg.ProjectCatalog.Projects) > 0 {
+		tabPool, err = pgxpool.New(ctx, cfg.ConnString())
+		if err != nil {
+			log.Fatalf("gateway pool: %v", err)
+		}
+		tabStore = tabs.NewPGXStore(tabPool)
+		tabManager = manager.New(cfg.ProjectCatalog, tabStore)
+		if err := tabManager.RestoreTabs(ctx); err != nil {
+			log.Printf("warn: restore tabs: %v", err)
+		}
+	}
+	if tabPool != nil {
+		defer tabPool.Close()
+	}
+
 	uiFS, err := fs.Sub(embeddedUI, "ui/dist")
 	if err != nil {
 		log.Fatalf("prepare static assets: %v", err)
@@ -72,6 +98,12 @@ func main() {
 		uiFS:       uiFS,
 		metrics:    metrics,
 		appMetrics: appMetrics,
+		tabManager: tabManager,
+		tabStore:   tabStore,
+		tabSubs:    make(map[string]map[chan []byte]struct{}),
+	}
+	if srv.tabManager != nil {
+		srv.tabManager.SetStatusCallback(srv.handleTabStatusUpdate)
 	}
 
 	maintCtx, cancelMaintenance := context.WithCancel(ctx)
@@ -80,7 +112,17 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/session/logs", srv.appMetrics.instrumentHandler("session_logs", http.HandlerFunc(srv.handleSessionLogs)))
-	mux.Handle("/ws", srv.appMetrics.instrumentHandler("ws", http.HandlerFunc(srv.handleWebsocket)))
+	mux.Handle("/ws", srv.appMetrics.instrumentHandler("ws", http.HandlerFunc(srv.handleWSRoute)))
+	mux.Handle("/api/projects", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if srv.tabManager == nil {
+			http.Error(w, "gateway disabled", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
+	}))
+	mux.Handle("/api/tabs", http.HandlerFunc(srv.handleTabs))
+	mux.Handle("/api/tabs/", http.HandlerFunc(srv.handleTabByID))
+	mux.Handle("/api/tabs/events", http.HandlerFunc(srv.handleTabEvents))
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.Handle("/debug/vars", expvar.Handler())
 	mux.Handle("/", srv.appMetrics.instrumentHandler("static", srv.staticHandler()))
@@ -114,6 +156,10 @@ type server struct {
 	uiFS       fs.FS
 	metrics    *cleanupMetrics
 	appMetrics *appMetrics
+	tabManager *manager.Manager
+	tabStore   tabs.Store
+	tabSubsMu  sync.Mutex
+	tabSubs    map[string]map[chan []byte]struct{}
 
 	mu  sync.RWMutex
 	pty *ptySession
@@ -127,8 +173,8 @@ type ptySession struct {
 
 	mu            sync.RWMutex
 	clients       map[*websocket.Conn]bool
-	outputBuffer  []byte        // Buffer for initial output (MOTD, etc.)
-	bufferMaxSize int           // Maximum buffer size (64KB)
+	outputBuffer  []byte // Buffer for initial output (MOTD, etc.)
+	bufferMaxSize int    // Maximum buffer size (64KB)
 }
 
 func (s *server) staticHandler() http.Handler {
@@ -151,7 +197,6 @@ func (s *server) staticHandler() http.Handler {
 		fileServer.ServeHTTP(w, r)
 	})
 }
-
 
 func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -192,21 +237,342 @@ func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *server) handleWSRoute(w http.ResponseWriter, r *http.Request) {
+	if s.tabManager != nil && r.URL.Query().Get("tab") != "" {
+		s.handleGatewayWebsocket(w, r)
+		return
+	}
+	s.handleWebsocket(w, r)
+}
+
+func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) {
+	if s.tabManager == nil {
+		http.Error(w, "gateway disabled", http.StatusNotFound)
+		return
+	}
+	tabID := r.URL.Query().Get("tab")
+	if tabID == "" {
+		http.Error(w, "missing tab parameter", http.StatusBadRequest)
+		return
+	}
+	clientID := s.ensureClientID(w, r)
+	remoteAddr := r.RemoteAddr
+
+	log.Printf("[GW %s] Tab connection attempt from %s (client=%s)", tabID, remoteAddr, clientID)
+
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("[GW %s] Upgrade failed: %v", tabID, err)
+		http.Error(w, fmt.Sprintf("upgrade: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		conn.Close()
+		log.Printf("[GW %s] Connection closed (client=%s)", tabID, clientID)
+	}()
+
+	log.Printf("[GW %s] Connection established (client=%s)", tabID, clientID)
+
+	if err := s.tabManager.Attach(r.Context(), tabID, clientID, conn); err != nil {
+		log.Printf("[GW %s] Attach failed: %v", tabID, err)
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()), time.Now().Add(time.Second))
+		return
+	}
+}
+
+func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
+	if s.tabManager == nil || s.tabStore == nil {
+		http.Error(w, "gateway disabled", http.StatusNotFound)
+		return
+	}
+	clientID := s.ensureClientID(w, r)
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.tabStore.ListByClient(r.Context(), clientID, 50)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("list tabs: %v", err), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tabs": items})
+	case http.MethodPost:
+		var req struct {
+			ProjectID string `json:"projectId"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, fmt.Sprintf("decode body: %v", err), http.StatusBadRequest)
+			return
+		}
+		if req.ProjectID == "" {
+			http.Error(w, "projectId is required", http.StatusBadRequest)
+			return
+		}
+		tab, err := s.tabManager.CreateTab(r.Context(), req.ProjectID, clientID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("create tab: %v", err), http.StatusInternalServerError)
+			return
+		}
+		resp := map[string]any{
+			"tab":   tab,
+			"wsUrl": fmt.Sprintf("%s://%s/ws?tab=%s", wsScheme(r), r.Host, tab.TabID),
+		}
+		writeJSON(w, http.StatusCreated, resp)
+		s.broadcastTabSnapshot(clientID)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *server) handleTabByID(w http.ResponseWriter, r *http.Request) {
+	if s.tabManager == nil || s.tabStore == nil {
+		http.Error(w, "gateway disabled", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodDelete {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/tabs/")
+	if id == "" {
+		http.Error(w, "missing tab id", http.StatusBadRequest)
+		return
+	}
+	clientID := s.ensureClientID(w, r)
+	tab, err := s.tabStore.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, tabs.ErrNotFound) {
+			http.Error(w, "tab not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("load tab: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if tab.ClientID != clientID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := s.tabManager.CloseTab(r.Context(), id); err != nil {
+		if errors.Is(err, tabs.ErrNotFound) {
+			http.Error(w, "tab not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("close tab: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+	s.broadcastTabDelete(clientID, id)
+}
+
+func (s *server) handleTabEvents(w http.ResponseWriter, r *http.Request) {
+	if s.tabManager == nil || s.tabStore == nil {
+		http.Error(w, "gateway disabled", http.StatusNotFound)
+		return
+	}
+	if websocket.IsWebSocketUpgrade(r) {
+		s.handleTabEventsWS(w, r)
+		return
+	}
+	s.handleTabEventsSSE(w, r)
+}
+
+func (s *server) handleTabEventsWS(w http.ResponseWriter, r *http.Request) {
+	clientID := s.ensureClientID(w, r)
+	remoteAddr := r.RemoteAddr
+
+	log.Printf("[TabEvents %s] Connection attempt from %s", clientID, remoteAddr)
+
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("[TabEvents %s] Upgrade failed: %v", clientID, err)
+		http.Error(w, fmt.Sprintf("upgrade: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		conn.Close()
+		log.Printf("[TabEvents %s] Connection closed", clientID)
+	}()
+
+	log.Printf("[TabEvents %s] Connection established", clientID)
+
+	ch := s.subscribeTabEvents(clientID)
+	defer s.unsubscribeTabEvents(clientID, ch)
+	s.broadcastTabSnapshot(clientID)
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("[TabEvents %s] Context cancelled", clientID)
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				log.Printf("[TabEvents %s] Channel closed", clientID)
+				return
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				log.Printf("[TabEvents %s] Write error: %v", clientID, err)
+				return
+			}
+		}
+	}
+}
+
+func (s *server) handleTabEventsSSE(w http.ResponseWriter, r *http.Request) {
+	clientID := s.ensureClientID(w, r)
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	ch := s.subscribeTabEvents(clientID)
+	defer s.unsubscribeTabEvents(clientID, ch)
+	s.broadcastTabSnapshot(clientID)
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			if _, err := w.Write([]byte("data: ")); err != nil {
+				return
+			}
+			if _, err := w.Write(msg); err != nil {
+				return
+			}
+			if _, err := w.Write([]byte("\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func (s *server) handleTabStatusUpdate(tab tabs.Tab) {
+	s.broadcastTabUpdate(tab)
+}
+
+func (s *server) ensureClientID(w http.ResponseWriter, r *http.Request) string {
+	if c, err := r.Cookie(clientCookieName); err == nil && c.Value != "" {
+		return c.Value
+	}
+	id := uuid.NewString()
+	http.SetCookie(w, &http.Cookie{
+		Name:     clientCookieName,
+		Value:    id,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int((365 * 24 * time.Hour) / time.Second),
+	})
+	return id
+}
+
+func wsScheme(r *http.Request) string {
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return "wss"
+	}
+	return "ws"
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func (s *server) subscribeTabEvents(clientID string) chan []byte {
+	s.tabSubsMu.Lock()
+	defer s.tabSubsMu.Unlock()
+	ch := make(chan []byte, 8)
+	if s.tabSubs == nil {
+		s.tabSubs = make(map[string]map[chan []byte]struct{})
+	}
+	if s.tabSubs[clientID] == nil {
+		s.tabSubs[clientID] = make(map[chan []byte]struct{})
+	}
+	s.tabSubs[clientID][ch] = struct{}{}
+	return ch
+}
+
+func (s *server) unsubscribeTabEvents(clientID string, ch chan []byte) {
+	s.tabSubsMu.Lock()
+	defer s.tabSubsMu.Unlock()
+	if subs, ok := s.tabSubs[clientID]; ok {
+		delete(subs, ch)
+		if len(subs) == 0 {
+			delete(s.tabSubs, clientID)
+		}
+	}
+	close(ch)
+}
+
+func (s *server) broadcastTabSnapshot(clientID string) {
+	if s.tabStore == nil {
+		return
+	}
+	tabsList, err := s.tabStore.ListByClient(context.Background(), clientID, 50)
+	if err != nil {
+		log.Printf("gateway: list tabs snapshot: %v", err)
+		return
+	}
+	s.sendTabEvent(clientID, map[string]any{"type": "snapshot", "tabs": tabsList})
+}
+
+func (s *server) broadcastTabUpdate(tab tabs.Tab) {
+	s.sendTabEvent(tab.ClientID, map[string]any{"type": "update", "tab": tab})
+}
+
+func (s *server) broadcastTabDelete(clientID, tabID string) {
+	s.sendTabEvent(clientID, map[string]any{"type": "delete", "tabId": tabID})
+}
+
+func (s *server) sendTabEvent(clientID string, payload any) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	s.tabSubsMu.Lock()
+	subs := s.tabSubs[clientID]
+	s.tabSubsMu.Unlock()
+	for ch := range subs {
+		select {
+		case ch <- data:
+		default:
+		}
+	}
+}
+
 func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	remoteAddr := r.RemoteAddr
+	connID := fmt.Sprintf("%s-%d", remoteAddr, time.Now().UnixNano())
+
+	log.Printf("[WS %s] Connection attempt from %s", connID, remoteAddr)
 
 	// Ensure PTY exists
 	if err := s.initPTY(ctx); err != nil {
+		log.Printf("[WS %s] PTY init failed: %v", connID, err)
 		http.Error(w, fmt.Sprintf("PTY unavailable: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		log.Printf("[WS %s] Upgrade failed: %v", connID, err)
 		http.Error(w, fmt.Sprintf("upgrade: %v", err), http.StatusInternalServerError)
 		return
 	}
-	defer conn.Close()
+	defer func() {
+		conn.Close()
+		log.Printf("[WS %s] Connection closed", connID)
+	}()
+
+	log.Printf("[WS %s] Connection established", connID)
 
 	// Get PTY reference
 	s.mu.RLock()
@@ -231,8 +597,12 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
-			if !websocket.IsCloseError(err, websocket.CloseNormalClosure) && !errors.Is(err, io.EOF) {
-				log.Printf("ws read error: %v", err)
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				log.Printf("[WS %s] Client closed connection normally", connID)
+			} else if errors.Is(err, io.EOF) {
+				log.Printf("[WS %s] Connection EOF", connID)
+			} else {
+				log.Printf("[WS %s] Read error: %v", connID, err)
 			}
 			return
 		}
@@ -244,17 +614,21 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 				Rows uint16 `json:"rows"`
 			}
 			if err := json.Unmarshal(data, &msg); err != nil {
+				log.Printf("[WS %s] Invalid JSON message: %v", connID, err)
 				continue
 			}
 			switch msg.Type {
 			case "resize":
 				if msg.Cols > 0 && msg.Rows > 0 {
 					if err := pty.Setsize(ps.ptmx, &pty.Winsize{Cols: msg.Cols, Rows: msg.Rows}); err != nil {
-						log.Printf("pty resize error: %v", err)
+						log.Printf("[WS %s] PTY resize error: %v", connID, err)
 					}
 				}
 			case "ping":
-				// no-op keepalive
+				// Send pong response to keep connection alive
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"pong"}`)); err != nil {
+					log.Printf("[WS %s] Pong write error: %v", connID, err)
+				}
 			}
 			continue
 		}
@@ -320,7 +694,7 @@ func (s *server) initPTY(ctx context.Context) error {
 		createdAt:     time.Now(),
 		clients:       make(map[*websocket.Conn]bool),
 		outputBuffer:  make([]byte, 0, 65536), // Pre-allocate 64KB capacity
-		bufferMaxSize: 65536,                   // 64KB max buffer size
+		bufferMaxSize: 65536,                  // 64KB max buffer size
 	}
 
 	// Optional: setup logging to database
@@ -449,7 +823,6 @@ func (ps *ptySession) broadcastClose() {
 		conn.Close()
 	}
 }
-
 
 type wsWriter struct {
 	conn *websocket.Conn

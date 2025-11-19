@@ -1,0 +1,12 @@
+{{- if and .Values.gateway.enabled .Values.gateway.catalog.inline }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kubetty.fullname" . }}-catalog
+  labels:
+    app.kubernetes.io/name: {{ include "kubetty.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  {{ default "projects.yaml" .Values.gateway.catalog.fileName }}: |
+{{ .Values.gateway.catalog.inline | indent 4 }}
+{{- end }}

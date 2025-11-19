@@ -5,12 +5,15 @@ import '@xterm/xterm/css/xterm.css';
 
 type Props = {
   onReconnect?: () => void;
+  wsUrl?: string;
+  isFocused?: boolean;
+  externalStatus?: 'connecting' | 'connected' | 'reconnecting' | 'closed';
 };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const TerminalView = ({ onReconnect }: Props) => {
+const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: Props) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -22,6 +25,7 @@ const TerminalView = ({ onReconnect }: Props) => {
   const [retrySignal, setRetrySignal] = useState(0);
   const pingTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const connectedOnceRef = useRef(false);
+  const reconnectAttempts = useRef(0);
 
   useEffect(() => {
     const term = new Terminal({
@@ -61,11 +65,15 @@ const TerminalView = ({ onReconnect }: Props) => {
       return;
     }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${protocol}://${window.location.host}/ws`;
+    const targetUrl = wsUrl || (() => {
+      const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      return `${protocol}://${window.location.host}/ws`;
+    })();
+
+    console.log(`[WS] Connecting to ${targetUrl} (attempt ${reconnectAttempts.current + 1})`);
 
     socketRef.current?.close();
-    const socket = new WebSocket(url);
+    const socket = new WebSocket(targetUrl);
     socket.binaryType = 'arraybuffer';
     socketRef.current = socket;
     setStatus('Connecting…');
@@ -74,6 +82,8 @@ const TerminalView = ({ onReconnect }: Props) => {
     socket.onopen = () => {
       const wasReconnecting = connectedOnceRef.current;
       connectedOnceRef.current = true;
+      reconnectAttempts.current = 0; // Reset on successful connection
+      console.log(`[WS] Connected successfully (reconnect: ${wasReconnecting})`);
       setStatus(wasReconnecting ? 'Reconnected' : 'Connected');
       if (wasReconnecting && onReconnect) {
         onReconnect();
@@ -82,18 +92,26 @@ const TerminalView = ({ onReconnect }: Props) => {
       notifyResize();
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event) => {
+      console.log(`[WS] Connection closed: code=${event.code}, reason=${event.reason || 'none'}, wasClean=${event.wasClean}`);
       setStatus('Disconnected');
       pingTimer.current && clearInterval(pingTimer.current);
       if (!closingRef.current) {
+        // Exponential backoff: 1s, 2s, 4s, 8s, max 16s
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 16000);
+        reconnectAttempts.current++;
+        console.log(`[WS] Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempts.current})`);
         reconnectTimer.current = setTimeout(() => {
           setRetrySignal((prev) => prev + 1);
-        }, 3000);
+        }, delay);
         setStatus('Reconnecting…');
       }
     };
 
-    socket.onerror = () => setStatus('Error');
+    socket.onerror = (event) => {
+      console.error('[WS] Connection error:', event);
+      setStatus('Error');
+    };
 
     socket.onmessage = (event) => {
       const payload = event.data instanceof ArrayBuffer ? decoder.decode(event.data) : String(event.data);
@@ -111,15 +129,23 @@ const TerminalView = ({ onReconnect }: Props) => {
     pingTimer.current = setInterval(() => {
       if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
         socketRef.current.send(JSON.stringify({ type: 'ping' }));
+      } else {
+        console.log(`[WS] Ping skipped - socket state: ${socketRef.current?.readyState}`);
       }
-    }, 15000);
+    }, 10000); // Reduced from 15s to 10s for faster dead connection detection
 
     return () => {
       closingRef.current = true;
       pingTimer.current && clearInterval(pingTimer.current);
       socket.close();
     };
-  }, [retrySignal, onReconnect]);
+  }, [retrySignal, onReconnect, wsUrl]);
+
+  useEffect(() => {
+    if (isFocused) {
+      termRef.current?.focus();
+    }
+  }, [isFocused]);
 
   const notifyResize = () => {
     const socket = socketRef.current;
@@ -135,12 +161,15 @@ const TerminalView = ({ onReconnect }: Props) => {
 
   const isConnecting = status === 'Connecting…' || status === 'Reconnecting…';
 
+  const extOverlay = externalStatus && externalStatus !== 'connected';
+  const externalLabel = externalStatus ? externalStatusDisplay(externalStatus) : null;
+
   return (
     <div className="terminal-container" ref={containerRef}>
-      {isConnecting && (
+      {(isConnecting || extOverlay) && (
         <div className="connection-overlay">
           <div className="spinner"></div>
-          <div className="connection-message">{status}</div>
+          <div className="connection-message">{extOverlay && externalLabel ? externalLabel : status}</div>
         </div>
       )}
       <div
@@ -156,10 +185,23 @@ const TerminalView = ({ onReconnect }: Props) => {
           zIndex: 1
         }}
       >
-        {status}
+        {externalLabel || status}
       </div>
     </div>
   );
+};
+
+const externalStatusDisplay = (value: Props['externalStatus']) => {
+  switch (value) {
+    case 'connecting':
+      return 'Connecting…';
+    case 'reconnecting':
+      return 'Reconnecting…';
+    case 'closed':
+      return 'Disconnected';
+    default:
+      return 'Connected';
+  }
 };
 
 export default TerminalView;

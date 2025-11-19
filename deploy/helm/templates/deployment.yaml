@@ -50,18 +50,40 @@ spec:
         - name: {{ . }}
 {{- end }}
       {{- end }}
-{{- if .Values.homePVC.enabled }}
+      {{- if .Values.dataPVC.enabled }}
       initContainers:
-        - name: fix-home-perms
+        - name: init-permissions
           image: ubuntu:22.04
-          command: ["/bin/bash","-c","chown -R 1000:1000 /home/mmattox || true"]
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              if ! getent group mmattox >/dev/null; then
+                groupadd -g 1000 mmattox
+              fi
+              if ! id -u mmattox >/dev/null 2>&1; then
+                useradd -u 1000 -g mmattox -M -s /usr/sbin/nologin mmattox
+              fi
+{{- if .Values.dataPVC.subPaths }}
+{{- range $mount := .Values.dataPVC.subPaths }}
+{{- $subPathName := default (regexReplaceAll "[^A-Za-z0-9-]+" (default "root" (trimPrefix "/" $mount.path)) "-") $mount.subPath }}
+{{- $mountPath := default "/" $mount.path }}
+              mkdir -p /data/{{ $subPathName }}
+{{- if hasPrefix "/home" $mountPath }}
+              mkdir -p /data/{{ $subPathName }}/mmattox
+{{- end }}
+              chown -R mmattox:mmattox /data/{{ $subPathName }}
+{{- end }}
+{{- end }}
           securityContext:
             runAsUser: 0
           volumeMounts:
-            - name: home
-              mountPath: /home/mmattox
-{{- end }}
+            - name: data
+              mountPath: /data
+      {{- end }}
       containers:
+{{- if .Values.pipelines.dind.enabled }}
         - name: docker
           image: docker:24.0.5-dind
           securityContext:
@@ -77,9 +99,14 @@ spec:
               mountPath: /var/lib/docker
             - name: dind-sock
               mountPath: /var/run/docker
+{{- end }}
         - name: kubetty
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+{{- $gatewayEnabled := .Values.gateway.enabled | default false }}
+{{- $catalogMountPath := default "/etc/kubetty" .Values.gateway.catalog.mountPath }}
+{{- $catalogFile := default "projects.yaml" .Values.gateway.catalog.fileName }}
+{{- $catalogFullPath := printf "%s/%s" $catalogMountPath $catalogFile }}
           env:
             - name: POD_IP
               valueFrom:
@@ -97,6 +124,10 @@ spec:
               value: {{ .Values.env.nodeOptions | quote }}
             - name: CLAUDE_CONFIG_DIR
               value: {{ .Values.env.claudeConfigDir | quote }}
+{{- if and $gatewayEnabled (or .Values.gateway.catalog.inline .Values.gateway.catalog.existingConfigMap) }}
+            - name: PROJECT_CATALOG_PATH
+              value: {{ $catalogFullPath | quote }}
+{{- end }}
             - name: CNPG_HOST
               value: {{ .Values.cnpg.host | quote }}
             - name: CNPG_PORT
@@ -113,8 +144,10 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.cnpg.userSecret }}
                   key: {{ .Values.cnpg.passwordKey }}
+{{- if .Values.pipelines.dind.enabled }}
             - name: DOCKER_HOST
               value: unix:///var/run/docker/docker.sock
+{{- end }}
           envFrom:
             - secretRef:
                 name: env-secrets
@@ -122,22 +155,39 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
-{{- if .Values.homePVC.enabled }}
           volumeMounts:
-            - name: home
-              mountPath: /home/mmattox
-{{- end }}
-          volumeMounts:
+{{- if .Values.pipelines.dind.enabled }}
             - name: dind-sock
               mountPath: /var/run/docker
+{{- end }}
+{{- if and $gatewayEnabled (or .Values.gateway.catalog.inline .Values.gateway.catalog.existingConfigMap) }}
+            - name: gateway-catalog
+              mountPath: {{ $catalogMountPath }}
+              readOnly: true
+{{- end }}
+{{- if and .Values.dataPVC.enabled .Values.dataPVC.subPaths }}
+{{- range $mount := .Values.dataPVC.subPaths }}
+{{- $subPathName := default (regexReplaceAll "[^A-Za-z0-9-]+" (default "root" (trimPrefix "/" $mount.path)) "-") $mount.subPath }}
+            - name: data
+              mountPath: {{ $mount.path }}
+              subPath: {{ $subPathName }}
+{{- end }}
+{{- end }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
       volumes:
-      {{- if .Values.homePVC.enabled }}
-        - name: home
+      {{- if .Values.dataPVC.enabled }}
+        - name: data
           persistentVolumeClaim:
-            claimName: {{ if .Values.homePVC.create }}{{ default (printf "%s-home" (include "kubetty.fullname" .)) .Values.homePVC.name }}{{ else }}{{ .Values.homePVC.existingClaim | quote }}{{ end }}
+            claimName: {{ if .Values.dataPVC.create }}{{ default (printf "%s-data" (include "kubetty.fullname" .)) .Values.dataPVC.name }}{{ else }}{{ .Values.dataPVC.existingClaim | quote }}{{ end }}
       {{- end }}
+      {{- if .Values.pipelines.dind.enabled }}
         - name: dind-storage
           emptyDir: {}
         - name: dind-sock
           emptyDir: {}
+      {{- end }}
+{{- if and $gatewayEnabled (or .Values.gateway.catalog.inline .Values.gateway.catalog.existingConfigMap) }}
+        - name: gateway-catalog
+          configMap:
+            name: {{ if .Values.gateway.catalog.existingConfigMap }}{{ .Values.gateway.catalog.existingConfigMap }}{{ else }}{{ include "kubetty.fullname" . }}-catalog{{ end }}
+{{- end }}

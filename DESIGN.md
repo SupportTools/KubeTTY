@@ -208,7 +208,224 @@ No tokens, no login, no HTTPS (unless behind ingress); ingress basic auth is int
 
 ---
 
-## 5. File Structure
+## 5. Multi-Project Gateway Mode
+
+The single-session deployment model remains the default, but we also need a "hub" experience where https://kubetty.support.tools exposes a tabbed UI and fans out to multiple project-specific pods that keep their own PTY/process space. This section covers that additional architecture.
+
+### 5.1 Motivation & Constraints
+
+* Each project already runs its own KubeTTY pod (and usually its own namespace) with local tooling and state we do not want to co-mingle.
+* Engineers want to jump between projects through one browser tab and spawn multiple shells at once.
+* `kubectl exec`/`pods/exec` is **not** acceptable for the hub because the Kubernetes API server throttles long-running streams; we need stable, low-latency tunnels that can stay up for hours.
+
+### 5.2 High-Level Architecture
+
+```
+Browser (tabbed UI)
+     |
+     | wss://kubetty.support.tools/ws?tab=<id>
+     v
+Gateway Pod (shared namespace)
+     |
+     | (cluster-internal WebSocket relay)
+     v
+Project Pods (one per namespace, each exposing /ws via ClusterIP Service)
+```
+
+*Gateway responsibilities*
+
+1. Serve the React bundle and tab UX.
+2. Host REST APIs: `/api/projects`, `/api/tabs`, `/api/health`.
+3. Maintain a catalog of known projects (either static config or discovery via labels/annotations) including namespace + Service DNS for their `/ws` endpoint.
+4. For every open browser tab, hold a downstream WebSocket to the selected project service and relay frames between the browser and downstream PTY. No PTY is created in the gateway itself.
+5. Track per-tab state (project ID, downstream status, retries, metrics) in memory and optionally in CNPG so reconnects survive gateway restarts.
+
+*Project pod responsibilities*
+
+1. Continue to run the existing single-session server (PTY, CNPG logs, local toolchain).
+2. Publish `/ws` via a Service that only the gateway namespace can reach (enforced by NetworkPolicy).
+3. Optionally expose readiness probes that the gateway can poll for health information.
+
+### 5.3 Connection Lifecycle
+
+1. User clicks "+" in the tab bar; the UI fetches `/api/projects` to list options.
+2. UI POSTs `/api/tabs` with `{ projectId }`. Gateway validates the ID, resolves the service (e.g., `http://kubetty-proj-a.kubetty-proj-a.svc:8080/ws`), opens a downstream WebSocket, and records a new `tabId`.
+3. Browser opens `wss://gateway/ws?tab=<tabId>`; gateway simply proxies frames. Resize/ping payloads remain unchanged because the downstream pods are unaware of the gateway.
+4. If the downstream connection drops, the gateway emits a structured event to the browser so the tab can show "Reconnecting…" and optionally trigger a retry on behalf of the user.
+5. Closing a tab tears down the downstream WebSocket and marks the tab as closed, freeing resources.
+
+### 5.4 Tabbed UI Enhancements
+
+* New React components manage tab state, persistence (localStorage), and a `ProjectPicker` modal.
+* Each `<TerminalView>` instance receives its own `tabId` + status, keeping the existing reconnect/ping logic isolated per tab.
+* Visual indicators show which project a tab targets (namespace badge, icon, etc.).
+
+### 5.5 Observability & Security
+
+* Metrics: gateway exports per-project tab counts, downstream latency, error ratios, and reconnect counts.
+* Logging: every tab open/close includes project ID, namespace, and downstream pod for auditing.
+* Security: gateway ServiceAccount only needs network access (enforced via NetworkPolicy) rather than `pods/exec`. Any future auth (mTLS, header token) is centralized at the gateway.
+
+### 5.6 Implementation Checklist
+
+1. **Config plumbing** – extend `config.Config` with a `Projects` list sourced from env var or mounted YAML.
+2. **Gateway server** – add `/api/projects` + `/api/tabs` handlers, downstream WebSocket dialer, connection registry, and metrics.
+3. **React tab UX** – tab reducer, picker modal, multi-`TerminalView` layout, and Vitest coverage.
+4. **Project services** – ensure each project pod exposes `/ws` via ClusterIP and that NetworkPolicies allow only the gateway namespace.
+5. **Docs & ops** – update README/Helm notes about onboarding a new project (add entry to catalog, ensure Service DNS, redeploy gateway).
+
+### 5.7 Configuration Schema
+
+Gateway pods mount a ConfigMap or secret-backed file, e.g. `projects.yaml`:
+
+```yaml
+projects:
+  - id: kubetty-ai
+    displayName: "AI Platform"
+    namespace: kubetty-ai
+    service: kubetty-ai-kubetty
+    port: 8080
+    description: "Claude tooling & infra pods"
+    icon: ai
+    tags: ["beta", "llm"]
+    healthCheckPath: /healthz      # optional HTTP probe
+    maxTabsPerUser: 4              # optional overrides
+```
+
+Rules:
+
+* `id` must be DNS-safe; used in URLs and metrics labels.
+* `service` resolves to `<service>.<namespace>.svc`. `port` defaults to 8080.
+* Optional overrides (shell, env vars) can be added later. Config loader merges defaults with per-project overrides.
+* Config reload: simplest is restart-on-change, but we can watch the file and hot-reload with a RWMutex.
+
+### 5.8 API Contracts
+
+* `GET /api/projects` → `{ projects: ProjectSummary[] }`, where each summary includes health info (`status: online|degraded|offline`, `lastCheckedAt`).
+* `POST /api/tabs` with `{ projectId, title? }` → `{ tabId, projectId, wsUrl }` (browser still connects via `/ws`, but `wsUrl` helps future native clients).
+* `GET /api/tabs` → list of open tabs scoped to the current browser (identified via cookie/short-lived token) or to the deployment.
+* `DELETE /api/tabs/{tabId}` closes the tunnel.
+* `WS /ws?tab=<tabId>` – binary data is passthrough PTY bytes; text frames use JSON for control events:
+  * `{ "type": "status", "state": "connecting" | "connected" | "reconnecting" | "closed", "reason"?: string }
+  * `{ "type": "project-status", "status": "offline", "projectId": "kubetty-ai" }`
+
+### 5.9 Failure Handling
+
+* Downstream connect failure → immediate structured status event; UI shows retry button.
+* Gateway retries with exponential backoff (e.g., 1s, 2s, 5s, 10s, capped) while user keeps tab open.
+* If the downstream pod restarts, gateway detects `CloseAbnormalClosure` or EOF and triggers the retry loop.
+* Idle timeout: configurable `TAB_IDLE_TIMEOUT` (default 2h). Gateway closes idle tunnels and notifies UI.
+* Max tabs per user/project: enforce limits to protect downstream resources; respond with HTTP 429 + reason.
+
+### 5.10 Persistence & Identity
+
+* Tabs are keyed by UUIDv4. For now, identity is just a client-generated cookie (e.g., `kubetty_client=<uuid>`). Later we can integrate with real auth.
+* Store `{ tab_id, project_id, client_id, created_at, last_seen_at, status }` in CNPG; reuse `sessions` schema or create `gateway_tabs` for clarity.
+* On gateway restart, reload open tabs from CNPG, attempt to re-establish downstream connections, and emit status events so browsers can reattach.
+
+### 5.11 Metrics & Alerting
+
+* Counters: `gateway_tabs_open{project="kubetty-ai"}`, `gateway_tab_spawns_total`, `gateway_downstream_retries_total`.
+* Histograms: downstream connection latency, bytes transferred per tab.
+* Alerts:
+  * Project offline for >5 minutes.
+  * Tab spawn failures >5 within 1 minute.
+  * Gateway memory usage nearing limits (since each downstream WS consumes buffers).
+
+### 5.12 Security Notes
+
+* NetworkPolicy ensures only gateway namespace → project namespace traffic on port 8080.
+* Consider mutual TLS between gateway and project pods (optional) by issuing shared certificates.
+* Audit logs record `{ timestamp, clientId, tabId, projectId, action }` for compliance.
+
+### 5.13 Data Model & Persistence
+
+**Projects** (in-memory, config-driven)
+
+```go
+type Project struct {
+    ID            string
+    DisplayName   string
+    Namespace     string
+    Service       string
+    Port          int
+    Description   string
+    Icon          string
+    Tags          []string
+    HealthCheck   *HealthConfig
+    Limits        ProjectLimits
+}
+```
+
+**Tabs** (persisted in CNPG)
+
+| Column         | Type        | Notes                                      |
+|----------------|-------------|--------------------------------------------|
+| tab_id         | UUID PK     | Generated by gateway                       |
+| project_id     | TEXT        | FK to configured project                   |
+| client_id      | TEXT        | Opaque browser identifier                  |
+| status         | TEXT        | `connecting`/`connected`/`reconnecting`    |
+| created_at     | TIMESTAMPTZ |                                            |
+| updated_at     | TIMESTAMPTZ | refreshed on activity                      |
+| last_error     | TEXT        | most recent failure reason                 |
+| downstream_uri | TEXT        | cached Service endpoint (for debugging)    |
+
+Add migration `0003_gateway_tabs` with indexes on `(project_id)` and `(client_id)`.
+
+### 5.14 Package Layout (Gateway)
+
+```
+server/
+  internal/
+    gateway/
+      config/        # load & validate projects catalog
+      relay/         # downstream WS dialer + lifecycle
+      tabs/          # persistence & business logic
+    api/
+      projects.go    # /api/projects handler
+      tabs.go        # /api/tabs CRUD
+      ws.go          # WS proxy handler
+```
+
+Each relay instance owns two goroutines (read/write) with contexts for cancellation.
+
+### 5.15 Sequence Diagrams
+
+**Tab Creation**
+
+1. Browser POST `/api/tabs` with `{ projectId }`.
+2. Gateway validates limits, persists `tab` row (status `connecting`).
+3. Gateway dials downstream `/ws`; on success updates status → `connected` and replies `{ tabId }`.
+4. Browser opens `wss://gateway/ws?tab=<tabId>`; gateway joins read/write pumps immediately, sending buffered data if downstream already producing output.
+
+**Reconnect**
+
+1. Browser loses socket; `TerminalView` retries and reopens `wss://.../ws?tab=<id>`.
+2. Gateway verifies client ownership (via cookie header) before attaching; if mismatch, respond 403.
+3. Downstream connection reused if still alive; otherwise gateway attempts to re-dial before confirming to browser (emitting status events meanwhile).
+
+**Project Pod Restart**
+
+1. Downstream `/ws` closes (CloseAbnormalClosure).
+2. Relay sets tab status `reconnecting`, notifies browsers, and enters retry loop.
+3. When downstream `/ws` is reachable again, relay swaps the connection and emits `connected` status; PTY output resumes.
+
+### 5.16 Scaling Considerations
+
+* Each tab consumes ~a few goroutines + buffers; cap max tabs per gateway pod (e.g., 100) and use HPA for load.
+* For HA, run ≥2 gateway replicas; use sticky cookies so browsers stay attached to the same pod, or persist downstream connection info in Redis to allow shared ownership (future work).
+* If a project scales to multiple pods, consider adding a lightweight service within the namespace that multiplexes to the session pod, or extend the gateway to discover pods via labels and pick one dynamically.
+
+### 5.17 Runtime Configuration
+
+* `PROJECT_CATALOG_PATH` (env var) points to the mounted YAML/JSON catalog. When unset, gateway features are disabled and the app falls back to the legacy single-session mode.
+* Gateway stores tab metadata in the existing CNPG via the `gateway_tabs` table. Helm values should inject the same CNPG credentials as the project pods.
+* The server issues a `kubetty_client` cookie (opaque UUID) to associate tabs with a browser. Tabs are scoped per client; `/api/tabs` returns only rows for the requester.
+* `/api/tabs` responses include the tab metadata; the client computes the WebSocket URL as `wss://<host>/ws?tab=<id>`.
+
+---
+
+## 6. File Structure
 
 ```
 kube-tty/
@@ -244,7 +461,7 @@ scripts/
 
 ---
 
-## 6. Code Summary
+## 7. Code Summary
 
 ### Go backend
 
@@ -265,7 +482,7 @@ Include `scripts/claude_with_log.sh` in the image build to install the logging a
 
 ---
 
-## 7. Kubernetes Integration
+## 8. Kubernetes Integration
 
 * **Image build:** everything (Go binary, React build, CLI tools) is baked into a single image that engineers build locally and push to `harbor.support.tools/kubetty/<repo>:<tag>`.
 * **Helm release:** deployments are managed solely through a private Helm chart kept in this repo; no GitHub Actions or external registry integrations.
@@ -276,7 +493,7 @@ Include `scripts/claude_with_log.sh` in the image build to install the logging a
 
 ---
 
-## 8. Security Considerations
+## 9. Security Considerations
 
 ### Must have:
 
@@ -294,7 +511,7 @@ Include `scripts/claude_with_log.sh` in the image build to install the logging a
 
 ---
 
-## 9. Acceptance Criteria
+## 10. Acceptance Criteria
 
 An engineer is **finished** when:
 
@@ -326,7 +543,7 @@ An engineer is **finished** when:
 
 ---
 
-## 10. Extras for Phase 2 (optional but easy)
+## 11. Extras for Phase 2 (optional but easy)
 
 * Integrate tmux as the PTY backend for richer multi-window workflows.
 * Stream command transcripts into CNPG or object storage for searchable history/auditing.
@@ -336,7 +553,7 @@ An engineer is **finished** when:
 
 ---
 
-## 11. Deliverables to Engineer
+## 12. Deliverables to Engineer
 
 This doc and:
 

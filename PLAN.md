@@ -54,3 +54,48 @@
 4. `make docker-push IMAGE=... TAG=...` – pushes the image to Harbor once authenticated (`docker login harbor.support.tools`).
 5. `helm upgrade --install <release> deploy/helm -n <namespace> -f <values>` – deploys using the freshly pushed image, referencing CNPG secrets in `kubetty-shared`.
 - TODO: update DESIGN/README with session picker refresh behavior.
+
+---
+
+## 9. Multi-Project Gateway Implementation Plan
+
+1. **Gateway Configuration & Catalog**
+   - Define a `projects.yaml` (or `PROJECTS_JSON`) schema with `id`, `displayName`, `namespace`, `service`, `port`, and optional metadata (icon, description).
+   - Extend the Go config package to load and validate the catalog; add unit tests.
+   - Document how to onboard a new project (update ConfigMap + redeploy gateway).
+   - Implement hot-reload or config hash comparison to detect drift and emit metrics/logs when the catalog changes.
+
+2. **Downstream WebSocket Relay**
+   - Introduce a `relay` package that can dial `ws://<service>.<namespace>.svc:<port>/ws` with TLS support if needed.
+   - Manage lifecycle for each relay (connect, read/write pumps, retry with exponential backoff).
+   - Track metrics (latency, bytes, reconnect counts) per project.
+   - Handle backpressure to avoid unbounded buffering when the browser or downstream pod stalls.
+   - Capture structured events (connect, disconnect, retry) and surface them to both logs and `/api/tabs` consumers.
+
+3. **Gateway API Surface**
+   - Implement `/api/projects` (list) and `/api/tabs` (POST create, GET list, DELETE close) endpoints.
+   - Persist tab metadata in memory plus CNPG (reuse `sessions` table with new columns or add a `gateway_tabs` table) so browser reloads can resume.
+   - Add `/ws?tab=<id>` handler that enforces tab ownership, wires to the relay, and streams structured status events (connected, reconnecting, closed).
+   - Expose `/api/healthz` aggregating downstream status so SREs can monitor the gateway itself.
+   - Add migrations + DAO layer for the new `gateway_tabs` table; include unit tests.
+
+4. **React Tabbed UI**
+   - Build a `TabManager` component with reducer/actions for open tabs, focus changes, and persistence via `localStorage`.
+   - Create a `ProjectPicker` modal that calls `/api/projects` and handles empty/offline states.
+   - Update `TerminalView` to accept `wsUrl` + `tabId` props and to display project metadata (badge, status pill).
+   - Add Vitest/RTL coverage for tab reducer, picker, and reconnect messaging.
+   - Instrument analytics/logging hooks so backend can correlate client actions with server events.
+
+5. **Deployment & Security Hardening**
+   - Add a Helm chart (or extend the existing one) for the gateway deployment, mounting the project catalog and the CNPG creds the gateway needs for tab persistence.
+   - Author NetworkPolicies that only allow the gateway namespace to reach each project service.
+   - Expose Prometheus metrics + logs for per-project visibility; ensure log lines include tab and project IDs.
+   - Provide runbooks for rotating CNPG credentials and gateway certificates without downtime.
+   - Decide on sticky session strategy (cookie affinity vs. shared relay store) before scaling to multiple gateway replicas.
+
+6. **Validation & Runbook**
+   - Write an end-to-end validation script: open multiple tabs, verify each hits its project pod, simulate pod restarts, confirm reconnection works.
+   - Document troubleshooting steps (e.g., downstream pod offline, NetworkPolicy denies, catalog drift).
+   - Update DESIGN.md/README with the new architecture diagrams and operational guidance.
+   - Capture load-testing expectations (e.g., 20 concurrent tabs) and include soak test checklist.
+   - Add synthetic monitoring job that periodically opens a tab for each project to verify end-to-end connectivity.

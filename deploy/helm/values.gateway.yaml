@@ -1,0 +1,62 @@
+image:
+  repository: harbor.support.tools/kubetty/kubetty
+  tag: v0.4.0-rc8
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - harbor-supporttools
+
+namespace: kubetty-shared
+releaseName: kubetty-shared-gateway
+
+deploymentId: kubetty-gateway
+
+env:
+  sessionID: "11111111-2222-3333-4444-555555555555"
+  claudeMaxTokens: "64000"
+  anthropicBaseURL: "http://172.25.1.66:8080"
+  nodeOptions: "--max-old-space-size=32768"
+  claudeConfigDir: "/home/mmattox/.claude"
+  extra: {}
+
+gateway:
+  enabled: true
+  catalog:
+    inline: |
+      projects:
+        - id: beacon
+          displayName: "Beacon Support"
+          namespace: kubetty-beacon-support
+          service: kubetty-beacon-support-kubetty
+          port: 8080
+        # Add other project pods here
+    mountPath: /etc/kubetty
+    fileName: projects.yaml
+
+cnpg:
+  host: 172.28.58.5
+  port: 5432
+  database: kubetty
+  userSecret: kubetty-postgres-user
+  usernameKey: username
+  passwordKey: password
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: nginx
+  tlsSecret: star-support-tools-tls
+  hosts:
+    - host: kubetty.support.tools
+      path: /
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+pipelines:
+  dind:
+    enabled: false

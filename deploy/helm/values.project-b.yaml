@@ -1,0 +1,29 @@
+image:
+  repository: harbor.support.tools/kubetty/project-b
+  tag: v0.1.0
+
+namespace: kubetty-project-b
+releaseName: kubetty-project-b
+
+deploymentId: project-b
+
+env:
+  sessionID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  claudeMaxTokens: "64000"
+  anthropicBaseURL: "http://172.25.1.66:8080"
+  nodeOptions: "--max-old-space-size=32768"
+  claudeConfigDir: "/home/mmattox/.claude"
+  extra:
+    CLAUDE_EXTRA_FLAG: "1"
+
+cnpg:
+  host: 172.28.58.5
+  port: 5432
+  database: kubetty
+  userSecret: kubetty-shared-app
+  usernameKey: username
+  passwordKey: password
+
+service:
+  type: ClusterIP
+  port: 8080

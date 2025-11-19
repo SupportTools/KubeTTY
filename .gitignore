@@ -1,0 +1,17 @@
+# Build artifacts
+bin/
+server/ui/dist/
+
+# Node modules
+web/node_modules/
+web/dist/
+
+# Editor/system files
+.DS_Store
+*.swp
+
+# Secrets and sensitive files
+.bash_profile
+.bash_profile.secrets
+*.secrets.yaml
+values.*.secrets.yaml

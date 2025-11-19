@@ -1,0 +1,29 @@
+image:
+  repository: harbor.support.tools/kubetty/project-a
+  tag: v0.1.0
+
+namespace: kubetty-project-a
+releaseName: kubetty-project-a
+
+deploymentId: project-a
+
+env:
+  sessionID: "11111111-2222-3333-4444-555555555555"
+  claudeMaxTokens: "64000"
+  anthropicBaseURL: "http://172.25.1.66:8080"
+  nodeOptions: "--max-old-space-size=32768"
+  claudeConfigDir: "/home/mmattox/.claude"
+  extra:
+    GEMINI_API_BASE: "https://gemini.internal"
+
+cnpg:
+  host: 172.28.58.5
+  port: 5432
+  database: kubetty
+  userSecret: kubetty-shared-app
+  usernameKey: username
+  passwordKey: password
+
+service:
+  type: ClusterIP
+  port: 8080

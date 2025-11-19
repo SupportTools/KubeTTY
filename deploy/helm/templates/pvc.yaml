@@ -1,20 +1,21 @@
-{{- if and .Values.homePVC.enabled .Values.homePVC.create }}
+{{- if and .Values.dataPVC.enabled .Values.dataPVC.create }}
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ default (printf "%s-home" (include "kubetty.fullname" .)) .Values.homePVC.name }}
+  name: {{ default (printf "%s-data" (include "kubetty.fullname" .)) .Values.dataPVC.name }}
   labels:
     app.kubernetes.io/name: {{ include "kubetty.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
   accessModes:
-{{- range .Values.homePVC.accessModes }}
+{{- range .Values.dataPVC.accessModes }}
     - {{ . }}
 {{- end }}
   resources:
     requests:
-      storage: {{ .Values.homePVC.size }}
-  {{- if .Values.homePVC.storageClass }}
-  storageClassName: {{ .Values.homePVC.storageClass }}
+      storage: {{ .Values.dataPVC.size }}
+  {{- if .Values.dataPVC.storageClass }}
+  storageClassName: {{ .Values.dataPVC.storageClass }}
   {{- end }}
 {{- end }}

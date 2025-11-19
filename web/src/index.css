@@ -396,3 +396,158 @@ button.secondary {
   font-size: 0.85rem;
   color: #dfe6ff;
 }
+
+.tab-bar {
+  display: flex;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid #1f2024;
+  background: #0f1115;
+}
+
+.tab-list {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.tab-button {
+  background: #15171c;
+  border-radius: 6px;
+  padding: 0.35rem 0.75rem;
+  color: #d7dae7;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  border: 1px solid transparent;
+}
+
+.tab-button.active {
+  border-color: #3f7df4;
+  color: #fff;
+}
+
+.tab-button.add {
+  width: 32px;
+  justify-content: center;
+}
+
+.tab-label {
+  max-width: 140px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-close {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.tab-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.tab-status-connecting,
+.tab-status-reconnecting {
+  background: #f5a524;
+}
+
+.tab-status-connected {
+  background: #2fd07e;
+}
+
+.tab-status-closed {
+  background: #d9534f;
+}
+
+.tab-empty {
+  margin: auto;
+  text-align: center;
+  color: #b3b6c2;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.tab-empty button {
+  padding: 0.4rem 0.8rem;
+  border-radius: 6px;
+  background: #3f7df4;
+  color: white;
+}
+
+.project-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.project-picker {
+  width: 360px;
+  max-width: 90%;
+  background: #0f1115;
+  border: 1px solid #1f2024;
+  border-radius: 10px;
+  padding: 1rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
+.project-picker ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.project-option {
+  width: 100%;
+  background: #15171c;
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  color: #fff;
+  border: 1px solid transparent;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  text-align: left;
+}
+
+.project-option strong {
+  display: block;
+}
+
+.project-option p {
+  margin: 0;
+  color: #b1b5c6;
+  font-size: 0.85rem;
+}
+
+.picker-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.picker-header button {
+  background: transparent;
+  color: #fff;
+  font-size: 1.2rem;
+}
+
+.picker-empty {
+  color: #b0b3c4;
+  text-align: center;
+}

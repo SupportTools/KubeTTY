@@ -1,6 +1,6 @@
 image:
   repository: harbor.support.tools/kubetty/beacon-support
-  tag: v0.1.23
+  tag: v0.2.9-delayed-ps1
 
 imagePullSecrets:
   - harbor-supporttools
@@ -30,15 +30,22 @@ service:
   type: ClusterIP
   port: 8080
 
-homePVC:
+dataPVC:
   enabled: true
   create: true
   existingClaim: ""
-  name: mmattox-home
+  name: ""
   storageClass: longhorn
   accessModes:
     - ReadWriteOnce
-  size: 100Gi
+  size: 50Gi
+  subPaths:
+    - path: /opt
+      subPath: opt
+    - path: /home
+      subPath: home
+    - path: /usr/local/go
+      subPath: usr-local-go
 
 serviceAccount:
   create: true
@@ -62,3 +69,6 @@ ingress:
       path: /
   annotations:
     nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"

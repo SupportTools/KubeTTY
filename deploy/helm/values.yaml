@@ -15,6 +15,14 @@ env:
   claudeConfigDir: "/home/mmattox/.claude"
   extra: {}
 
+gateway:
+  enabled: false
+  catalog:
+    inline: "" # optional YAML content for projects.yaml
+    existingConfigMap: "" # alternative to inline; use existing ConfigMap name
+    mountPath: /etc/kubetty
+    fileName: projects.yaml
+
 cnpg:
   host: 172.28.58.5
   port: 5432
@@ -55,15 +63,22 @@ rbac:
   adminNamespaces: []
   readNamespaces: []
 
-homePVC:
+dataPVC:
   enabled: false
-  create: false
+  create: true
   existingClaim: ""
   name: ""
   storageClass: longhorn
   accessModes:
     - ReadWriteOnce
-  size: 20Gi
+  size: 50Gi
+  subPaths:
+    - path: /opt
+      subPath: opt
+    - path: /home
+      subPath: home
+    - path: /usr/local/go
+      subPath: usr-local-go
 
 ingress:
   enabled: false
@@ -72,7 +87,10 @@ ingress:
   hosts:
     - host: example-kubetty.support.tools
       path: /
-  annotations: {}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
 podAnnotations: {}
 
 prometheus:
@@ -101,3 +119,6 @@ prometheus:
     errorWindowMinutes: 30
     errorFor: 5m
     annotations: {}
+pipelines:
+  dind:
+    enabled: true

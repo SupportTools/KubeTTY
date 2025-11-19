@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/SessionLogsModal.tsx","./src/components/TerminalView.tsx"],"version":"5.9.3"}
+{"root":["./src/App.tsx","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/ProjectPicker.tsx","./src/components/SessionLogsModal.tsx","./src/components/TabBar.tsx","./src/components/TerminalView.tsx"],"version":"5.9.3"}

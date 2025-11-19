@@ -243,6 +243,44 @@ helm upgrade --install kubetty-project-b ./deploy/helm \
 
 Each deployment gets its own session UUID and maintains independent shell state.
 
+### Gateway Mode (Tabbed UI)
+
+To provide a single entrypoint (e.g., https://kubetty.support.tools) that fans out to multiple project pods, enable the **gateway** feature:
+
+1. Create a catalog file describing the downstream projects. Example `projects.yaml`:
+
+   ```yaml
+   projects:
+     - id: ai-dev
+       displayName: "AI Platform"
+       namespace: kubetty-ai
+       service: kubetty-ai-kubetty
+       port: 8080
+       description: "LLM tooling"
+     - id: infra
+       namespace: kubetty-infra
+       service: kubetty-infra-kubetty
+       port: 8080
+   ```
+
+2. Mount the file into the gateway deployment and set `PROJECT_CATALOG_PATH=/etc/kubetty/projects.yaml` (or similar) via Helm values.
+3. Deploy the gateway chart so it can reach each project Service (ClusterIP) over the cluster network. NetworkPolicies should allow only the gateway namespace to talk to those Services.
+4. When a user opens https://kubetty.support.tools they will see a tab bar with a `+` button. Each tab corresponds to one downstream project and the browser WebSocket `wss://…/ws?tab=<id>` is proxied through the gateway to the project pod’s `/ws` endpoint.
+
+Gateway APIs:
+
+| Method | Path            | Description                                     |
+| ------ | --------------- | ----------------------------------------------- |
+| GET    | `/api/projects` | Lists catalog entries (id, displayName, etc.).  |
+| GET    | `/api/tabs`     | Lists tabs owned by the current browser client. |
+| POST   | `/api/tabs`     | `{ "projectId": "ai-dev" }` → opens a new tab. |
+| DELETE | `/api/tabs/{id}`| Closes the tab/tunnel if owned by the client.   |
+| GET    | `/ws?tab=<id>`  | WebSocket endpoint for a specific tab.          |
+
+The server automatically mints an opaque `kubetty_client` cookie to associate tabs with a browser. Tabs persist in CNPG so reloads reconnect automatically, and the React UI polls `/api/tabs` every ~8 seconds to refresh status.
+
+If `PROJECT_CATALOG_PATH` is unset, the app behaves as before (single PTY, no tab bar).
+
 ## Troubleshooting
 
 ### Cannot connect to pod

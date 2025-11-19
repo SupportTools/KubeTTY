@@ -29,3 +29,28 @@ Key values in `values.yaml`:
 - `deploymentId`: label used when persisting sessions.
 
 See `values.project-a.yaml` as a template.
+
+## Gateway Mode (Tabbed UI)
+
+Deploying the shared “hub” instance only requires toggling the `gateway` values:
+
+```yaml
+gateway:
+  enabled: true
+  catalog:
+    inline: |
+      projects:
+        - id: ai-dev
+          displayName: "AI Platform"
+          namespace: kubetty-ai
+          service: kubetty-ai-kubetty
+          port: 8080
+    mountPath: /etc/kubetty
+    fileName: projects.yaml
+```
+
+- Setting `gateway.enabled=true` injects the `PROJECT_CATALOG_PATH` env var so the server boots in gateway mode.
+- Provide either `gateway.catalog.inline` (embedded YAML) or `gateway.catalog.existingConfigMap` (name of a pre-created ConfigMap). The chart mounts the config and points the server at the rendered file.
+- The catalog entries describe downstream releases (namespace + Service) that already run the standard KubeTTY pod.
+
+Once deployed, expose the gateway via ingress or port-forwarding; the React UI will show a tab bar with a `+` button to open shells for each configured project.

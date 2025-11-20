@@ -11,11 +11,13 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,16 +34,32 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/supporttools/KubeTTY/server/internal/auth"
 	"github.com/supporttools/KubeTTY/server/internal/config"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/manager"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
+	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 )
 
 //go:embed ui/dist ui/dist/*
 var embeddedUI embed.FS
 
-const clientCookieName = "kubetty_client"
+const (
+	clientCookieName       = "kubetty_client"
+	accessTokenCookieName  = "kubetty_access"
+	refreshTokenCookieName = "kubetty_refresh"
+)
+
+// Input validation limits
+const (
+	maxUsernameLength = 64
+	maxPTYCols        = 500
+	maxPTYRows        = 200
+)
+
+// usernameRegex allows only alphanumeric characters, underscores, and dashes
+var usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 func main() {
 	ctx := context.Background()
@@ -60,6 +78,24 @@ func main() {
 		log.Fatalf("connect cnpg: %v", err)
 	}
 	defer store.Close()
+
+	var (
+		authStore   *auth.PGStore
+		authManager *auth.Manager
+	)
+	if cfg.AuthMode == "local" {
+		authStore, err = auth.NewStore(ctx, cfg.ConnString())
+		if err != nil {
+			log.Fatalf("connect auth store: %v", err)
+		}
+		authManager, err = auth.NewManager(authStore, cfg.AuthJWTSecret, cfg.AuthIssuer, cfg.AuthAccessTTL, cfg.AuthRefreshTTL)
+		if err != nil {
+			log.Fatalf("init auth manager: %v", err)
+		}
+	}
+	if authStore != nil {
+		defer authStore.Close()
+	}
 
 	var (
 		tabStore   tabs.Store
@@ -90,8 +126,10 @@ func main() {
 	appMetrics := newAppMetrics()
 
 	srv := &server{
-		cfg:   cfg,
-		store: store,
+		cfg:       cfg,
+		store:     store,
+		authStore: authStore,
+		authMgr:   authManager,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -111,20 +149,42 @@ func main() {
 	go srv.runLogRetention(maintCtx)
 
 	mux := http.NewServeMux()
-	mux.Handle("/session/logs", srv.appMetrics.instrumentHandler("session_logs", http.HandlerFunc(srv.handleSessionLogs)))
-	mux.Handle("/ws", srv.appMetrics.instrumentHandler("ws", http.HandlerFunc(srv.handleWSRoute)))
-	mux.Handle("/api/projects", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if srv.tabManager == nil {
-			http.Error(w, "gateway disabled", http.StatusNotFound)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
-	}))
-	mux.Handle("/api/tabs", http.HandlerFunc(srv.handleTabs))
-	mux.Handle("/api/tabs/", http.HandlerFunc(srv.handleTabByID))
-	mux.Handle("/api/tabs/events", http.HandlerFunc(srv.handleTabEvents))
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.Handle("/debug/vars", expvar.Handler())
+	mux.Handle("/api/healthz", http.HandlerFunc(srv.handleHealthz))
+	if srv.authEnabled() {
+		mux.Handle("/api/auth/login", http.HandlerFunc(srv.handleAuthLogin))
+		mux.Handle("/api/auth/refresh", http.HandlerFunc(srv.handleAuthRefresh))
+		mux.Handle("/api/auth/logout", srv.requireAuth(http.HandlerFunc(srv.handleAuthLogout)))
+		mux.Handle("/api/auth/me", srv.requireAuth(http.HandlerFunc(srv.handleAuthMe)))
+		mux.Handle("/api/auth/password", srv.requireAuth(http.HandlerFunc(srv.handleAuthPasswordChange)))
+		mux.Handle("/session/logs", srv.requireAuth(http.HandlerFunc(srv.handleSessionLogs)))
+		mux.Handle("/ws", srv.requireAuth(http.HandlerFunc(srv.handleWSRoute)))
+		mux.Handle("/api/projects", srv.requireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if srv.tabManager == nil {
+				apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
+		})))
+		mux.Handle("/api/tabs", srv.requireAuth(http.HandlerFunc(srv.handleTabs)))
+		mux.Handle("/api/tabs/", srv.requireAuth(http.HandlerFunc(srv.handleTabByID)))
+		mux.Handle("/api/tabs/events", srv.requireAuth(http.HandlerFunc(srv.handleTabEvents)))
+	} else {
+		mux.Handle("/session/logs", srv.appMetrics.instrumentHandler("session_logs", http.HandlerFunc(srv.handleSessionLogs)))
+		mux.Handle("/ws", srv.appMetrics.instrumentHandler("ws", http.HandlerFunc(srv.handleWSRoute)))
+		mux.Handle("/api/projects", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if srv.tabManager == nil {
+				apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
+		}))
+		mux.Handle("/api/tabs", http.HandlerFunc(srv.handleTabs))
+		mux.Handle("/api/tabs/", http.HandlerFunc(srv.handleTabByID))
+		mux.Handle("/api/tabs/events", http.HandlerFunc(srv.handleTabEvents))
+	}
+	// Static files are always public (React handles auth state)
 	mux.Handle("/", srv.appMetrics.instrumentHandler("static", srv.staticHandler()))
 
 	httpSrv := &http.Server{
@@ -152,6 +212,8 @@ func main() {
 type server struct {
 	cfg        config.Config
 	store      sessions.Store
+	authStore  auth.Store
+	authMgr    *auth.Manager
 	upgrader   websocket.Upgrader
 	uiFS       fs.FS
 	metrics    *cleanupMetrics
@@ -163,6 +225,20 @@ type server struct {
 
 	mu  sync.RWMutex
 	pty *ptySession
+}
+
+type contextKey string
+
+const authUserContextKey contextKey = "kubettyAuthUser"
+
+var (
+	errAuthMissingToken = errors.New("authentication token missing")
+	errAuthDisabled     = errors.New("authentication disabled")
+)
+
+type authUser struct {
+	ID       uuid.UUID
+	Username string
 }
 
 type ptySession struct {
@@ -198,11 +274,413 @@ func (s *server) staticHandler() http.Handler {
 	})
 }
 
+func (s *server) authEnabled() bool {
+	return s != nil && s.cfg.AuthMode == "local" && s.authMgr != nil
+}
+
+func (s *server) requireAuth(next http.Handler) http.Handler {
+	if next == nil || !s.authEnabled() {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, err := s.authenticateRequest(r)
+		if err != nil {
+			s.handleAuthFailure(w, err)
+			return
+		}
+		ctx := context.WithValue(r.Context(), authUserContextKey, user)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (s *server) authenticateRequest(r *http.Request) (*authUser, error) {
+	if !s.authEnabled() {
+		return nil, errAuthDisabled
+	}
+	token := s.accessTokenFromRequest(r)
+	if token == "" {
+		return nil, errAuthMissingToken
+	}
+	claims, err := s.authMgr.ValidateAccessToken(token)
+	if err != nil {
+		return nil, err
+	}
+	userID, err := uuid.Parse(claims.Subject)
+	if err != nil {
+		return nil, auth.ErrTokenMalformed
+	}
+	return &authUser{ID: userID, Username: claims.Username}, nil
+}
+
+func authUserFromContext(ctx context.Context) *authUser {
+	if ctx == nil {
+		return nil
+	}
+	if v, ok := ctx.Value(authUserContextKey).(*authUser); ok {
+		return v
+	}
+	return nil
+}
+
+func (s *server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.authEnabled() {
+		apierrors.WriteError(w, apierrors.ServiceUnavailable("authentication disabled", ""))
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	if req.Username == "" || req.Password == "" {
+		apierrors.WriteError(w, apierrors.BadRequest("username and password required", ""))
+		return
+	}
+	if len(req.Username) > maxUsernameLength {
+		apierrors.WriteError(w, apierrors.BadRequest(
+			fmt.Sprintf("username must be %d characters or less", maxUsernameLength),
+			"",
+		))
+		return
+	}
+	if !usernameRegex.MatchString(req.Username) {
+		apierrors.WriteError(w, apierrors.BadRequest(
+			"username must contain only letters, numbers, underscores, and dashes",
+			"",
+		))
+		return
+	}
+	user, err := s.authMgr.Authenticate(r.Context(), req.Username, req.Password)
+	if err != nil {
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			apierrors.WriteError(w, apierrors.Unauthorized("invalid credentials", ""))
+			return
+		}
+		log.Printf("authentication error: %v", err)
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
+		return
+	}
+	meta := s.tokenMetadataFromRequest(r)
+	tokens, err := s.authMgr.IssueTokenPair(r.Context(), user, meta)
+	if err != nil {
+		log.Printf("issue tokens error: %v", err)
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
+		return
+	}
+	if s.authStore != nil {
+		if err := s.authStore.UpdateLastLogin(r.Context(), user.ID, time.Now()); err != nil {
+			log.Printf("warn: update last login: %v", err)
+		}
+	}
+	s.setAuthCookies(w, tokens)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":             map[string]any{"id": user.ID.String(), "username": user.Username},
+		"accessToken":      tokens.AccessToken,
+		"accessExpiresAt":  tokens.AccessExpiresAt,
+		"refreshExpiresAt": tokens.RefreshExpiresAt,
+	})
+}
+
+func (s *server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
+	if !s.authEnabled() {
+		apierrors.WriteError(w, apierrors.ServiceUnavailable("authentication disabled", ""))
+		return
+	}
+	var req struct {
+		RefreshToken string `json:"refreshToken"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
+		return
+	}
+	token := s.refreshTokenFromRequest(r, strings.TrimSpace(req.RefreshToken))
+	if token == "" {
+		apierrors.WriteError(w, apierrors.Unauthorized("refresh token required", ""))
+		return
+	}
+	meta := s.tokenMetadataFromRequest(r)
+	pair, err := s.authMgr.Refresh(r.Context(), token, meta)
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrTokenExpired):
+			apierrors.WriteError(w, apierrors.Unauthorized("refresh token expired", ""))
+		case errors.Is(err, auth.ErrTokenRevoked):
+			apierrors.WriteError(w, apierrors.Unauthorized("refresh token revoked", ""))
+		case errors.Is(err, auth.ErrInvalidCredentials):
+			apierrors.WriteError(w, apierrors.Unauthorized("account disabled", ""))
+		default:
+			log.Printf("refresh token error: %v", err)
+			apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
+		}
+		return
+	}
+	s.setAuthCookies(w, pair)
+	claims, err := s.authMgr.ValidateAccessToken(pair.AccessToken)
+	if err != nil {
+		log.Printf("validate access token error: %v", err)
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":             map[string]any{"id": claims.Subject, "username": claims.Username},
+		"accessToken":      pair.AccessToken,
+		"accessExpiresAt":  pair.AccessExpiresAt,
+		"refreshExpiresAt": pair.RefreshExpiresAt,
+	})
+}
+
+func (s *server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if !s.authEnabled() {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var req struct {
+		RefreshToken string `json:"refreshToken"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
+		return
+	}
+	token := s.refreshTokenFromRequest(r, strings.TrimSpace(req.RefreshToken))
+	if token != "" && s.authStore != nil {
+		if tokenID, _, err := auth.ParseRefreshToken(token); err == nil {
+			if err := s.authStore.RevokeRefreshToken(r.Context(), tokenID, time.Now()); err != nil && !errors.Is(err, auth.ErrRefreshTokenNotFound) {
+				log.Printf("warn: revoke refresh token: %v", err)
+			}
+		}
+	}
+	s.clearAuthCookies(w)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	user := authUserFromContext(r.Context())
+	if user == nil {
+		apierrors.WriteError(w, apierrors.Unauthorized("unauthorized", ""))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user": map[string]any{"id": user.ID.String(), "username": user.Username},
+	})
+}
+
+func (s *server) handleAuthPasswordChange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	user := authUserFromContext(r.Context())
+	if user == nil {
+		apierrors.WriteError(w, apierrors.Unauthorized("unauthorized", ""))
+		return
+	}
+
+	var req struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierrors.WriteError(w, apierrors.BadRequest("invalid request body", ""))
+		return
+	}
+
+	if req.CurrentPassword == "" || req.NewPassword == "" {
+		apierrors.WriteError(w, apierrors.BadRequest("current and new password are required", ""))
+		return
+	}
+
+	err := s.authMgr.ChangePassword(r.Context(), user.ID, req.CurrentPassword, req.NewPassword)
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrInvalidCredentials):
+			apierrors.WriteError(w, apierrors.Unauthorized("current password is incorrect", ""))
+		case errors.Is(err, auth.ErrWeakPassword):
+			apierrors.WriteError(w, apierrors.BadRequest(err.Error(), ""))
+		default:
+			log.Printf("password change error: %v", err)
+			apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
+		}
+		return
+	}
+
+	// Clear auth cookies since refresh tokens were revoked
+	s.clearAccessCookie(w)
+	s.clearRefreshCookie(w)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": "password changed successfully",
+	})
+}
+
+func (s *server) handleAuthFailure(w http.ResponseWriter, err error) {
+	var errResp apierrors.ErrorResponse
+	switch {
+	case errors.Is(err, errAuthMissingToken):
+		errResp = apierrors.Unauthorized("authentication required", "")
+	case errors.Is(err, auth.ErrTokenExpired):
+		errResp = apierrors.Unauthorized("token expired", "")
+	case errors.Is(err, auth.ErrTokenMalformed):
+		errResp = apierrors.Unauthorized("token malformed", "")
+	case errors.Is(err, errAuthDisabled):
+		errResp = apierrors.ServiceUnavailable("authentication disabled", "")
+	default:
+		if err != nil {
+			log.Printf("auth failure: %v", err)
+		}
+		errResp = apierrors.Unauthorized("unauthorized", "")
+	}
+	s.clearAccessCookie(w)
+	w.Header().Set("WWW-Authenticate", `Bearer realm="kubetty"`)
+	apierrors.WriteError(w, errResp)
+}
+
+func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	status := "healthy"
+	httpStatus := http.StatusOK
+	components := make(map[string]string)
+
+	// Check database connectivity
+	if s.store != nil {
+		if pgxStore, ok := s.store.(*sessions.PGXStore); ok {
+			if err := pgxStore.Ping(ctx); err != nil {
+				status = "unhealthy"
+				httpStatus = http.StatusServiceUnavailable
+				components["database"] = fmt.Sprintf("error: %v", err)
+			} else {
+				components["database"] = "ok"
+			}
+		} else {
+			components["database"] = "unknown"
+		}
+	} else {
+		components["database"] = "not_configured"
+	}
+
+	// Check PTY status
+	s.mu.RLock()
+	pty := s.pty
+	s.mu.RUnlock()
+	if pty != nil && pty.isAlive() {
+		components["pty"] = "ok"
+	} else if pty != nil {
+		components["pty"] = "not_running"
+	} else {
+		components["pty"] = "not_initialized"
+	}
+
+	writeJSON(w, httpStatus, map[string]any{
+		"status":     status,
+		"components": components,
+	})
+}
+
+func (s *server) tokenMetadataFromRequest(r *http.Request) auth.TokenMetadata {
+	return auth.TokenMetadata{
+		CreatedBy: r.Header.Get("X-Requested-By"),
+		UserAgent: r.UserAgent(),
+		ClientIP:  clientIPFromRequest(r),
+	}
+}
+
+func (s *server) accessTokenFromRequest(r *http.Request) string {
+	authz := r.Header.Get("Authorization")
+	if strings.HasPrefix(strings.ToLower(authz), "bearer ") {
+		return strings.TrimSpace(authz[7:])
+	}
+	if c, err := r.Cookie(accessTokenCookieName); err == nil && c.Value != "" {
+		return c.Value
+	}
+	return ""
+}
+
+func (s *server) refreshTokenFromRequest(r *http.Request, provided string) string {
+	if provided != "" {
+		return provided
+	}
+	if c, err := r.Cookie(refreshTokenCookieName); err == nil && c.Value != "" {
+		return c.Value
+	}
+	return ""
+}
+
+func (s *server) setAuthCookies(w http.ResponseWriter, pair *auth.TokenPair) {
+	if pair == nil {
+		return
+	}
+	http.SetCookie(w, s.cookieTemplate(accessTokenCookieName, pair.AccessToken, pair.AccessExpiresAt))
+	http.SetCookie(w, s.cookieTemplate(refreshTokenCookieName, pair.RefreshToken, pair.RefreshExpiresAt))
+}
+
+func (s *server) clearAuthCookies(w http.ResponseWriter) {
+	s.clearAccessCookie(w)
+	s.clearRefreshCookie(w)
+}
+
+func (s *server) clearAccessCookie(w http.ResponseWriter) {
+	c := s.cookieTemplate(accessTokenCookieName, "", time.Time{})
+	c.MaxAge = -1
+	c.Expires = time.Unix(0, 0)
+	http.SetCookie(w, c)
+}
+
+func (s *server) clearRefreshCookie(w http.ResponseWriter) {
+	c := s.cookieTemplate(refreshTokenCookieName, "", time.Time{})
+	c.MaxAge = -1
+	c.Expires = time.Unix(0, 0)
+	http.SetCookie(w, c)
+}
+
+func (s *server) cookieTemplate(name, value string, expires time.Time) *http.Cookie {
+	c := &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   s.cfg.AuthCookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	}
+	if s.cfg.AuthCookieDomain != "" {
+		c.Domain = s.cfg.AuthCookieDomain
+	}
+	if !expires.IsZero() {
+		c.Expires = expires
+		maxAge := int(time.Until(expires).Seconds())
+		if maxAge < 0 {
+			maxAge = 0
+		}
+		c.MaxAge = maxAge
+	}
+	return c
+}
+
+func clientIPFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
+		parts := strings.Split(xf, ",")
+		if len(parts) > 0 {
+			return strings.TrimSpace(parts[0])
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
 func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	sessionID := r.URL.Query().Get("session")
 	if sessionID == "" {
-		http.Error(w, "missing session parameter", http.StatusBadRequest)
+		apierrors.WriteError(w, apierrors.BadRequest("missing session parameter", ""))
 		return
 	}
 	limit := 200
@@ -221,7 +699,8 @@ func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
 	logs, err := s.store.ListLogs(ctx, sessionID, limit)
 	s.observeStore("ListLogs", start, err)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("list logs: %v", err), http.StatusInternalServerError)
+		log.Printf("list logs error: %v", err)
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 		return
 	}
 	if logs == nil {
@@ -233,7 +712,8 @@ func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("encode session logs response error: %v", err)
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 	}
 }
 
@@ -247,12 +727,12 @@ func (s *server) handleWSRoute(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) {
 	if s.tabManager == nil {
-		http.Error(w, "gateway disabled", http.StatusNotFound)
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 		return
 	}
 	tabID := r.URL.Query().Get("tab")
 	if tabID == "" {
-		http.Error(w, "missing tab parameter", http.StatusBadRequest)
+		apierrors.WriteError(w, apierrors.BadRequest("missing tab parameter", ""))
 		return
 	}
 	clientID := s.ensureClientID(w, r)
@@ -263,7 +743,7 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[GW %s] Upgrade failed: %v", tabID, err)
-		http.Error(w, fmt.Sprintf("upgrade: %v", err), http.StatusInternalServerError)
+		apierrors.WriteError(w, apierrors.InternalServerError("WebSocket upgrade failed", ""))
 		return
 	}
 	defer func() {
@@ -282,7 +762,7 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 
 func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 	if s.tabManager == nil || s.tabStore == nil {
-		http.Error(w, "gateway disabled", http.StatusNotFound)
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 		return
 	}
 	clientID := s.ensureClientID(w, r)
@@ -290,7 +770,8 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		items, err := s.tabStore.ListByClient(r.Context(), clientID, 50)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("list tabs: %v", err), http.StatusInternalServerError)
+			log.Printf("list tabs error: %v", err)
+			apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"tabs": items})
@@ -299,16 +780,17 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 			ProjectID string `json:"projectId"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, fmt.Sprintf("decode body: %v", err), http.StatusBadRequest)
+			apierrors.WriteError(w, apierrors.BadRequest("invalid request body", ""))
 			return
 		}
 		if req.ProjectID == "" {
-			http.Error(w, "projectId is required", http.StatusBadRequest)
+			apierrors.WriteError(w, apierrors.BadRequest("projectId is required", ""))
 			return
 		}
 		tab, err := s.tabManager.CreateTab(r.Context(), req.ProjectID, clientID)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("create tab: %v", err), http.StatusInternalServerError)
+			log.Printf("create tab error: %v", err)
+			apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 			return
 		}
 		resp := map[string]any{
@@ -318,44 +800,54 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, resp)
 		s.broadcastTabSnapshot(clientID)
 	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		apierrors.WriteError(w, apierrors.ErrorResponse{
+			Status:  http.StatusMethodNotAllowed,
+			Error:   "method_not_allowed",
+			Message: "method not allowed",
+		})
 	}
 }
 
 func (s *server) handleTabByID(w http.ResponseWriter, r *http.Request) {
 	if s.tabManager == nil || s.tabStore == nil {
-		http.Error(w, "gateway disabled", http.StatusNotFound)
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 		return
 	}
 	if r.Method != http.MethodDelete {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		apierrors.WriteError(w, apierrors.ErrorResponse{
+			Status:  http.StatusMethodNotAllowed,
+			Error:   "method_not_allowed",
+			Message: "method not allowed",
+		})
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/tabs/")
 	if id == "" {
-		http.Error(w, "missing tab id", http.StatusBadRequest)
+		apierrors.WriteError(w, apierrors.BadRequest("missing tab id", ""))
 		return
 	}
 	clientID := s.ensureClientID(w, r)
 	tab, err := s.tabStore.Get(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, tabs.ErrNotFound) {
-			http.Error(w, "tab not found", http.StatusNotFound)
+			apierrors.WriteError(w, apierrors.NotFound("tab not found", ""))
 			return
 		}
-		http.Error(w, fmt.Sprintf("load tab: %v", err), http.StatusInternalServerError)
+		log.Printf("load tab error: %v", err)
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 		return
 	}
 	if tab.ClientID != clientID {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		apierrors.WriteError(w, apierrors.Forbidden("forbidden", ""))
 		return
 	}
 	if err := s.tabManager.CloseTab(r.Context(), id); err != nil {
 		if errors.Is(err, tabs.ErrNotFound) {
-			http.Error(w, "tab not found", http.StatusNotFound)
+			apierrors.WriteError(w, apierrors.NotFound("tab not found", ""))
 			return
 		}
-		http.Error(w, fmt.Sprintf("close tab: %v", err), http.StatusInternalServerError)
+		log.Printf("close tab error: %v", err)
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -364,7 +856,7 @@ func (s *server) handleTabByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleTabEvents(w http.ResponseWriter, r *http.Request) {
 	if s.tabManager == nil || s.tabStore == nil {
-		http.Error(w, "gateway disabled", http.StatusNotFound)
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 		return
 	}
 	if websocket.IsWebSocketUpgrade(r) {
@@ -383,7 +875,7 @@ func (s *server) handleTabEventsWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[TabEvents %s] Upgrade failed: %v", clientID, err)
-		http.Error(w, fmt.Sprintf("upgrade: %v", err), http.StatusInternalServerError)
+		apierrors.WriteError(w, apierrors.InternalServerError("WebSocket upgrade failed", ""))
 		return
 	}
 	defer func() {
@@ -419,7 +911,7 @@ func (s *server) handleTabEventsSSE(w http.ResponseWriter, r *http.Request) {
 	clientID := s.ensureClientID(w, r)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		apierrors.WriteError(w, apierrors.InternalServerError("streaming unsupported", ""))
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -557,14 +1049,34 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	// Ensure PTY exists
 	if err := s.initPTY(ctx); err != nil {
 		log.Printf("[WS %s] PTY init failed: %v", connID, err)
-		http.Error(w, fmt.Sprintf("PTY unavailable: %v", err), http.StatusInternalServerError)
+		apierrors.WriteError(w, apierrors.InternalServerError("PTY unavailable", ""))
+		return
+	}
+
+	// Get PTY reference and check for existing client (single-client enforcement)
+	s.mu.RLock()
+	ps := s.pty
+	s.mu.RUnlock()
+
+	if ps == nil {
+		apierrors.WriteError(w, apierrors.InternalServerError("PTY not initialized", ""))
+		return
+	}
+
+	// Enforce single client per session
+	if ps.hasClients() {
+		log.Printf("[WS %s] Rejected: another client is already connected to this session", connID)
+		apierrors.WriteError(w, apierrors.Conflict(
+			"session already attached",
+			"only one client allowed per session",
+		))
 		return
 	}
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[WS %s] Upgrade failed: %v", connID, err)
-		http.Error(w, fmt.Sprintf("upgrade: %v", err), http.StatusInternalServerError)
+		apierrors.WriteError(w, apierrors.InternalServerError("WebSocket upgrade failed", ""))
 		return
 	}
 	defer func() {
@@ -573,16 +1085,6 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	log.Printf("[WS %s] Connection established", connID)
-
-	// Get PTY reference
-	s.mu.RLock()
-	ps := s.pty
-	s.mu.RUnlock()
-
-	if ps == nil {
-		http.Error(w, "PTY not initialized", http.StatusInternalServerError)
-		return
-	}
 
 	// Register this client
 	ps.addClient(conn)
@@ -619,10 +1121,20 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			}
 			switch msg.Type {
 			case "resize":
-				if msg.Cols > 0 && msg.Rows > 0 {
-					if err := pty.Setsize(ps.ptmx, &pty.Winsize{Cols: msg.Cols, Rows: msg.Rows}); err != nil {
-						log.Printf("[WS %s] PTY resize error: %v", connID, err)
-					}
+				if msg.Cols == 0 || msg.Rows == 0 {
+					log.Printf("[WS %s] Invalid resize: cols and rows must be > 0", connID)
+					continue
+				}
+				if msg.Cols > maxPTYCols {
+					log.Printf("[WS %s] Invalid resize: cols %d exceeds max %d", connID, msg.Cols, maxPTYCols)
+					continue
+				}
+				if msg.Rows > maxPTYRows {
+					log.Printf("[WS %s] Invalid resize: rows %d exceeds max %d", connID, msg.Rows, maxPTYRows)
+					continue
+				}
+				if err := pty.Setsize(ps.ptmx, &pty.Winsize{Cols: msg.Cols, Rows: msg.Rows}); err != nil {
+					log.Printf("[WS %s] PTY resize error: %v", connID, err)
 				}
 			case "ping":
 				// Send pong response to keep connection alive
@@ -682,7 +1194,10 @@ func (s *server) initPTY(ctx context.Context) error {
 
 	// Start bash as a login shell to source .bash_profile and display MOTD
 	cmd := exec.Command(s.cfg.Shell, "-l")
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(),
+		"KUBETTY_USER="+s.cfg.KubettyUser,
+		"KUBETTY_PROJECT="+s.cfg.KubettyProject,
+	)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return fmt.Errorf("start pty: %w", err)
@@ -799,6 +1314,12 @@ func (ps *ptySession) removeClient(conn *websocket.Conn) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	delete(ps.clients, conn)
+}
+
+func (ps *ptySession) hasClients() bool {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return len(ps.clients) > 0
 }
 
 func (ps *ptySession) broadcast(data []byte) {

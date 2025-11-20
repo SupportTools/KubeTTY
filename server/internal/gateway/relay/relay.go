@@ -30,6 +30,7 @@ type Relay struct {
 	status     Status
 	lastError  error
 	observers  []chan StatusEvent
+	activityCh chan struct{} // Signals activity (data transfer) for idle timeout tracking
 }
 
 // Status represents connection state.
@@ -55,7 +56,11 @@ func New(cfg Config) *Relay {
 	if cfg.Dialer == nil {
 		cfg.Dialer = websocket.DefaultDialer
 	}
-	return &Relay{cfg: cfg, status: StatusIdle}
+	return &Relay{
+		cfg:        cfg,
+		status:     StatusIdle,
+		activityCh: make(chan struct{}, 1), // Buffer size 1 for non-blocking sends
+	}
 }
 
 // Status returns the current relay state.
@@ -95,6 +100,13 @@ func (r *Relay) Subscribe() <-chan StatusEvent {
 	ch := make(chan StatusEvent, 4)
 	r.observers = append(r.observers, ch)
 	return ch
+}
+
+// ActivityChan returns a channel that signals when data flows through the relay.
+// Used for idle timeout tracking. Signals are sent non-blocking, so consumers
+// should drain the channel to detect activity.
+func (r *Relay) ActivityChan() <-chan struct{} {
+	return r.activityCh
 }
 
 // Connect ensures a downstream WebSocket connection exists, retrying with backoff until context cancellation.
@@ -146,15 +158,28 @@ func (r *Relay) Connect(ctx context.Context, backoff Backoff) (*websocket.Conn, 
 // Close tears down the downstream connection.
 func (r *Relay) Close() error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.downstream != nil {
-		err := r.downstream.Close()
-		r.downstream = nil
-		r.setStatus(StatusClosed, err)
-		return err
+	downstream := r.downstream
+	r.downstream = nil
+	r.status = StatusClosed
+	observers := append([]chan StatusEvent(nil), r.observers...)
+	r.mu.Unlock()
+
+	// Close connection outside of lock
+	var err error
+	if downstream != nil {
+		err = downstream.Close()
 	}
-	r.setStatus(StatusClosed, nil)
-	return nil
+
+	// Notify observers outside of lock to avoid deadlock
+	evt := StatusEvent{Status: StatusClosed, Err: err, When: time.Now()}
+	for _, ch := range observers {
+		select {
+		case ch <- evt:
+		default:
+		}
+	}
+
+	return err
 }
 
 // Proxy pumps data between upstream and downstream.
@@ -256,6 +281,13 @@ func (r *Relay) pipe(ctx context.Context, label string, src *websocket.Conn, dst
 				isRead:    false,
 			}
 			return
+		}
+
+		// Signal activity for idle timeout tracking (non-blocking)
+		select {
+		case r.activityCh <- struct{}{}:
+		default:
+			// Channel full, skip signal (activity already noted)
 		}
 	}
 }

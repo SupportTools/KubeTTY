@@ -137,9 +137,20 @@ func TestNewSessionLogsHandler_MissingSessionParameter(t *testing.T) {
 		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
 	}
 
-	body := w.Body.String()
-	if body != "missing session parameter\n" {
-		t.Errorf("Expected error message 'missing session parameter', got %q", body)
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Expected Content-Type 'application/json', got %q", ct)
+	}
+
+	var errResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if errResp["error"] != "bad_request" {
+		t.Errorf("Expected error code 'bad_request', got %v", errResp["error"])
+	}
+	if errResp["message"] != "missing session parameter" {
+		t.Errorf("Expected message 'missing session parameter', got %v", errResp["message"])
 	}
 }
 
@@ -229,10 +240,23 @@ func TestNewSessionLogsHandler_StoreError(t *testing.T) {
 		t.Errorf("Expected status %d, got %d", http.StatusInternalServerError, w.Code)
 	}
 
-	body := w.Body.String()
-	expectedError := "list logs: database connection failed\n"
-	if body != expectedError {
-		t.Errorf("Expected error %q, got %q", expectedError, body)
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Expected Content-Type 'application/json', got %q", ct)
+	}
+
+	var errResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if errResp["error"] != "internal_server_error" {
+		t.Errorf("Expected error code 'internal_server_error', got %v", errResp["error"])
+	}
+	if errResp["message"] != "failed to retrieve session logs" {
+		t.Errorf("Expected message 'failed to retrieve session logs', got %v", errResp["message"])
+	}
+	if errResp["details"] != "database connection failed" {
+		t.Errorf("Expected details 'database connection failed', got %v", errResp["details"])
 	}
 
 	// Verify observer recorded the error

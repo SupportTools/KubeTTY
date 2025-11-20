@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 
+	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
 
@@ -34,7 +35,7 @@ func NewAuthMeHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := UserFromContext(r.Context())
 		if user == nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			_ = apierrors.WriteError(w, apierrors.Unauthorized("unauthorized", ""))
 			return
 		}
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	"github.com/supporttools/KubeTTY/server/internal/config"
+	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 )
 
 // LogoutRequest represents the logout request body.
@@ -52,7 +53,7 @@ func NewAuthLogoutHandler(cfg config.Config, authMgr *auth.Manager, authStore au
 
 		var req LogoutRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", err.Error()))
 			return
 		}
 

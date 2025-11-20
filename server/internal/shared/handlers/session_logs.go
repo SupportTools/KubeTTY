@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
+	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
 
@@ -29,7 +30,7 @@ func NewSessionLogsHandler(store sessions.Store, observer StoreMetricsObserver) 
 		ctx := r.Context()
 		sessionID := r.URL.Query().Get("session")
 		if sessionID == "" {
-			http.Error(w, "missing session parameter", http.StatusBadRequest)
+			_ = apierrors.WriteError(w, apierrors.BadRequest("missing session parameter", ""))
 			return
 		}
 
@@ -58,7 +59,7 @@ func NewSessionLogsHandler(store sessions.Store, observer StoreMetricsObserver) 
 		}
 
 		if err != nil {
-			http.Error(w, fmt.Sprintf("list logs: %v", err), http.StatusInternalServerError)
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to retrieve session logs", fmt.Sprintf("%v", err)))
 			return
 		}
 
@@ -74,7 +75,7 @@ func NewSessionLogsHandler(store sessions.Store, observer StoreMetricsObserver) 
 		}
 
 		if err := util.WriteJSON(w, http.StatusOK, resp); err != nil {
-			http.Error(w, fmt.Sprintf("encode response: %v", err), http.StatusInternalServerError)
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to encode response", fmt.Sprintf("%v", err)))
 		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	"github.com/supporttools/KubeTTY/server/internal/config"
+	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
 
@@ -71,46 +72,48 @@ type LoginResponse struct {
 func NewAuthLoginHandler(cfg config.Config, authMgr *auth.Manager, authStore auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !AuthEnabled(cfg, authMgr) {
-			http.Error(w, "auth disabled", http.StatusNotImplemented)
+			_ = apierrors.WriteError(w, apierrors.ServiceUnavailable("authentication disabled", ""))
 			return
 		}
 
 		var req LoginRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", err.Error()))
 			return
 		}
 
 		req.Username = strings.TrimSpace(req.Username)
 		if req.Username == "" || req.Password == "" {
-			http.Error(w, "username and password required", http.StatusBadRequest)
+			_ = apierrors.WriteError(w, apierrors.BadRequest("username and password required", ""))
 			return
 		}
 
 		if len(req.Username) > MaxUsernameLength {
-			http.Error(w, fmt.Sprintf("username must be %d characters or less", MaxUsernameLength), http.StatusBadRequest)
+			_ = apierrors.WriteError(w, apierrors.BadRequest(
+				fmt.Sprintf("username must be %d characters or less", MaxUsernameLength), ""))
 			return
 		}
 
 		if !UsernameRegex.MatchString(req.Username) {
-			http.Error(w, "username must contain only letters, numbers, underscores, and dashes", http.StatusBadRequest)
+			_ = apierrors.WriteError(w, apierrors.BadRequest(
+				"username must contain only letters, numbers, underscores, and dashes", ""))
 			return
 		}
 
 		user, err := authMgr.Authenticate(r.Context(), req.Username, req.Password)
 		if err != nil {
 			if errors.Is(err, auth.ErrInvalidCredentials) {
-				http.Error(w, "invalid credentials", http.StatusUnauthorized)
+				_ = apierrors.WriteError(w, apierrors.Unauthorized("invalid credentials", ""))
 				return
 			}
-			http.Error(w, fmt.Sprintf("authenticate: %v", err), http.StatusInternalServerError)
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("authentication failed", ""))
 			return
 		}
 
 		meta := TokenMetadataFromRequest(r)
 		tokens, err := authMgr.IssueTokenPair(r.Context(), user, meta)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("issue tokens: %v", err), http.StatusInternalServerError)
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("token generation failed", ""))
 			return
 		}
 

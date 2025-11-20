@@ -1,0 +1,286 @@
+# CLAUDE.md - KubeTTY Project Guide
+
+This document provides guidance for AI agents working on the KubeTTY project.
+
+## Project Overview
+
+**KubeTTY** is a web-based terminal emulator for Kubernetes pods. It provides secure shell access to pods through a browser interface with features including:
+
+- WebSocket-based PTY streaming
+- Session persistence with CloudNativePG (PostgreSQL)
+- JWT authentication with refresh tokens
+- Multi-project gateway mode
+- MOTD (Message of the Day) display
+- Session logging and replay
+
+## Architecture
+
+KubeTTY is a **monorepo** with the following structure:
+
+```
+KubeTTY/
+├── server/           # Go backend
+│   ├── main.go       # Entry point, HTTP handlers, WebSocket
+│   ├── internal/     # Internal packages
+│   │   ├── auth/     # Authentication/JWT
+│   │   ├── config/   # Configuration
+│   │   ├── gateway/  # Multi-project gateway
+│   │   └── sessions/ # Session persistence
+│   ├── migrations/   # Database migrations
+│   └── ui/dist/      # Embedded frontend (built from web/)
+├── web/              # React frontend
+│   └── src/
+│       ├── components/  # UI components
+│       └── contexts/    # React contexts
+├── deploy/helm/      # Helm chart
+└── docs/             # Documentation
+```
+
+## Technology Stack
+
+### Backend (server/)
+- **Language**: Go 1.23
+- **HTTP Server**: net/http with ServeMux
+- **WebSocket**: gorilla/websocket
+- **Database**: PostgreSQL via pgxpool (pgx/v5)
+- **Authentication**: JWT (golang-jwt/jwt/v5)
+- **PTY**: github.com/creack/pty
+
+### Frontend (web/)
+- **Framework**: React 18 with TypeScript
+- **Terminal**: xterm.js
+- **Build**: Vite
+- **Styling**: CSS (no framework)
+
+### Infrastructure
+- **Database**: CloudNativePG (CNPG)
+- **Container**: Docker
+- **Orchestration**: Kubernetes with Helm
+
+## Key Design Decisions
+
+### Single-Client Per Session
+Each PTY session allows only one connected client at a time. Additional connection attempts receive HTTP 409 Conflict.
+
+### Output Buffering
+PTY output is buffered and broadcast to all clients (for gateway mode where backend maintains session while frontend reconnects).
+
+### Session Persistence
+Sessions are persisted to PostgreSQL with:
+- Session metadata (UUID, deployment ID, PID)
+- Attachment tracking
+- Session logs for replay
+
+### Authentication Flow
+1. Local auth mode: username/password login
+2. JWT access token (15m TTL)
+3. Refresh token (7d TTL) with automatic refresh
+4. HttpOnly cookies for token storage
+
+## TaskForge Task Management
+
+The project uses PostgreSQL-backed TaskForge for task management.
+
+### Project ID: 79 (KubeTTY Production Readiness)
+
+### Features/Priorities
+- **P0 Critical Fixes** (Feature 332): Security and stability issues
+- **P1 Resource Management** (Feature 335): Documentation and patterns
+- **P2 Quality Improvements** (Feature 336): Testing and observability
+
+### Task Workflow
+1. Get tasks: `mcp__taskforge__getTasks({ projectId: 79 })`
+2. Update status: `mcp__taskforge__updateTask({ taskId: X, status: "in_progress" })`
+3. Complete: `mcp__taskforge__updateTask({ taskId: X, status: "done", outcome: "..." })`
+
+**Valid statuses**: todo, in_progress, done, blocked
+
+See `docs/development/task-execution-workflow.md` for complete workflow.
+
+## Development Workflows
+
+### Building
+
+```bash
+# Server
+cd server && go build .
+
+# Web (outputs to server/ui/dist/)
+cd web && npm run build
+
+# Docker image
+docker build -t harbor.support.tools/kubetty/kubetty:latest .
+```
+
+### Testing
+
+```bash
+# Go tests
+cd server && go test -v ./...
+
+# Web tests
+cd web && npm test
+
+# With coverage
+go test -cover ./...
+```
+
+### Deployment
+
+```bash
+# Helm lint
+helm lint deploy/helm/
+
+# Deploy
+helm upgrade --install kubetty ./deploy/helm \
+  -n kubetty-dev \
+  -f deploy/helm/values.yaml
+```
+
+## Code Conventions
+
+### Go Standards
+
+```go
+// Use logrus for structured logging
+log.WithFields(log.Fields{
+    "session_uuid": sessionUUID,
+    "client_id":    clientID,
+}).Info("Client connected")
+
+// Use standardized error responses
+http.Error(w, "session not found", http.StatusNotFound)
+
+// Input validation with limits
+const (
+    maxUsernameLength = 64
+    maxPTYCols        = 500
+    maxPTYRows        = 200
+)
+```
+
+### TypeScript Standards
+
+```typescript
+// Use strict typing
+interface Props {
+    sessionUUID: string;
+    onConnect: () => void;
+}
+
+// No console.log in production code
+// Use environment-based logging if needed
+```
+
+### Git Commit Format
+
+```
+feat(component): brief description
+
+- Detailed changes
+- Task completion: [task description]
+
+Generated with [Claude Code](https://claude.com/claude-code)
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+
+## Key Files
+
+### Configuration
+- `server/internal/config/config.go` - Server configuration
+- `deploy/helm/values.yaml` - Helm values
+
+### Core Handlers
+- `server/main.go` - HTTP handlers, WebSocket, PTY management
+- `server/internal/auth/manager.go` - JWT authentication
+
+### Frontend Components
+- `web/src/App.tsx` - Main application
+- `web/src/components/TerminalView.tsx` - Terminal component
+- `web/src/contexts/AuthContext.tsx` - Auth state management
+
+### Database
+- `server/internal/sessions/pgx_store.go` - Session persistence
+- `server/migrations/*.sql` - Database migrations
+
+## API Endpoints
+
+### Public
+- `GET /api/healthz` - Health check
+- `GET /metrics` - Prometheus metrics
+- `POST /api/auth/login` - Authentication
+
+### Protected (requires auth)
+- `GET /api/auth/me` - Current user
+- `POST /api/auth/refresh` - Refresh token
+- `GET /session/logs` - Session logs
+- `GET /ws` - WebSocket connection
+
+### Gateway Mode
+- `GET /api/projects` - List projects
+- `POST /api/tabs` - Create tab
+- `GET /api/tabs/events` - Tab events stream
+
+## Common Tasks
+
+### Adding a New API Endpoint
+
+1. Add handler method to `server` struct in `main.go`
+2. Register route in `main()` mux setup
+3. Add input validation
+4. Implement operation with proper error handling
+5. Write tests
+6. Update documentation if needed
+
+### Adding Database Feature
+
+1. Create migration files in `server/migrations/`
+2. Add model structures
+3. Implement store methods
+4. Add tests
+5. Apply migration to test database
+
+### Adding Frontend Component
+
+1. Create component in `web/src/components/`
+2. Add TypeScript interfaces
+3. Wire up to state/context
+4. Write tests
+5. Build and verify
+
+## Important Rules
+
+1. **Go 1.23** - Always use Go 1.23 (check server/go.mod)
+2. **No console.log** - Remove debug logs before committing
+3. **Input validation** - Validate all user inputs
+4. **Test coverage** - Write tests for all new code
+5. **Error handling** - Use proper HTTP status codes
+6. **Single task** - Complete one task before starting another
+7. **Semantic versioning only** - Use clean version tags (v0.5.1, v1.0.0). No suffixes like -rc, -beta, -auth-ui, etc.
+
+## Documentation References
+
+- `DESIGN.md` - Detailed architecture specifications
+- `QA_REVIEW.md` - Known issues and priorities
+- `docs/development/task-execution-workflow.md` - Mandatory workflow
+- `docs/development/error-handling-guide.md` - Error patterns
+- `docs/development/api-handler-standards.md` - Handler architecture
+- `docs/development/testing-guide.md` - Testing requirements
+- `docs/development/deployment-guide.md` - Deployment process
+
+## Environment Variables
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `KUBETTY_PORT` | Server port | No (default: 8080) |
+| `KUBETTY_CONN_STRING` | PostgreSQL connection | Yes |
+| `KUBETTY_SESSION_ID` | Session UUID | Yes |
+| `KUBETTY_AUTH_MODE` | Auth mode (disabled/local) | No |
+| `KUBETTY_AUTH_JWT_SECRET` | JWT secret | If auth enabled |
+
+## Getting Help
+
+- Review `DESIGN.md` for architecture questions
+- Check `QA_REVIEW.md` for known issues
+- Follow `docs/development/task-execution-workflow.md` for task workflow
+- Use TaskForge to track work progress

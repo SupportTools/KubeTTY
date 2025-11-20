@@ -255,8 +255,9 @@ func TestNewSessionLogsHandler_StoreError(t *testing.T) {
 	if errResp["message"] != "failed to retrieve session logs" {
 		t.Errorf("Expected message 'failed to retrieve session logs', got %v", errResp["message"])
 	}
-	if errResp["details"] != "database connection failed" {
-		t.Errorf("Expected details 'database connection failed', got %v", errResp["details"])
+	// Security fix: details should be empty to prevent information disclosure
+	if details := errResp["details"]; details != "" && details != nil {
+		t.Errorf("Expected empty details for security, got %v", details)
 	}
 
 	// Verify observer recorded the error

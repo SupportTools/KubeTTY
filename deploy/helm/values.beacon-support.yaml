@@ -1,6 +1,6 @@
 image:
-  repository: harbor.support.tools/kubetty/beacon-support
-  tag: v0.2.9-delayed-ps1
+  repository: harbor.support.tools/kubetty/kubetty
+  tag: v0.5.1
 
 imagePullSecrets:
   - harbor-supporttools
@@ -17,6 +17,17 @@ env:
   nodeOptions: "--max-old-space-size=32768"
   claudeConfigDir: "/home/mmattox/.claude"
   extra: {}
+auth:
+  mode: local
+  jwtSecret: ""
+  jwtSecretSecret:
+    name: beacon-beacon-support-auth
+    key: jwt-secret
+  issuer: kubetty
+  accessTTL: 15m
+  refreshTTL: 720h
+  cookieDomain: beacon-kubetty.support.tools
+  cookieSecure: true
 
 cnpg:
   host: 172.28.58.5
@@ -46,6 +57,8 @@ dataPVC:
       subPath: home
     - path: /usr/local/go
       subPath: usr-local-go
+    - path: /var/lib/docker
+      subPath: var-lib-docker
 
 serviceAccount:
   create: true

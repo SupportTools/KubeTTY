@@ -30,15 +30,17 @@ type PasswordChangeResponse struct {
 // Authentication: Required (via access token)
 //
 // Request Body:
-//   {
-//     "currentPassword": string,  // User's current password
-//     "newPassword": string       // Desired new password
-//   }
+//
+//	{
+//	  "currentPassword": string,  // User's current password
+//	  "newPassword": string       // Desired new password
+//	}
 //
 // Response (200 OK):
-//   {
-//     "message": "password changed successfully"
-//   }
+//
+//	{
+//	  "message": "password changed successfully"
+//	}
 //
 // Response (400 Bad Request):
 //   - "invalid request body" - Request body is not valid JSON
@@ -80,7 +82,8 @@ func NewAuthPasswordChangeHandler(cfg config.Config, authMgr *auth.Manager) http
 
 		var req PasswordChangeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid request body", err.Error()))
+			// Don't expose JSON parsing details to client for security
+			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid request body", ""))
 			return
 		}
 
@@ -95,7 +98,8 @@ func NewAuthPasswordChangeHandler(cfg config.Config, authMgr *auth.Manager) http
 			case errors.Is(err, auth.ErrInvalidCredentials):
 				_ = apierrors.WriteError(w, apierrors.Unauthorized("current password is incorrect", ""))
 			case errors.Is(err, auth.ErrWeakPassword):
-				_ = apierrors.WriteError(w, apierrors.BadRequest(err.Error(), ""))
+				// Don't expose validation details to client for security
+				_ = apierrors.WriteError(w, apierrors.BadRequest("password requirements not met", ""))
 			default:
 				log.Printf("password change error: %v", err)
 				_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to change password", ""))

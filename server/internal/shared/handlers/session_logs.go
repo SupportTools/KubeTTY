@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -59,7 +58,9 @@ func NewSessionLogsHandler(store sessions.Store, observer StoreMetricsObserver) 
 		}
 
 		if err != nil {
-			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to retrieve session logs", fmt.Sprintf("%v", err)))
+			// Log error server-side but don't expose details to client
+			// TODO: Add structured logging here
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to retrieve session logs", ""))
 			return
 		}
 
@@ -75,7 +76,9 @@ func NewSessionLogsHandler(store sessions.Store, observer StoreMetricsObserver) 
 		}
 
 		if err := util.WriteJSON(w, http.StatusOK, resp); err != nil {
-			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to encode response", fmt.Sprintf("%v", err)))
+			// Log error server-side but don't expose details to client
+			// TODO: Add structured logging here
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to encode response", ""))
 		}
 	}
 }

@@ -21,10 +21,10 @@ type RefreshRequest struct {
 
 // RefreshResponse represents a successful refresh response.
 type RefreshResponse struct {
-	User              map[string]any `json:"user"`              // User object with id and username
-	AccessToken       string         `json:"accessToken"`       // New JWT access token
-	AccessExpiresAt   time.Time      `json:"accessExpiresAt"`   // Access token expiration timestamp
-	RefreshExpiresAt  time.Time      `json:"refreshExpiresAt"`  // Refresh token expiration timestamp
+	User             map[string]any `json:"user"`             // User object with id and username
+	AccessToken      string         `json:"accessToken"`      // New JWT access token
+	AccessExpiresAt  time.Time      `json:"accessExpiresAt"`  // Access token expiration timestamp
+	RefreshExpiresAt time.Time      `json:"refreshExpiresAt"` // Refresh token expiration timestamp
 }
 
 // NewAuthRefreshHandler creates an HTTP handler for refreshing authentication tokens.
@@ -33,23 +33,25 @@ type RefreshResponse struct {
 // Content-Type: application/json
 //
 // Request Body (optional):
-//   {
-//     "refreshToken": string  // Refresh token (if not provided via cookie)
-//   }
+//
+//	{
+//	  "refreshToken": string  // Refresh token (if not provided via cookie)
+//	}
 //
 // The refresh token can be provided either in the request body or via the
 // "kubetty_refresh" HTTP-only cookie. The cookie takes precedence.
 //
 // Response (200 OK):
-//   {
-//     "user": {
-//       "id": string,      // User UUID
-//       "username": string // Username
-//     },
-//     "accessToken": string,       // New JWT access token
-//     "accessExpiresAt": string,   // ISO 8601 timestamp
-//     "refreshExpiresAt": string   // ISO 8601 timestamp
-//   }
+//
+//	{
+//	  "user": {
+//	    "id": string,      // User UUID
+//	    "username": string // Username
+//	  },
+//	  "accessToken": string,       // New JWT access token
+//	  "accessExpiresAt": string,   // ISO 8601 timestamp
+//	  "refreshExpiresAt": string   // ISO 8601 timestamp
+//	}
 //
 // Response (400 Bad Request):
 //   - "invalid JSON" - Request body is not valid JSON
@@ -78,7 +80,8 @@ func NewAuthRefreshHandler(cfg config.Config, authMgr *auth.Manager) http.Handle
 
 		var req RefreshRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", err.Error()))
+			// Don't expose JSON parsing details to client for security
+			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
 			return
 		}
 

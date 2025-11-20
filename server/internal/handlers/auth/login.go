@@ -23,10 +23,10 @@ type LoginRequest struct {
 
 // LoginResponse represents a successful login response.
 type LoginResponse struct {
-	User              map[string]any `json:"user"`              // User object with id and username
-	AccessToken       string         `json:"accessToken"`       // JWT access token
-	AccessExpiresAt   time.Time      `json:"accessExpiresAt"`   // Access token expiration timestamp
-	RefreshExpiresAt  time.Time      `json:"refreshExpiresAt"`  // Refresh token expiration timestamp
+	User             map[string]any `json:"user"`             // User object with id and username
+	AccessToken      string         `json:"accessToken"`      // JWT access token
+	AccessExpiresAt  time.Time      `json:"accessExpiresAt"`  // Access token expiration timestamp
+	RefreshExpiresAt time.Time      `json:"refreshExpiresAt"` // Refresh token expiration timestamp
 }
 
 // NewAuthLoginHandler creates an HTTP handler for user authentication.
@@ -35,21 +35,23 @@ type LoginResponse struct {
 // Content-Type: application/json
 //
 // Request Body:
-//   {
-//     "username": string,  // Username (max 64 chars, alphanumeric + underscore/dash)
-//     "password": string   // User password
-//   }
+//
+//	{
+//	  "username": string,  // Username (max 64 chars, alphanumeric + underscore/dash)
+//	  "password": string   // User password
+//	}
 //
 // Response (200 OK):
-//   {
-//     "user": {
-//       "id": string,      // User UUID
-//       "username": string // Username
-//     },
-//     "accessToken": string,       // JWT access token
-//     "accessExpiresAt": string,   // ISO 8601 timestamp
-//     "refreshExpiresAt": string   // ISO 8601 timestamp
-//   }
+//
+//	{
+//	  "user": {
+//	    "id": string,      // User UUID
+//	    "username": string // Username
+//	  },
+//	  "accessToken": string,       // JWT access token
+//	  "accessExpiresAt": string,   // ISO 8601 timestamp
+//	  "refreshExpiresAt": string   // ISO 8601 timestamp
+//	}
 //
 // Response (400 Bad Request):
 //   - "invalid JSON" - Request body is not valid JSON
@@ -78,7 +80,8 @@ func NewAuthLoginHandler(cfg config.Config, authMgr *auth.Manager, authStore aut
 
 		var req LoginRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", err.Error()))
+			// Don't expose JSON parsing details to client for security
+			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
 			return
 		}
 

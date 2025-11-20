@@ -1,7 +1,6 @@
 package session
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -19,8 +18,8 @@ type StoreMetricsObserver interface {
 
 // LogsResponse represents the session logs response.
 type LogsResponse struct {
-	SessionID string               `json:"sessionId"` // Session UUID
-	Logs      []sessions.LogEntry  `json:"logs"`      // Log entries for the session
+	SessionID string              `json:"sessionId"` // Session UUID
+	Logs      []sessions.LogEntry `json:"logs"`      // Log entries for the session
 }
 
 // NewSessionLogsHandler creates an HTTP handler for retrieving session logs.
@@ -31,17 +30,18 @@ type LogsResponse struct {
 //   - limit (optional): Maximum number of logs to return (default: 200, max: 2000)
 //
 // Response (200 OK):
-//   {
-//     "sessionId": string,
-//     "logs": [
-//       {
-//         "sessionId": string,
-//         "direction": string,  // "input" or "output"
-//         "data": string,       // Base64-encoded data
-//         "createdAt": string   // ISO 8601 timestamp
-//       }
-//     ]
-//   }
+//
+//	{
+//	  "sessionId": string,
+//	  "logs": [
+//	    {
+//	      "sessionId": string,
+//	      "direction": string,  // "input" or "output"
+//	      "data": string,       // Base64-encoded data
+//	      "createdAt": string   // ISO 8601 timestamp
+//	    }
+//	  ]
+//	}
 //
 // Response (400 Bad Request):
 //   - "missing session parameter" - No session ID provided
@@ -87,7 +87,9 @@ func NewSessionLogsHandler(store sessions.Store, observer StoreMetricsObserver) 
 		}
 
 		if err != nil {
-			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to retrieve session logs", fmt.Sprintf("%v", err)))
+			// Log error server-side but don't expose details to client
+			// TODO: Add structured logging here
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to retrieve session logs", ""))
 			return
 		}
 
@@ -103,7 +105,9 @@ func NewSessionLogsHandler(store sessions.Store, observer StoreMetricsObserver) 
 		}
 
 		if err := util.WriteJSON(w, http.StatusOK, resp); err != nil {
-			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to encode response", fmt.Sprintf("%v", err)))
+			// Log error server-side but don't expose details to client
+			// TODO: Add structured logging here
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to encode response", ""))
 		}
 	}
 }

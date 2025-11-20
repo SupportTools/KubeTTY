@@ -40,6 +40,7 @@ spec:
         {{- end }}
       {{- end }}
     spec:
+      hostname: {{ .Values.deploymentId | default "kubetty" }}
       serviceAccountName: {{ include "kubetty.serviceAccountName" . }}
       securityContext:
         supplementalGroups:
@@ -81,6 +82,29 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+        - name: init-home
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              # Copy home directory files from image to PVC if .bash_profile doesn't exist
+              if [ ! -f /pvc-home/mmattox/.bash_profile ]; then
+                echo "Copying home directory files from image to PVC..."
+                cp -a /home/mmattox/. /pvc-home/mmattox/
+                echo "Home directory files copied successfully"
+              else
+                echo "Home directory already initialized, skipping copy"
+              fi
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          volumeMounts:
+            - name: data
+              mountPath: /pvc-home
+              subPath: home
       {{- end }}
       containers:
 {{- if .Values.pipelines.dind.enabled }}
@@ -95,8 +119,9 @@ spec:
             - --host=unix:///var/run/docker/docker.sock
             - --host=tcp://0.0.0.0:2375
           volumeMounts:
-            - name: dind-storage
+            - name: data
               mountPath: /var/lib/docker
+              subPath: var-lib-docker
             - name: dind-sock
               mountPath: /var/run/docker
 {{- end }}
@@ -114,6 +139,12 @@ spec:
                   fieldPath: status.podIP
             - name: DEPLOYMENT_ID
               value: {{ .Values.deploymentId | quote }}
+            - name: KUBETTY_MODE
+              value: {{ .Values.env.kubettyMode | default "gateway" | quote }}
+            - name: KUBETTY_USER
+              value: {{ .Values.env.kubettyUser | default "mmattox" | quote }}
+            - name: KUBETTY_PROJECT
+              value: {{ .Values.env.kubettyProject | default .Values.deploymentId | quote }}
             - name: SESSION_ID
               value: {{ .Values.env.sessionID | quote }}
             - name: CLAUDE_CODE_MAX_OUTPUT_TOKENS
@@ -144,6 +175,28 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.cnpg.userSecret }}
                   key: {{ .Values.cnpg.passwordKey }}
+            - name: AUTH_MODE
+              value: {{ default "disabled" .Values.auth.mode | quote }}
+{{- if .Values.auth.jwtSecret }}
+            - name: AUTH_JWT_SECRET
+              value: {{ .Values.auth.jwtSecret | quote }}
+{{- else if .Values.auth.jwtSecretSecret.name }}
+            - name: AUTH_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.jwtSecretSecret.name }}
+                  key: {{ default "jwt-secret" .Values.auth.jwtSecretSecret.key }}
+{{- end }}
+            - name: AUTH_ISSUER
+              value: {{ default "kubetty" .Values.auth.issuer | quote }}
+            - name: AUTH_ACCESS_TTL
+              value: {{ default "15m" .Values.auth.accessTTL | quote }}
+            - name: AUTH_REFRESH_TTL
+              value: {{ default "720h" .Values.auth.refreshTTL | quote }}
+            - name: AUTH_COOKIE_DOMAIN
+              value: {{ default "" .Values.auth.cookieDomain | quote }}
+            - name: AUTH_COOKIE_SECURE
+              value: {{ ternary "true" "false" (default true .Values.auth.cookieSecure) | quote }}
 {{- if .Values.pipelines.dind.enabled }}
             - name: DOCKER_HOST
               value: unix:///var/run/docker/docker.sock
@@ -181,8 +234,6 @@ spec:
             claimName: {{ if .Values.dataPVC.create }}{{ default (printf "%s-data" (include "kubetty.fullname" .)) .Values.dataPVC.name }}{{ else }}{{ .Values.dataPVC.existingClaim | quote }}{{ end }}
       {{- end }}
       {{- if .Values.pipelines.dind.enabled }}
-        - name: dind-storage
-          emptyDir: {}
         - name: dind-sock
           emptyDir: {}
       {{- end }}

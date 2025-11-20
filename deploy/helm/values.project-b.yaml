@@ -9,6 +9,7 @@ deploymentId: project-b
 
 env:
   sessionID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  kubettyMode: "project"
   claudeMaxTokens: "64000"
   anthropicBaseURL: "http://172.25.1.66:8080"
   nodeOptions: "--max-old-space-size=32768"

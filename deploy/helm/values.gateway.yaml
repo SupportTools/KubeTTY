@@ -13,6 +13,7 @@ deploymentId: kubetty-gateway
 
 env:
   sessionID: "11111111-2222-3333-4444-555555555555"
+  kubettyMode: "gateway"
   claudeMaxTokens: "64000"
   anthropicBaseURL: "http://172.25.1.66:8080"
   nodeOptions: "--max-old-space-size=32768"

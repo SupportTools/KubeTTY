@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"embed"
@@ -19,12 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
-
-	"os"
-	"os/signal"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -33,7 +27,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
@@ -41,6 +34,9 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/gateway/manager"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
+	"github.com/supporttools/KubeTTY/server/internal/shared/metrics"
+	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
+	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
 
 //go:embed migrations/*.sql
@@ -124,7 +120,7 @@ func main() {
 		log.Fatalf("prepare static assets: %v", err)
 	}
 
-	appMetrics := newAppMetrics()
+	appMetrics := metrics.NewAppMetrics()
 
 	srv := &server{
 		cfg:       cfg,
@@ -161,42 +157,35 @@ func main() {
 				http.Error(w, "gateway disabled", http.StatusNotFound)
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
+			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
 		})))
 		mux.Handle("/api/tabs", srv.requireAuth(http.HandlerFunc(srv.handleTabs)))
 		mux.Handle("/api/tabs/", srv.requireAuth(http.HandlerFunc(srv.handleTabByID)))
 		mux.Handle("/api/tabs/events", srv.requireAuth(http.HandlerFunc(srv.handleTabEvents)))
 	} else {
-		mux.Handle("/session/logs", srv.appMetrics.instrumentHandler("session_logs", http.HandlerFunc(srv.handleSessionLogs)))
-		mux.Handle("/ws", srv.appMetrics.instrumentHandler("ws", http.HandlerFunc(srv.handleGatewayWebsocket)))
+		mux.Handle("/session/logs", srv.appMetrics.InstrumentHandler("session_logs", http.HandlerFunc(srv.handleSessionLogs)))
+		mux.Handle("/ws", srv.appMetrics.InstrumentHandler("ws", http.HandlerFunc(srv.handleGatewayWebsocket)))
 		mux.Handle("/api/projects", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if srv.tabManager == nil {
 				http.Error(w, "gateway disabled", http.StatusNotFound)
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
+			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
 		}))
 		mux.Handle("/api/tabs", http.HandlerFunc(srv.handleTabs))
 		mux.Handle("/api/tabs/", http.HandlerFunc(srv.handleTabByID))
 		mux.Handle("/api/tabs/events", http.HandlerFunc(srv.handleTabEvents))
 	}
 	// Static files are always public (React handles auth state)
-	mux.Handle("/", srv.appMetrics.instrumentHandler("static", srv.staticHandler()))
+	mux.Handle("/", srv.appMetrics.InstrumentHandler("static", srv.staticHandler()))
 
 	httpSrv := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: logRequest(mux),
+		Handler: sharedserver.LoggingMiddleware(mux),
 	}
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		log.Printf("received %s, shutting down", sig)
-		if err := httpSrv.Shutdown(context.Background()); err != nil {
-			log.Printf("warn: http shutdown: %v", err)
-		}
-	}()
+	// Start graceful shutdown handler in background
+	go sharedserver.GracefulShutdown(httpSrv)
 
 	log.Printf("KubeTTY Gateway listening on :%s", cfg.Port)
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -211,7 +200,7 @@ type server struct {
 	authMgr    *auth.Manager
 	upgrader   websocket.Upgrader
 	uiFS       fs.FS
-	appMetrics *appMetrics
+	appMetrics *metrics.AppMetrics
 	tabManager *manager.Manager
 	tabStore   tabs.Store
 	tabSubsMu  sync.Mutex
@@ -348,7 +337,7 @@ func (s *server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.setAuthCookies(w, tokens)
-	writeJSON(w, http.StatusOK, map[string]any{
+	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
 		"user":             map[string]any{"id": user.ID.String(), "username": user.Username},
 		"accessToken":      tokens.AccessToken,
 		"accessExpiresAt":  tokens.AccessExpiresAt,
@@ -395,7 +384,7 @@ func (s *server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid access token", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
 		"user":             map[string]any{"id": claims.Subject, "username": claims.Username},
 		"accessToken":      pair.AccessToken,
 		"accessExpiresAt":  pair.AccessExpiresAt,
@@ -433,7 +422,7 @@ func (s *server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
 		"user": map[string]any{"id": user.ID.String(), "username": user.Username},
 	})
 }
@@ -482,7 +471,7 @@ func (s *server) handleAuthPasswordChange(w http.ResponseWriter, r *http.Request
 	s.clearAccessCookie(w)
 	s.clearRefreshCookie(w)
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
 		"message": "password changed successfully",
 	})
 }
@@ -506,7 +495,7 @@ func (s *server) handleAuthFailure(w http.ResponseWriter, err error) {
 	}
 	s.clearAccessCookie(w)
 	w.Header().Set("WWW-Authenticate", `Bearer realm="kubetty"`)
-	writeJSON(w, status, map[string]any{"error": msg})
+	_ = util.WriteJSON(w, status, map[string]any{"error": msg})
 }
 
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -539,7 +528,7 @@ func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		components["gateway"] = "disabled"
 	}
 
-	writeJSON(w, httpStatus, map[string]any{
+	_ = util.WriteJSON(w, httpStatus, map[string]any{
 		"status":     status,
 		"components": components,
 	})
@@ -728,7 +717,7 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("list tabs: %v", err), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"tabs": items})
+		_ = util.WriteJSON(w, http.StatusOK, map[string]any{"tabs": items})
 	case http.MethodPost:
 		var req struct {
 			ProjectID string `json:"projectId"`
@@ -750,7 +739,7 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 			"tab":   tab,
 			"wsUrl": fmt.Sprintf("%s://%s/ws?tab=%s", wsScheme(r), r.Host, tab.TabID),
 		}
-		writeJSON(w, http.StatusCreated, resp)
+		_ = util.WriteJSON(w, http.StatusCreated, resp)
 		s.broadcastTabSnapshot(clientID)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -914,12 +903,6 @@ func wsScheme(r *http.Request) string {
 	return "ws"
 }
 
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
-}
-
 func (s *server) subscribeTabEvents(clientID string) chan []byte {
 	s.tabSubsMu.Lock()
 	defer s.tabSubsMu.Unlock()
@@ -986,15 +969,7 @@ func (s *server) observeStore(op string, start time.Time, err error) {
 	if s == nil || s.appMetrics == nil {
 		return
 	}
-	s.appMetrics.observeStore(op, time.Since(start), err)
-}
-
-func logRequest(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start))
-	})
+	s.appMetrics.ObserveStore(op, time.Since(start), err)
 }
 
 func cloneURL(u *url.URL) *url.URL {
@@ -1030,116 +1005,4 @@ func runMigrations(ctx context.Context, connString string) error {
 		return fmt.Errorf("migrate up: %w", err)
 	}
 	return nil
-}
-
-// App metrics for gateway
-type appMetrics struct {
-	wsBytes       *prometheus.CounterVec
-	storeDuration *prometheus.HistogramVec
-	storeErrors   *prometheus.CounterVec
-	httpDuration  *prometheus.HistogramVec
-	httpRequests  *prometheus.CounterVec
-}
-
-func newAppMetrics() *appMetrics {
-	m := &appMetrics{
-		wsBytes: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kubetty_ws_bytes_total",
-			Help: "Bytes relayed over WebSocket in each direction.",
-		}, []string{"direction"}),
-		storeDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "kubetty_store_operation_seconds",
-			Help:    "Time spent performing CNPG store operations.",
-			Buckets: prometheus.DefBuckets,
-		}, []string{"operation"}),
-		storeErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kubetty_store_errors_total",
-			Help: "Counts store operations that returned an error.",
-		}, []string{"operation"}),
-		httpDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "kubetty_http_request_seconds",
-			Help:    "Duration of HTTP handlers.",
-			Buckets: prometheus.DefBuckets,
-		}, []string{"handler", "method"}),
-		httpRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kubetty_http_requests_total",
-			Help: "HTTP requests handled labeled by handler/method/status.",
-		}, []string{"handler", "method", "status"}),
-	}
-	prometheus.MustRegister(
-		m.wsBytes,
-		m.storeDuration,
-		m.storeErrors,
-		m.httpDuration,
-		m.httpRequests,
-	)
-	return m
-}
-
-func (m *appMetrics) observeWSBytes(direction string, n int) {
-	if m == nil || n <= 0 {
-		return
-	}
-	m.wsBytes.WithLabelValues(direction).Add(float64(n))
-}
-
-func (m *appMetrics) observeStore(op string, duration time.Duration, err error) {
-	if m == nil {
-		return
-	}
-	m.storeDuration.WithLabelValues(op).Observe(duration.Seconds())
-	if err != nil {
-		m.storeErrors.WithLabelValues(op).Inc()
-	}
-}
-
-func (m *appMetrics) instrumentHandler(name string, handler http.Handler) http.Handler {
-	if m == nil {
-		return handler
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		start := time.Now()
-		handler.ServeHTTP(rec, r)
-		elapsed := time.Since(start)
-		status := strconv.Itoa(rec.status)
-		m.httpRequests.WithLabelValues(name, r.Method, status).Inc()
-		m.httpDuration.WithLabelValues(name, r.Method).Observe(elapsed.Seconds())
-	})
-}
-
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-	wrote  atomic.Bool
-}
-
-func (sr *statusRecorder) WriteHeader(code int) {
-	if sr.wrote.CompareAndSwap(false, true) {
-		sr.status = code
-		sr.ResponseWriter.WriteHeader(code)
-		return
-	}
-	sr.ResponseWriter.WriteHeader(code)
-}
-
-func (sr *statusRecorder) Write(b []byte) (int, error) {
-	if sr.wrote.CompareAndSwap(false, true) {
-		sr.status = http.StatusOK
-	}
-	return sr.ResponseWriter.Write(b)
-}
-
-func (sr *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	hijacker, ok := sr.ResponseWriter.(http.Hijacker)
-	if !ok {
-		return nil, nil, fmt.Errorf("statusRecorder: underlying writer does not support hijacking")
-	}
-	return hijacker.Hijack()
-}
-
-func (sr *statusRecorder) Flush() {
-	if flusher, ok := sr.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
 }

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/supporttools/KubeTTY/server/internal/config"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
+	"github.com/supporttools/KubeTTY/server/internal/shared/handlers"
 	"github.com/supporttools/KubeTTY/server/internal/shared/health"
 	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
 )
@@ -597,42 +597,13 @@ func (s *server) enforceLogRetention(ctx context.Context) {
 }
 
 func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	sessionID := r.URL.Query().Get("session")
-	if sessionID == "" {
-		http.Error(w, "missing session parameter", http.StatusBadRequest)
-		return
-	}
-	limit := 200
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil {
-			switch {
-			case parsed <= 0:
-			case parsed > 2000:
-				limit = 2000
-			default:
-				limit = parsed
-			}
-		}
-	}
-	start := time.Now()
-	logs, err := s.store.ListLogs(ctx, sessionID, limit)
-	s.observeStore("ListLogs", start, err)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("list logs: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if logs == nil {
-		logs = []sessions.LogEntry{}
-	}
-	resp := map[string]any{
-		"sessionId": sessionID,
-		"logs":      logs,
-	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+	// Delegate to shared handler implementation
+	handlers.NewSessionLogsHandler(s.store, s).ServeHTTP(w, r)
+}
+
+// ObserveStore implements handlers.StoreMetricsObserver interface
+func (s *server) ObserveStore(operation string, start time.Time, err error) {
+	s.observeStore(operation, start, err)
 }
 
 func (s *server) staticHandler(w http.ResponseWriter, r *http.Request) {

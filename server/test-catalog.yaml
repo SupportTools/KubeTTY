@@ -1,0 +1,15 @@
+projects:
+  - id: test-project
+    displayName: "Test Project"
+    namespace: kubetty-test
+    service: kubetty-test-kubetty
+    port: 8080
+    # No limits specified = unlimited tabs (backward compatible)
+  - id: another-project
+    displayName: "Another Test Project"
+    namespace: kubetty-another
+    service: kubetty-another-kubetty
+    port: 8080
+    limits:
+      maxTabsPerClient: 1   # Enforce single shell per user (recommended)
+      maxTabsTotal: 10      # Total concurrent users

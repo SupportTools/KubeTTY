@@ -138,3 +138,18 @@ FROM gateway_tabs`
 	}
 	return result, rows.Err()
 }
+
+// CountByClientAndProject returns the number of active tabs for a specific client and project.
+// Note: Closed tabs are deleted from the database (via CloseTab/closeIdleTab calling store.Delete),
+// so this naturally counts only active tabs without needing status filtering.
+func (s *PGXStore) CountByClientAndProject(ctx context.Context, clientID, projectID string) (int, error) {
+	const stmt = `
+SELECT COUNT(*)
+FROM gateway_tabs
+WHERE client_id = $1 AND project_id = $2`
+	var count int
+	if err := s.pool.QueryRow(ctx, stmt, clientID, projectID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count tabs: %w", err)
+	}
+	return count, nil
+}

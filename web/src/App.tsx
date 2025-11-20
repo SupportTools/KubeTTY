@@ -2,7 +2,13 @@ import { useState, useCallback, useEffect, useMemo } from "react";
 import TerminalView from "./components/TerminalView";
 import TabBar from "./components/TabBar";
 import ProjectPicker from "./components/ProjectPicker";
+import Login from "./components/Login";
+import ProfileModal from "./components/ProfileModal";
+import PasswordChangeModal from "./components/PasswordChangeModal";
+import LogoutConfirmDialog from "./components/LogoutConfirmDialog";
+import { useAuth } from "./contexts/AuthContext";
 import { GatewayTab, ProjectInfo, ProjectsResponse, TabEvent } from "./types";
+import { parseErrorResponse } from "./utils/errorParser";
 import logo from "./assets/logo.svg";
 
 type GatewayState = "unknown" | "enabled" | "disabled";
@@ -10,13 +16,19 @@ type GatewayState = "unknown" | "enabled" | "disabled";
 type ClientTab = GatewayTab & { wsUrl: string };
 
 const App = () => {
+  const { authState, user: authUser, authFetch } = useAuth();
+
   const [toast, setToast] = useState<string | null>(null);
   const [gatewayState, setGatewayState] = useState<GatewayState>("unknown");
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [tabs, setTabs] = useState<ClientTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
+  const [logoutDialogOpen, setLogoutDialogOpen] = useState(false);
   const [eventRetry, setEventRetry] = useState(0);
+  const authenticated = authState === "authenticated";
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -33,10 +45,25 @@ const App = () => {
   }, []);
 
   useEffect(() => {
+    if (authState !== "unauthenticated") {
+      return;
+    }
+    setProjects([]);
+    setTabs([]);
+    setActiveTabId(null);
+    setPickerOpen(false);
+    setGatewayState("unknown");
+    setEventRetry(0);
+  }, [authState]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      return;
+    }
     let cancelled = false;
     const loadProjects = async () => {
       try {
-        const res = await fetch("/api/projects");
+        const res = await authFetch("/api/projects");
         if (!res.ok) {
           throw new Error("gateway disabled");
         }
@@ -55,27 +82,21 @@ const App = () => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authenticated, authFetch]);
 
   useEffect(() => {
-    if (gatewayState !== "enabled") {
+    if (gatewayState !== "enabled" || !authenticated) {
       return;
     }
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const url = `${protocol}://${window.location.host}/api/tabs/events`;
-    console.log(`[TabEvents] Connecting to ${url} (retry ${eventRetry})`);
 
     const ws = new WebSocket(url);
-
-    ws.onopen = () => {
-      console.log("[TabEvents] Connected successfully");
-    };
 
     ws.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data) as TabEvent;
         if (payload.type === "snapshot") {
-          console.log(`[TabEvents] Received snapshot with ${payload.tabs?.length || 0} tabs`);
           const next = (payload.tabs || []).map((tab) => ({
             ...tab,
             wsUrl: wsForTab(tab.tabId)
@@ -88,7 +109,6 @@ const App = () => {
             return next.length ? next[0].tabId : null;
           });
         } else if (payload.type === "update") {
-          console.log(`[TabEvents] Tab update: ${payload.tab.tabId} -> ${payload.tab.status}`);
           setTabs((prev) => {
             const exists = prev.find((t) => t.tabId === payload.tab.tabId);
             if (exists) {
@@ -97,7 +117,6 @@ const App = () => {
             return [...prev, { ...payload.tab, wsUrl: wsForTab(payload.tab.tabId) }];
           });
         } else if (payload.type === "delete") {
-          console.log(`[TabEvents] Tab deleted: ${payload.tabId}`);
           setTabs((prev) => {
             const next = prev.filter((t) => t.tabId !== payload.tabId);
             setActiveTabId((current) => {
@@ -109,28 +128,24 @@ const App = () => {
             return next;
           });
         }
-      } catch (err) {
-        console.error("[TabEvents] Parse error:", err);
+      } catch {
+        // Ignore parse errors
       }
     };
-    ws.onerror = (event) => {
-      console.error("[TabEvents] Connection error:", event);
+    ws.onerror = () => {
       ws.close();
     };
-    ws.onclose = (event) => {
-      console.log(`[TabEvents] Connection closed: code=${event.code}, reason=${event.reason || 'none'}, wasClean=${event.wasClean}`);
+    ws.onclose = () => {
       // Add delay before reconnecting to prevent rapid reconnection storms
       const delay = Math.min(1000 * Math.pow(2, eventRetry), 16000);
-      console.log(`[TabEvents] Scheduling reconnect in ${delay}ms`);
       setTimeout(() => {
         setEventRetry((prev) => prev + 1);
       }, delay);
     };
     return () => {
-      console.log("[TabEvents] Closing connection (cleanup)");
       ws.close();
     };
-  }, [gatewayState, wsForTab, eventRetry]);
+  }, [gatewayState, wsForTab, eventRetry, authenticated]);
 
   const projectLabels = useMemo(() => {
     const map = new Map<string, string>();
@@ -141,13 +156,14 @@ const App = () => {
   const handleCreateTab = useCallback(
     async (projectId: string) => {
       try {
-        const res = await fetch("/api/tabs", {
+        const res = await authFetch("/api/tabs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ projectId })
         });
         if (!res.ok) {
-          throw new Error(await res.text());
+          const errorMessage = await parseErrorResponse(res);
+          throw new Error(errorMessage);
         }
         const data = await res.json();
         const tab: ClientTab = {
@@ -157,12 +173,11 @@ const App = () => {
         setTabs((prev) => [...prev, tab]);
         setActiveTabId(tab.tabId);
         setPickerOpen(false);
-      } catch (err) {
-        console.error("create tab", err);
+      } catch {
         showToast("Failed to open tab");
       }
     },
-    [showToast, wsForTab]
+    [showToast, wsForTab, authFetch]
   );
 
   const handleCloseTab = useCallback(
@@ -171,9 +186,10 @@ const App = () => {
         return;
       }
       try {
-        const res = await fetch(`/api/tabs/${tabId}`, { method: "DELETE" });
+        const res = await authFetch(`/api/tabs/${tabId}`, { method: "DELETE" });
         if (!res.ok && res.status !== 404) {
-          throw new Error(await res.text());
+          const errorMessage = await parseErrorResponse(res);
+          throw new Error(errorMessage);
         }
         setTabs((prev) => {
           const next = prev.filter((tab) => tab.tabId !== tabId);
@@ -185,15 +201,14 @@ const App = () => {
           });
           return next;
         });
-      } catch (err) {
-        console.error("close tab", err);
+      } catch {
         showToast("Failed to close tab");
       }
     },
-    [showToast]
+    [showToast, authFetch]
   );
 
-  const showGatewayUI = gatewayState === "enabled";
+  const showGatewayUI = authenticated && gatewayState === "enabled";
   const decoratedTabs = useMemo(
     () =>
       tabs.map((tab) => ({
@@ -204,15 +219,48 @@ const App = () => {
     [tabs, projectLabels]
   );
 
+  const renderHeader = () => (
+    <header className="header">
+      <div className="brand">
+        <img src={logo} alt="KubeTTY" className="logo" />
+        <h1>KubeTTY</h1>
+      </div>
+      {authenticated && (
+        <div className="session-info">
+          {authUser && (
+            <button
+              className="username-button"
+              onClick={() => setProfileOpen(true)}
+            >
+              {authUser.username}
+            </button>
+          )}
+          <button className="secondary" onClick={() => setLogoutDialogOpen(true)}>
+            Logout
+          </button>
+        </div>
+      )}
+    </header>
+  );
+
+  if (authState === "checking") {
+    return (
+      <div className="app-shell">
+        {renderHeader()}
+        <section className="main full-width">
+          <p>Checking authentication…</p>
+        </section>
+      </div>
+    );
+  }
+
+  if (!authenticated) {
+    return <Login />;
+  }
 
   return (
     <div className="app-shell">
-      <header className="header">
-        <div className="brand">
-          <img src={logo} alt="KubeTTY" className="logo" />
-          <h1>KubeTTY</h1>
-        </div>
-      </header>
+      {renderHeader()}
       {toast && <div className="toast">{toast}</div>}
       {showGatewayUI ? (
         <>
@@ -261,6 +309,27 @@ const App = () => {
         <section className="main full-width">
           <TerminalView onReconnect={handleReconnect} />
         </section>
+      )}
+      {profileOpen && (
+        <ProfileModal
+          onClose={() => setProfileOpen(false)}
+          onPasswordChange={() => {
+            setProfileOpen(false);
+            setPasswordChangeOpen(true);
+          }}
+        />
+      )}
+      {passwordChangeOpen && (
+        <PasswordChangeModal
+          onClose={() => setPasswordChangeOpen(false)}
+          onSuccess={() => {
+            setPasswordChangeOpen(false);
+            showToast("Password changed. Please log in again.");
+          }}
+        />
+      )}
+      {logoutDialogOpen && (
+        <LogoutConfirmDialog onClose={() => setLogoutDialogOpen(false)} />
       )}
     </div>
   );

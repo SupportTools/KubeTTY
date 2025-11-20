@@ -62,3 +62,10 @@ export type TabEvent =
   | { type: "snapshot"; tabs: GatewayTab[] }
   | { type: "update"; tab: GatewayTab }
   | { type: "delete"; tabId: string };
+
+export interface ErrorResponse {
+  status: number;
+  error: string;
+  message: string;
+  details?: string;
+}

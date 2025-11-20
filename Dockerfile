@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.6
 
-ARG GO_VERSION=1.23.2
+ARG GO_VERSION=1.23.3
 ARG NODE_MAJOR=20
 ARG KUBECTL_VERSION=v1.30.3
 ARG HELM_VERSION=v3.15.2
@@ -33,7 +33,8 @@ COPY server ./server
 COPY --from=ui-builder /workspace/server/ui/dist ./server/ui/dist
 
 WORKDIR /workspace/server
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /workspace/kubetty .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /workspace/kubetty-gateway ./cmd/gateway && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /workspace/kubetty-project ./cmd/project
 
 ###############################
 # Runtime image with tooling  #
@@ -92,6 +93,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     ripgrep \
+    rsync \
     screen \
     socat \
     strace \
@@ -118,9 +120,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
-
-# Install Claude Code CLI.
-RUN npm install -g @anthropic-ai/claude-code@latest
 
 # Install Docker CLI from Debian repos.
 RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
@@ -177,8 +176,13 @@ RUN chmod -R +x /opt/ai/bin || true
 COPY scripts/claude_with_log.sh /etc/profile.d/claude.sh
 RUN chmod +x /etc/profile.d/claude.sh
 
-# Copy compiled server binary.
-COPY --from=go-builder /workspace/kubetty /usr/local/bin/kubetty
+# Copy compiled server binaries.
+COPY --from=go-builder /workspace/kubetty-gateway /usr/local/bin/kubetty-gateway
+COPY --from=go-builder /workspace/kubetty-project /usr/local/bin/kubetty-project
+
+# Copy and install entrypoint script for mode selection.
+COPY scripts/entrypoint.sh /usr/local/bin/kubetty-entrypoint
+RUN chmod +x /usr/local/bin/kubetty-entrypoint
 
 # Default session storage/log directories.
 RUN mkdir -p /home/mmattox/claude_logs && chown -R mmattox:mmattox /home/mmattox
@@ -198,4 +202,4 @@ RUN chmod 644 /etc/motd
 
 EXPOSE 8080
 USER mmattox
-ENTRYPOINT ["/usr/local/bin/kubetty"]
+ENTRYPOINT ["/usr/local/bin/kubetty-entrypoint"]

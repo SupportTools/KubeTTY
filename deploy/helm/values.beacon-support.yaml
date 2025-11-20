@@ -12,6 +12,7 @@ deploymentId: beacon-support
 
 env:
   sessionID: "302ed84c-08b9-4445-ad92-c9899e7abea6"
+  kubettyMode: "project"
   claudeMaxTokens: "64000"
   anthropicBaseURL: "http://172.25.1.66:8080"
   nodeOptions: "--max-old-space-size=32768"

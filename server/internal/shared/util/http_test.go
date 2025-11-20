@@ -1,6 +1,7 @@
 package util
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -406,3 +407,169 @@ func TestWriteJSON_SpecialCharacters(t *testing.T) {
 // 	// This would panic, which is acceptable behavior
 // 	// err := WriteJSON(nil, http.StatusOK, "test")
 // }
+
+// TestClientIPFromRequest tests extracting client IP from HTTP requests
+func TestClientIPFromRequest(t *testing.T) {
+	tests := []struct {
+		name           string
+		request        *http.Request
+		expectedIP     string
+		description    string
+	}{
+		{
+			name:        "nil request",
+			request:     nil,
+			expectedIP:  "",
+			description: "should return empty string for nil request",
+		},
+		{
+			name: "X-Forwarded-For single IP",
+			request: &http.Request{
+				Header: http.Header{
+					"X-Forwarded-For": []string{"192.168.1.1"},
+				},
+				RemoteAddr: "10.0.0.1:1234",
+			},
+			expectedIP:  "192.168.1.1",
+			description: "should use X-Forwarded-For when present",
+		},
+		{
+			name: "X-Forwarded-For multiple IPs",
+			request: &http.Request{
+				Header: http.Header{
+					"X-Forwarded-For": []string{"192.168.1.1, 10.0.0.1, 172.16.0.1"},
+				},
+				RemoteAddr: "10.0.0.1:1234",
+			},
+			expectedIP:  "192.168.1.1",
+			description: "should return first IP from X-Forwarded-For chain",
+		},
+		{
+			name: "X-Forwarded-For with whitespace",
+			request: &http.Request{
+				Header: http.Header{
+					"X-Forwarded-For": []string{"  192.168.1.1  , 10.0.0.1"},
+				},
+				RemoteAddr: "10.0.0.1:1234",
+			},
+			expectedIP:  "192.168.1.1",
+			description: "should trim whitespace from X-Forwarded-For",
+		},
+		{
+			name: "RemoteAddr with port",
+			request: &http.Request{
+				Header:     http.Header{},
+				RemoteAddr: "192.168.1.1:54321",
+			},
+			expectedIP:  "192.168.1.1",
+			description: "should extract IP from RemoteAddr with port",
+		},
+		{
+			name: "RemoteAddr without port",
+			request: &http.Request{
+				Header:     http.Header{},
+				RemoteAddr: "192.168.1.1",
+			},
+			expectedIP:  "192.168.1.1",
+			description: "should return RemoteAddr when no port present",
+		},
+		{
+			name: "IPv6 address",
+			request: &http.Request{
+				Header:     http.Header{},
+				RemoteAddr: "[2001:db8::1]:8080",
+			},
+			expectedIP:  "2001:db8::1",
+			description: "should handle IPv6 addresses correctly",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ClientIPFromRequest(tt.request)
+			if result != tt.expectedIP {
+				t.Errorf("%s: got %q, want %q", tt.description, result, tt.expectedIP)
+			}
+		})
+	}
+}
+
+// TestWebSocketScheme tests WebSocket scheme determination
+func TestWebSocketScheme(t *testing.T) {
+	tests := []struct {
+		name           string
+		setupRequest   func() *http.Request
+		expectedScheme string
+		description    string
+	}{
+		{
+			name: "TLS connection",
+			setupRequest: func() *http.Request {
+				req := httptest.NewRequest("GET", "/ws", nil)
+				req.TLS = &tls.ConnectionState{} // Simulate TLS by setting non-nil TLS field
+				return req
+			},
+			expectedScheme: "wss",
+			description:    "should return wss for TLS connections",
+		},
+		{
+			name: "X-Forwarded-Proto HTTPS (lowercase)",
+			setupRequest: func() *http.Request {
+				req := httptest.NewRequest("GET", "/ws", nil)
+				req.Header.Set("X-Forwarded-Proto", "https")
+				return req
+			},
+			expectedScheme: "wss",
+			description:    "should return wss for X-Forwarded-Proto: https",
+		},
+		{
+			name: "X-Forwarded-Proto HTTPS (uppercase)",
+			setupRequest: func() *http.Request {
+				req := httptest.NewRequest("GET", "/ws", nil)
+				req.Header.Set("X-Forwarded-Proto", "HTTPS")
+				return req
+			},
+			expectedScheme: "wss",
+			description:    "should be case-insensitive for X-Forwarded-Proto",
+		},
+		{
+			name: "X-Forwarded-Proto HTTPS (mixed case)",
+			setupRequest: func() *http.Request {
+				req := httptest.NewRequest("GET", "/ws", nil)
+				req.Header.Set("X-Forwarded-Proto", "HtTpS")
+				return req
+			},
+			expectedScheme: "wss",
+			description:    "should handle mixed case X-Forwarded-Proto",
+		},
+		{
+			name: "plain HTTP",
+			setupRequest: func() *http.Request {
+				req := httptest.NewRequest("GET", "/ws", nil)
+				return req
+			},
+			expectedScheme: "ws",
+			description:    "should return ws for plain HTTP",
+		},
+		{
+			name: "X-Forwarded-Proto HTTP",
+			setupRequest: func() *http.Request {
+				req := httptest.NewRequest("GET", "/ws", nil)
+				req.Header.Set("X-Forwarded-Proto", "http")
+				return req
+			},
+			expectedScheme: "ws",
+			description:    "should return ws for X-Forwarded-Proto: http",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := tt.setupRequest()
+			result := WebSocketScheme(req)
+			if result != tt.expectedScheme {
+				t.Errorf("%s: got %q, want %q", tt.description, result, tt.expectedScheme)
+			}
+		})
+	}
+}

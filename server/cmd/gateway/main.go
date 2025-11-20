@@ -11,11 +11,9 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +32,7 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/gateway/manager"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
+	"github.com/supporttools/KubeTTY/server/internal/shared/handlers"
 	"github.com/supporttools/KubeTTY/server/internal/shared/health"
 	"github.com/supporttools/KubeTTY/server/internal/shared/metrics"
 	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
@@ -517,7 +516,7 @@ func (s *server) tokenMetadataFromRequest(r *http.Request) auth.TokenMetadata {
 	return auth.TokenMetadata{
 		CreatedBy: r.Header.Get("X-Requested-By"),
 		UserAgent: r.UserAgent(),
-		ClientIP:  clientIPFromRequest(r),
+		ClientIP:  util.ClientIPFromRequest(r),
 	}
 }
 
@@ -592,60 +591,14 @@ func (s *server) cookieTemplate(name, value string, expires time.Time) *http.Coo
 	return c
 }
 
-func clientIPFromRequest(r *http.Request) string {
-	if r == nil {
-		return ""
-	}
-	if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
-		parts := strings.Split(xf, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
+func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
+	// Delegate to shared handler implementation
+	handlers.NewSessionLogsHandler(s.store, s).ServeHTTP(w, r)
 }
 
-func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	sessionID := r.URL.Query().Get("session")
-	if sessionID == "" {
-		http.Error(w, "missing session parameter", http.StatusBadRequest)
-		return
-	}
-	limit := 200
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil {
-			switch {
-			case parsed <= 0:
-			case parsed > 2000:
-				limit = 2000
-			default:
-				limit = parsed
-			}
-		}
-	}
-	start := time.Now()
-	logs, err := s.store.ListLogs(ctx, sessionID, limit)
-	s.observeStore("ListLogs", start, err)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("list logs: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if logs == nil {
-		logs = []sessions.LogEntry{}
-	}
-	resp := map[string]any{
-		"sessionId": sessionID,
-		"logs":      logs,
-	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+// ObserveStore implements handlers.StoreMetricsObserver interface
+func (s *server) ObserveStore(operation string, start time.Time, err error) {
+	s.observeStore(operation, start, err)
 }
 
 func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) {
@@ -716,7 +669,7 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 		}
 		resp := map[string]any{
 			"tab":   tab,
-			"wsUrl": fmt.Sprintf("%s://%s/ws?tab=%s", wsScheme(r), r.Host, tab.TabID),
+			"wsUrl": fmt.Sprintf("%s://%s/ws?tab=%s", util.WebSocketScheme(r), r.Host, tab.TabID),
 		}
 		_ = util.WriteJSON(w, http.StatusCreated, resp)
 		s.broadcastTabSnapshot(clientID)
@@ -873,13 +826,6 @@ func (s *server) ensureClientID(w http.ResponseWriter, r *http.Request) string {
 		MaxAge:   int((365 * 24 * time.Hour) / time.Second),
 	})
 	return id
-}
-
-func wsScheme(r *http.Request) string {
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-		return "wss"
-	}
-	return "ws"
 }
 
 func (s *server) subscribeTabEvents(clientID string) chan []byte {

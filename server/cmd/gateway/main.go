@@ -61,9 +61,11 @@ const (
 var usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 func main() {
-	ctx := context.Background()
+	// Create cancellable context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadGatewayConfig()
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
@@ -107,13 +109,18 @@ func main() {
 			log.Fatalf("gateway pool: %v", err)
 		}
 		tabStore = tabs.NewPGXStore(tabPool)
-		tabManager = manager.New(cfg.ProjectCatalog, tabStore)
+		tabManager = manager.New(cfg.ProjectCatalog, tabStore, cfg.TabIdleTimeout)
 		if err := tabManager.RestoreTabs(ctx); err != nil {
 			log.Printf("warn: restore tabs: %v", err)
 		}
+		// Start idle checker goroutine for tab timeout monitoring
+		go tabManager.StartIdleChecker(ctx)
 	}
 	if tabPool != nil {
 		defer tabPool.Close()
+	}
+	if tabManager != nil {
+		defer tabManager.Stop()
 	}
 
 	uiFS, err := fs.Sub(embeddedUI, "ui/dist")
@@ -221,7 +228,7 @@ func main() {
 }
 
 type server struct {
-	cfg        config.Config
+	cfg        config.GatewayConfig
 	store      sessions.Store
 	authStore  auth.Store
 	authMgr    *auth.Manager
@@ -343,6 +350,15 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 		}
 		tab, err := s.tabManager.CreateTab(r.Context(), req.ProjectID, clientID)
 		if err != nil {
+			// Check if error is due to tab limit exceeded
+			var limitErr *manager.TabLimitExceededError
+			if errors.As(err, &limitErr) {
+				apierrors.WriteError(w, apierrors.RateLimitExceeded(
+					"maximum tabs per client exceeded",
+					fmt.Sprintf("limit: %d tabs per client for project %s", limitErr.Limit, limitErr.ProjectID),
+				))
+				return
+			}
 			log.Printf("create tab error: %v", err)
 			apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 			return

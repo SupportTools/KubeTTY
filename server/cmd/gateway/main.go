@@ -34,6 +34,7 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/gateway/manager"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
+	"github.com/supporttools/KubeTTY/server/internal/shared/health"
 	"github.com/supporttools/KubeTTY/server/internal/shared/metrics"
 	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
@@ -143,7 +144,21 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.Handle("/debug/vars", expvar.Handler())
-	mux.Handle("/api/healthz", http.HandlerFunc(srv.handleHealthz))
+
+	// Health check with gateway component status
+	gatewayChecker := health.NewComponentChecker("gateway", func() string {
+		if srv.tabManager != nil {
+			return "enabled"
+		}
+		return "disabled"
+	})
+	var dbPinger health.Pinger
+	if srv.store != nil {
+		if pgxStore, ok := srv.store.(*sessions.PGXStore); ok {
+			dbPinger = pgxStore
+		}
+	}
+	mux.Handle("/api/healthz", health.NewCompatHandler(dbPinger, gatewayChecker))
 	if srv.authEnabled() {
 		mux.Handle("/api/auth/login", http.HandlerFunc(srv.handleAuthLogin))
 		mux.Handle("/api/auth/refresh", http.HandlerFunc(srv.handleAuthRefresh))
@@ -496,42 +511,6 @@ func (s *server) handleAuthFailure(w http.ResponseWriter, err error) {
 	s.clearAccessCookie(w)
 	w.Header().Set("WWW-Authenticate", `Bearer realm="kubetty"`)
 	_ = util.WriteJSON(w, status, map[string]any{"error": msg})
-}
-
-func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	status := "healthy"
-	httpStatus := http.StatusOK
-	components := make(map[string]string)
-
-	// Check database connectivity
-	if s.store != nil {
-		if pgxStore, ok := s.store.(*sessions.PGXStore); ok {
-			if err := pgxStore.Ping(ctx); err != nil {
-				status = "unhealthy"
-				httpStatus = http.StatusServiceUnavailable
-				components["database"] = fmt.Sprintf("error: %v", err)
-			} else {
-				components["database"] = "ok"
-			}
-		} else {
-			components["database"] = "unknown"
-		}
-	} else {
-		components["database"] = "not_configured"
-	}
-
-	// Gateway mode indicator
-	if s.tabManager != nil {
-		components["gateway"] = "enabled"
-	} else {
-		components["gateway"] = "disabled"
-	}
-
-	_ = util.WriteJSON(w, httpStatus, map[string]any{
-		"status":     status,
-		"components": components,
-	})
 }
 
 func (s *server) tokenMetadataFromRequest(r *http.Request) auth.TokenMetadata {

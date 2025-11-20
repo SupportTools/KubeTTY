@@ -25,8 +25,8 @@ import (
 
 	"github.com/supporttools/KubeTTY/server/internal/config"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
+	"github.com/supporttools/KubeTTY/server/internal/shared/health"
 	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
-	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
 
 //go:embed migrations/*.sql
@@ -117,7 +117,18 @@ func main() {
 
 	// Public endpoints
 	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/api/healthz", srv.handleHealthz)
+
+	// Health check with PTY component status
+	ptyChecker := health.NewPTYChecker(&srv.mu, func() bool {
+		return srv.pty != nil && srv.pty.isAlive()
+	})
+	var dbPinger health.Pinger
+	if srv.store != nil {
+		if pgxStore, ok := srv.store.(*sessions.PGXStore); ok {
+			dbPinger = pgxStore
+		}
+	}
+	mux.Handle("/api/healthz", health.NewCompatHandler(dbPinger, ptyChecker))
 
 	// Project endpoints - PTY WebSocket and session logs (no auth in project mode)
 	mux.HandleFunc("/ws", srv.handleWebsocket)
@@ -627,46 +638,6 @@ func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
 func (s *server) staticHandler(w http.ResponseWriter, r *http.Request) {
 	// Placeholder - will be implemented
 	http.NotFound(w, r)
-}
-
-func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	status := "healthy"
-	httpStatus := http.StatusOK
-	components := make(map[string]string)
-
-	// Check database connectivity
-	if s.store != nil {
-		if pgxStore, ok := s.store.(*sessions.PGXStore); ok {
-			if err := pgxStore.Ping(ctx); err != nil {
-				status = "unhealthy"
-				httpStatus = http.StatusServiceUnavailable
-				components["database"] = fmt.Sprintf("error: %v", err)
-			} else {
-				components["database"] = "ok"
-			}
-		} else {
-			components["database"] = "unknown"
-		}
-	} else {
-		components["database"] = "not_configured"
-	}
-
-	// PTY status
-	s.mu.RLock()
-	ptyAlive := s.pty != nil && s.pty.isAlive()
-	s.mu.RUnlock()
-
-	if ptyAlive {
-		components["pty"] = "alive"
-	} else {
-		components["pty"] = "not_started"
-	}
-
-	_ = util.WriteJSON(w, httpStatus, map[string]any{
-		"status":     status,
-		"components": components,
-	})
 }
 
 func (s *server) observeStore(op string, start time.Time, err error) {

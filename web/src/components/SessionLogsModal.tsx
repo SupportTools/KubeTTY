@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { SessionLogEntry, SessionLogsResponse, SessionMeta } from "../types";
+import { parseErrorResponse } from "../utils/errorParser";
 
 type Props = {
   session: SessionMeta | null;
@@ -24,9 +25,12 @@ const SessionLogsModal = ({ session, onClose }: Props) => {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/session/logs?session=${sessionId}&limit=${limit}`);
+        const res = await fetch(`/session/logs?session=${sessionId}&limit=${limit}`, {
+          credentials: "include"
+        });
         if (!res.ok) {
-          throw new Error(await res.text());
+          const errorMessage = await parseErrorResponse(res);
+          throw new Error(errorMessage);
         }
         const body = (await res.json()) as SessionLogsResponse;
         if (!cancelled) {

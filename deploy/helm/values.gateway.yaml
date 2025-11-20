@@ -41,6 +41,10 @@ gateway:
           namespace: kubetty-beacon-support
           service: kubetty-beacon-support-kubetty
           port: 8080
+          # Optional: enforce per-user tab limits (0 = unlimited, default)
+          # limits:
+          #   maxTabsPerClient: 1   # Recommended: single shell per user per project
+          #   maxTabsTotal: 10      # Total concurrent shells for this project
         # Add other project pods here
     mountPath: /etc/kubetty
     fileName: projects.yaml

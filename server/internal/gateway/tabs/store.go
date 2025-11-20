@@ -36,6 +36,7 @@ type Store interface {
 	Get(ctx context.Context, tabID string) (*Tab, error)
 	ListByClient(ctx context.Context, clientID string, limit int) ([]Tab, error)
 	ListAll(ctx context.Context) ([]Tab, error)
+	CountByClientAndProject(ctx context.Context, clientID, projectID string) (int, error)
 }
 
 // ErrNotFound is returned when a tab does not exist.

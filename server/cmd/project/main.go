@@ -23,8 +23,9 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/supporttools/KubeTTY/server/internal/config"
+	handlers_session "github.com/supporttools/KubeTTY/server/internal/handlers/session"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
-	"github.com/supporttools/KubeTTY/server/internal/shared/handlers"
+	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/health"
 	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
 )
@@ -132,7 +133,7 @@ func main() {
 
 	// Project endpoints - PTY WebSocket and session logs (no auth in project mode)
 	mux.HandleFunc("/ws", srv.handleWebsocket)
-	mux.HandleFunc("/session/logs", srv.handleSessionLogs)
+	mux.Handle("/session/logs", handlers_session.NewSessionLogsHandler(srv.store, srv))
 
 	// Static files
 	mux.HandleFunc("/", srv.staticHandler)
@@ -185,8 +186,8 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 
 	// Ensure PTY exists
 	if err := s.initPTY(ctx); err != nil {
-		log.Printf("[WS %s] PTY init failed: %v", connID, err)
-		http.Error(w, fmt.Sprintf("PTY unavailable: %v", err), http.StatusInternalServerError)
+		log.WithError(err).WithField("conn_id", connID).Error("PTY initialization failed")
+		apierrors.WriteError(w, apierrors.InternalServerError("PTY unavailable", ""))
 		return
 	}
 
@@ -196,21 +197,21 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	if ps == nil {
-		http.Error(w, "PTY not initialized", http.StatusInternalServerError)
+		apierrors.WriteError(w, apierrors.InternalServerError("PTY not initialized", ""))
 		return
 	}
 
 	// Enforce single client per session
 	if ps.hasClients() {
 		log.Printf("[WS %s] Rejected: another client is already connected to this session", connID)
-		http.Error(w, "Session already has an active client connection", http.StatusConflict)
+		apierrors.WriteError(w, apierrors.Conflict("session already attached", "only one client allowed"))
 		return
 	}
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[WS %s] Upgrade failed: %v", connID, err)
-		http.Error(w, fmt.Sprintf("upgrade: %v", err), http.StatusInternalServerError)
+		log.WithError(err).WithField("conn_id", connID).Error("WebSocket upgrade failed")
+		apierrors.WriteError(w, apierrors.InternalServerError("WebSocket upgrade failed", ""))
 		return
 	}
 	defer func() {
@@ -596,12 +597,7 @@ func (s *server) enforceLogRetention(ctx context.Context) {
 	}
 }
 
-func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
-	// Delegate to shared handler implementation
-	handlers.NewSessionLogsHandler(s.store, s).ServeHTTP(w, r)
-}
-
-// ObserveStore implements handlers.StoreMetricsObserver interface
+// ObserveStore implements handlers_session.StoreMetricsObserver interface
 func (s *server) ObserveStore(operation string, start time.Time, err error) {
 	s.observeStore(operation, start, err)
 }

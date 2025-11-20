@@ -8,7 +8,6 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
-	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -31,8 +30,10 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/config"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/manager"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
+	handlers_auth "github.com/supporttools/KubeTTY/server/internal/handlers/auth"
+	handlers_session "github.com/supporttools/KubeTTY/server/internal/handlers/session"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
-	"github.com/supporttools/KubeTTY/server/internal/shared/handlers"
+	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/health"
 	"github.com/supporttools/KubeTTY/server/internal/shared/metrics"
 	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
@@ -158,30 +159,42 @@ func main() {
 		}
 	}
 	mux.Handle("/api/healthz", health.NewCompatHandler(dbPinger, gatewayChecker))
+
+	// Auth middleware
+	requireAuth := handlers_auth.RequireAuth(srv.cfg, srv.authMgr)
+
 	if srv.authEnabled() {
-		mux.Handle("/api/auth/login", http.HandlerFunc(srv.handleAuthLogin))
-		mux.Handle("/api/auth/refresh", http.HandlerFunc(srv.handleAuthRefresh))
-		mux.Handle("/api/auth/logout", srv.requireAuth(http.HandlerFunc(srv.handleAuthLogout)))
-		mux.Handle("/api/auth/me", srv.requireAuth(http.HandlerFunc(srv.handleAuthMe)))
-		mux.Handle("/api/auth/password", srv.requireAuth(http.HandlerFunc(srv.handleAuthPasswordChange)))
-		mux.Handle("/session/logs", srv.requireAuth(http.HandlerFunc(srv.handleSessionLogs)))
-		mux.Handle("/ws", srv.requireAuth(http.HandlerFunc(srv.handleGatewayWebsocket)))
-		mux.Handle("/api/projects", srv.requireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Auth handlers (extracted)
+		mux.Handle("/api/auth/login", handlers_auth.NewAuthLoginHandler(srv.cfg, srv.authMgr, srv.authStore))
+		mux.Handle("/api/auth/refresh", handlers_auth.NewAuthRefreshHandler(srv.cfg, srv.authMgr))
+		mux.Handle("/api/auth/logout", requireAuth(handlers_auth.NewAuthLogoutHandler(srv.cfg, srv.authMgr, srv.authStore)))
+		mux.Handle("/api/auth/me", requireAuth(handlers_auth.NewAuthMeHandler()))
+		mux.Handle("/api/auth/password", requireAuth(handlers_auth.NewAuthPasswordChangeHandler(srv.cfg, srv.authMgr)))
+
+		// Session handlers (extracted)
+		mux.Handle("/session/logs", requireAuth(handlers_session.NewSessionLogsHandler(srv.store, srv)))
+
+		// Gateway WebSocket (not yet extracted)
+		mux.Handle("/ws", requireAuth(http.HandlerFunc(srv.handleGatewayWebsocket)))
+		mux.Handle("/api/projects", requireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if srv.tabManager == nil {
-				http.Error(w, "gateway disabled", http.StatusNotFound)
+				apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 				return
 			}
 			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
 		})))
-		mux.Handle("/api/tabs", srv.requireAuth(http.HandlerFunc(srv.handleTabs)))
-		mux.Handle("/api/tabs/", srv.requireAuth(http.HandlerFunc(srv.handleTabByID)))
-		mux.Handle("/api/tabs/events", srv.requireAuth(http.HandlerFunc(srv.handleTabEvents)))
+		mux.Handle("/api/tabs", requireAuth(http.HandlerFunc(srv.handleTabs)))
+		mux.Handle("/api/tabs/", requireAuth(http.HandlerFunc(srv.handleTabByID)))
+		mux.Handle("/api/tabs/events", requireAuth(http.HandlerFunc(srv.handleTabEvents)))
 	} else {
-		mux.Handle("/session/logs", srv.appMetrics.InstrumentHandler("session_logs", http.HandlerFunc(srv.handleSessionLogs)))
+		// Session handlers (extracted) - no auth
+		mux.Handle("/session/logs", srv.appMetrics.InstrumentHandler("session_logs", handlers_session.NewSessionLogsHandler(srv.store, srv)))
+
+		// Gateway WebSocket (not yet extracted)
 		mux.Handle("/ws", srv.appMetrics.InstrumentHandler("ws", http.HandlerFunc(srv.handleGatewayWebsocket)))
 		mux.Handle("/api/projects", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if srv.tabManager == nil {
-				http.Error(w, "gateway disabled", http.StatusNotFound)
+				apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 				return
 			}
 			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
@@ -260,355 +273,20 @@ func (s *server) authEnabled() bool {
 	return s != nil && s.cfg.AuthMode == "local" && s.authMgr != nil
 }
 
-func (s *server) requireAuth(next http.Handler) http.Handler {
-	if next == nil || !s.authEnabled() {
-		return next
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, err := s.authenticateRequest(r)
-		if err != nil {
-			s.handleAuthFailure(w, err)
-			return
-		}
-		ctx := context.WithValue(r.Context(), authUserContextKey, user)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
 
-func (s *server) authenticateRequest(r *http.Request) (*authUser, error) {
-	if !s.authEnabled() {
-		return nil, errAuthDisabled
-	}
-	token := s.accessTokenFromRequest(r)
-	if token == "" {
-		return nil, errAuthMissingToken
-	}
-	claims, err := s.authMgr.ValidateAccessToken(token)
-	if err != nil {
-		return nil, err
-	}
-	userID, err := uuid.Parse(claims.Subject)
-	if err != nil {
-		return nil, auth.ErrTokenMalformed
-	}
-	return &authUser{ID: userID, Username: claims.Username}, nil
-}
-
-func authUserFromContext(ctx context.Context) *authUser {
-	if ctx == nil {
-		return nil
-	}
-	if v, ok := ctx.Value(authUserContextKey).(*authUser); ok {
-		return v
-	}
-	return nil
-}
-
-func (s *server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.authEnabled() {
-		http.Error(w, "auth disabled", http.StatusNotImplemented)
-		return
-	}
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-	req.Username = strings.TrimSpace(req.Username)
-	if req.Username == "" || req.Password == "" {
-		http.Error(w, "username and password required", http.StatusBadRequest)
-		return
-	}
-	if len(req.Username) > maxUsernameLength {
-		http.Error(w, fmt.Sprintf("username must be %d characters or less", maxUsernameLength), http.StatusBadRequest)
-		return
-	}
-	if !usernameRegex.MatchString(req.Username) {
-		http.Error(w, "username must contain only letters, numbers, underscores, and dashes", http.StatusBadRequest)
-		return
-	}
-	user, err := s.authMgr.Authenticate(r.Context(), req.Username, req.Password)
-	if err != nil {
-		if errors.Is(err, auth.ErrInvalidCredentials) {
-			http.Error(w, "invalid credentials", http.StatusUnauthorized)
-			return
-		}
-		http.Error(w, fmt.Sprintf("authenticate: %v", err), http.StatusInternalServerError)
-		return
-	}
-	meta := s.tokenMetadataFromRequest(r)
-	tokens, err := s.authMgr.IssueTokenPair(r.Context(), user, meta)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("issue tokens: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if s.authStore != nil {
-		if err := s.authStore.UpdateLastLogin(r.Context(), user.ID, time.Now()); err != nil {
-			log.Printf("warn: update last login: %v", err)
-		}
-	}
-	s.setAuthCookies(w, tokens)
-	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
-		"user":             map[string]any{"id": user.ID.String(), "username": user.Username},
-		"accessToken":      tokens.AccessToken,
-		"accessExpiresAt":  tokens.AccessExpiresAt,
-		"refreshExpiresAt": tokens.RefreshExpiresAt,
-	})
-}
-
-func (s *server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
-	if !s.authEnabled() {
-		http.Error(w, "auth disabled", http.StatusNotImplemented)
-		return
-	}
-	var req struct {
-		RefreshToken string `json:"refreshToken"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-	token := s.refreshTokenFromRequest(r, strings.TrimSpace(req.RefreshToken))
-	if token == "" {
-		http.Error(w, "refresh token required", http.StatusUnauthorized)
-		return
-	}
-	meta := s.tokenMetadataFromRequest(r)
-	pair, err := s.authMgr.Refresh(r.Context(), token, meta)
-	if err != nil {
-		status := http.StatusUnauthorized
-		switch {
-		case errors.Is(err, auth.ErrTokenExpired):
-			http.Error(w, "refresh token expired", status)
-		case errors.Is(err, auth.ErrTokenRevoked):
-			http.Error(w, "refresh token revoked", status)
-		case errors.Is(err, auth.ErrInvalidCredentials):
-			http.Error(w, "account disabled", status)
-		default:
-			http.Error(w, fmt.Sprintf("refresh: %v", err), http.StatusInternalServerError)
-		}
-		return
-	}
-	s.setAuthCookies(w, pair)
-	claims, err := s.authMgr.ValidateAccessToken(pair.AccessToken)
-	if err != nil {
-		http.Error(w, "invalid access token", http.StatusInternalServerError)
-		return
-	}
-	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
-		"user":             map[string]any{"id": claims.Subject, "username": claims.Username},
-		"accessToken":      pair.AccessToken,
-		"accessExpiresAt":  pair.AccessExpiresAt,
-		"refreshExpiresAt": pair.RefreshExpiresAt,
-	})
-}
-
-func (s *server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
-	if !s.authEnabled() {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	var req struct {
-		RefreshToken string `json:"refreshToken"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-	token := s.refreshTokenFromRequest(r, strings.TrimSpace(req.RefreshToken))
-	if token != "" && s.authStore != nil {
-		if tokenID, _, err := auth.ParseRefreshToken(token); err == nil {
-			if err := s.authStore.RevokeRefreshToken(r.Context(), tokenID, time.Now()); err != nil && !errors.Is(err, auth.ErrRefreshTokenNotFound) {
-				log.Printf("warn: revoke refresh token: %v", err)
-			}
-		}
-	}
-	s.clearAuthCookies(w)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
-	user := authUserFromContext(r.Context())
-	if user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
-		"user": map[string]any{"id": user.ID.String(), "username": user.Username},
-	})
-}
-
-func (s *server) handleAuthPasswordChange(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	user := authUserFromContext(r.Context())
-	if user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	var req struct {
-		CurrentPassword string `json:"currentPassword"`
-		NewPassword     string `json:"newPassword"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if req.CurrentPassword == "" || req.NewPassword == "" {
-		http.Error(w, "current and new password are required", http.StatusBadRequest)
-		return
-	}
-
-	err := s.authMgr.ChangePassword(r.Context(), user.ID, req.CurrentPassword, req.NewPassword)
-	if err != nil {
-		switch {
-		case errors.Is(err, auth.ErrInvalidCredentials):
-			http.Error(w, "current password is incorrect", http.StatusUnauthorized)
-		case errors.Is(err, auth.ErrWeakPassword):
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		default:
-			log.Printf("password change error: %v", err)
-			http.Error(w, "failed to change password", http.StatusInternalServerError)
-		}
-		return
-	}
-
-	// Clear auth cookies since refresh tokens were revoked
-	s.clearAccessCookie(w)
-	s.clearRefreshCookie(w)
-
-	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
-		"message": "password changed successfully",
-	})
-}
-
-func (s *server) handleAuthFailure(w http.ResponseWriter, err error) {
-	msg := "unauthorized"
-	status := http.StatusUnauthorized
-	switch {
-	case errors.Is(err, errAuthMissingToken):
-		msg = "authentication required"
-	case errors.Is(err, auth.ErrTokenExpired):
-		msg = "token expired"
-	case errors.Is(err, auth.ErrTokenMalformed):
-		msg = "token malformed"
-	case errors.Is(err, errAuthDisabled):
-		msg = "auth disabled"
-	default:
-		if err != nil {
-			log.Printf("auth failure: %v", err)
-		}
-	}
-	s.clearAccessCookie(w)
-	w.Header().Set("WWW-Authenticate", `Bearer realm="kubetty"`)
-	_ = util.WriteJSON(w, status, map[string]any{"error": msg})
-}
-
-func (s *server) tokenMetadataFromRequest(r *http.Request) auth.TokenMetadata {
-	return auth.TokenMetadata{
-		CreatedBy: r.Header.Get("X-Requested-By"),
-		UserAgent: r.UserAgent(),
-		ClientIP:  util.ClientIPFromRequest(r),
-	}
-}
-
-func (s *server) accessTokenFromRequest(r *http.Request) string {
-	authz := r.Header.Get("Authorization")
-	if strings.HasPrefix(strings.ToLower(authz), "bearer ") {
-		return strings.TrimSpace(authz[7:])
-	}
-	if c, err := r.Cookie(accessTokenCookieName); err == nil && c.Value != "" {
-		return c.Value
-	}
-	return ""
-}
-
-func (s *server) refreshTokenFromRequest(r *http.Request, provided string) string {
-	if provided != "" {
-		return provided
-	}
-	if c, err := r.Cookie(refreshTokenCookieName); err == nil && c.Value != "" {
-		return c.Value
-	}
-	return ""
-}
-
-func (s *server) setAuthCookies(w http.ResponseWriter, pair *auth.TokenPair) {
-	if pair == nil {
-		return
-	}
-	http.SetCookie(w, s.cookieTemplate(accessTokenCookieName, pair.AccessToken, pair.AccessExpiresAt))
-	http.SetCookie(w, s.cookieTemplate(refreshTokenCookieName, pair.RefreshToken, pair.RefreshExpiresAt))
-}
-
-func (s *server) clearAuthCookies(w http.ResponseWriter) {
-	s.clearAccessCookie(w)
-	s.clearRefreshCookie(w)
-}
-
-func (s *server) clearAccessCookie(w http.ResponseWriter) {
-	c := s.cookieTemplate(accessTokenCookieName, "", time.Time{})
-	c.MaxAge = -1
-	c.Expires = time.Unix(0, 0)
-	http.SetCookie(w, c)
-}
-
-func (s *server) clearRefreshCookie(w http.ResponseWriter) {
-	c := s.cookieTemplate(refreshTokenCookieName, "", time.Time{})
-	c.MaxAge = -1
-	c.Expires = time.Unix(0, 0)
-	http.SetCookie(w, c)
-}
-
-func (s *server) cookieTemplate(name, value string, expires time.Time) *http.Cookie {
-	c := &http.Cookie{
-		Name:     name,
-		Value:    value,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   s.cfg.AuthCookieSecure,
-		SameSite: http.SameSiteLaxMode,
-	}
-	if s.cfg.AuthCookieDomain != "" {
-		c.Domain = s.cfg.AuthCookieDomain
-	}
-	if !expires.IsZero() {
-		c.Expires = expires
-		maxAge := int(time.Until(expires).Seconds())
-		if maxAge < 0 {
-			maxAge = 0
-		}
-		c.MaxAge = maxAge
-	}
-	return c
-}
-
-func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
-	// Delegate to shared handler implementation
-	handlers.NewSessionLogsHandler(s.store, s).ServeHTTP(w, r)
-}
-
-// ObserveStore implements handlers.StoreMetricsObserver interface
+// ObserveStore implements handlers_session.StoreMetricsObserver interface
 func (s *server) ObserveStore(operation string, start time.Time, err error) {
 	s.observeStore(operation, start, err)
 }
 
 func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) {
 	if s.tabManager == nil {
-		http.Error(w, "gateway disabled", http.StatusNotFound)
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 		return
 	}
 	tabID := r.URL.Query().Get("tab")
 	if tabID == "" {
-		http.Error(w, "missing tab parameter", http.StatusBadRequest)
+		apierrors.WriteError(w, apierrors.BadRequest("missing tab parameter", ""))
 		return
 	}
 	clientID := s.ensureClientID(w, r)
@@ -619,7 +297,7 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[GW %s] Upgrade failed: %v", tabID, err)
-		http.Error(w, fmt.Sprintf("upgrade: %v", err), http.StatusInternalServerError)
+		apierrors.WriteError(w, apierrors.InternalServerError("WebSocket upgrade failed", ""))
 		return
 	}
 	defer func() {
@@ -638,7 +316,7 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 
 func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 	if s.tabManager == nil || s.tabStore == nil {
-		http.Error(w, "gateway disabled", http.StatusNotFound)
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 		return
 	}
 	clientID := s.ensureClientID(w, r)
@@ -646,7 +324,8 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		items, err := s.tabStore.ListByClient(r.Context(), clientID, 50)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("list tabs: %v", err), http.StatusInternalServerError)
+			log.Printf("list tabs error: %v", err)
+			apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 			return
 		}
 		_ = util.WriteJSON(w, http.StatusOK, map[string]any{"tabs": items})
@@ -655,16 +334,17 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 			ProjectID string `json:"projectId"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, fmt.Sprintf("decode body: %v", err), http.StatusBadRequest)
+			apierrors.WriteError(w, apierrors.BadRequest("invalid request body", ""))
 			return
 		}
 		if req.ProjectID == "" {
-			http.Error(w, "projectId is required", http.StatusBadRequest)
+			apierrors.WriteError(w, apierrors.BadRequest("projectId is required", ""))
 			return
 		}
 		tab, err := s.tabManager.CreateTab(r.Context(), req.ProjectID, clientID)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("create tab: %v", err), http.StatusInternalServerError)
+			log.Printf("create tab error: %v", err)
+			apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 			return
 		}
 		resp := map[string]any{
@@ -674,44 +354,54 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 		_ = util.WriteJSON(w, http.StatusCreated, resp)
 		s.broadcastTabSnapshot(clientID)
 	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		apierrors.WriteError(w, apierrors.ErrorResponse{
+			Status:  http.StatusMethodNotAllowed,
+			Error:   "method_not_allowed",
+			Message: "method not allowed",
+		})
 	}
 }
 
 func (s *server) handleTabByID(w http.ResponseWriter, r *http.Request) {
 	if s.tabManager == nil || s.tabStore == nil {
-		http.Error(w, "gateway disabled", http.StatusNotFound)
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 		return
 	}
 	if r.Method != http.MethodDelete {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		apierrors.WriteError(w, apierrors.ErrorResponse{
+			Status:  http.StatusMethodNotAllowed,
+			Error:   "method_not_allowed",
+			Message: "method not allowed",
+		})
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/tabs/")
 	if id == "" {
-		http.Error(w, "missing tab id", http.StatusBadRequest)
+		apierrors.WriteError(w, apierrors.BadRequest("missing tab id", ""))
 		return
 	}
 	clientID := s.ensureClientID(w, r)
 	tab, err := s.tabStore.Get(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, tabs.ErrNotFound) {
-			http.Error(w, "tab not found", http.StatusNotFound)
+			apierrors.WriteError(w, apierrors.NotFound("tab not found", ""))
 			return
 		}
-		http.Error(w, fmt.Sprintf("load tab: %v", err), http.StatusInternalServerError)
+		log.Printf("load tab error: %v", err)
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 		return
 	}
 	if tab.ClientID != clientID {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		apierrors.WriteError(w, apierrors.Forbidden("forbidden", ""))
 		return
 	}
 	if err := s.tabManager.CloseTab(r.Context(), id); err != nil {
 		if errors.Is(err, tabs.ErrNotFound) {
-			http.Error(w, "tab not found", http.StatusNotFound)
+			apierrors.WriteError(w, apierrors.NotFound("tab not found", ""))
 			return
 		}
-		http.Error(w, fmt.Sprintf("close tab: %v", err), http.StatusInternalServerError)
+		log.Printf("close tab error: %v", err)
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -720,7 +410,7 @@ func (s *server) handleTabByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleTabEvents(w http.ResponseWriter, r *http.Request) {
 	if s.tabManager == nil || s.tabStore == nil {
-		http.Error(w, "gateway disabled", http.StatusNotFound)
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 		return
 	}
 	if websocket.IsWebSocketUpgrade(r) {
@@ -739,7 +429,7 @@ func (s *server) handleTabEventsWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[TabEvents %s] Upgrade failed: %v", clientID, err)
-		http.Error(w, fmt.Sprintf("upgrade: %v", err), http.StatusInternalServerError)
+		apierrors.WriteError(w, apierrors.InternalServerError("WebSocket upgrade failed", ""))
 		return
 	}
 	defer func() {
@@ -775,7 +465,7 @@ func (s *server) handleTabEventsSSE(w http.ResponseWriter, r *http.Request) {
 	clientID := s.ensureClientID(w, r)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		apierrors.WriteError(w, apierrors.InternalServerError("streaming unsupported", ""))
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")

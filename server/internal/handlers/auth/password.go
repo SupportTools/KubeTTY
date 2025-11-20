@@ -8,6 +8,7 @@ import (
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	"github.com/supporttools/KubeTTY/server/internal/config"
+	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
 
@@ -63,24 +64,28 @@ type PasswordChangeResponse struct {
 func NewAuthPasswordChangeHandler(cfg config.Config, authMgr *auth.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			_ = apierrors.WriteError(w, apierrors.ErrorResponse{
+				Status:  http.StatusMethodNotAllowed,
+				Error:   "method_not_allowed",
+				Message: "method not allowed",
+			})
 			return
 		}
 
 		user := UserFromContext(r.Context())
 		if user == nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			_ = apierrors.WriteError(w, apierrors.Unauthorized("unauthorized", ""))
 			return
 		}
 
 		var req PasswordChangeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
+			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid request body", err.Error()))
 			return
 		}
 
 		if req.CurrentPassword == "" || req.NewPassword == "" {
-			http.Error(w, "current and new password are required", http.StatusBadRequest)
+			_ = apierrors.WriteError(w, apierrors.BadRequest("current and new password are required", ""))
 			return
 		}
 
@@ -88,12 +93,12 @@ func NewAuthPasswordChangeHandler(cfg config.Config, authMgr *auth.Manager) http
 		if err != nil {
 			switch {
 			case errors.Is(err, auth.ErrInvalidCredentials):
-				http.Error(w, "current password is incorrect", http.StatusUnauthorized)
+				_ = apierrors.WriteError(w, apierrors.Unauthorized("current password is incorrect", ""))
 			case errors.Is(err, auth.ErrWeakPassword):
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				_ = apierrors.WriteError(w, apierrors.BadRequest(err.Error(), ""))
 			default:
 				log.Printf("password change error: %v", err)
-				http.Error(w, "failed to change password", http.StatusInternalServerError)
+				_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to change password", ""))
 			}
 			return
 		}

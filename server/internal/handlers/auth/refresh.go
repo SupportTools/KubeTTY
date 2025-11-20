@@ -3,7 +3,6 @@ package auth
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	"github.com/supporttools/KubeTTY/server/internal/config"
+	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
 
@@ -72,35 +72,34 @@ type RefreshResponse struct {
 func NewAuthRefreshHandler(cfg config.Config, authMgr *auth.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !AuthEnabled(cfg, authMgr) {
-			http.Error(w, "auth disabled", http.StatusNotImplemented)
+			_ = apierrors.WriteError(w, apierrors.ServiceUnavailable("authentication disabled", ""))
 			return
 		}
 
 		var req RefreshRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", err.Error()))
 			return
 		}
 
 		token := RefreshTokenFromRequest(r, strings.TrimSpace(req.RefreshToken))
 		if token == "" {
-			http.Error(w, "refresh token required", http.StatusUnauthorized)
+			_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token required", ""))
 			return
 		}
 
 		meta := TokenMetadataFromRequest(r)
 		pair, err := authMgr.Refresh(r.Context(), token, meta)
 		if err != nil {
-			status := http.StatusUnauthorized
 			switch {
 			case errors.Is(err, auth.ErrTokenExpired):
-				http.Error(w, "refresh token expired", status)
+				_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token expired", ""))
 			case errors.Is(err, auth.ErrTokenRevoked):
-				http.Error(w, "refresh token revoked", status)
+				_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token revoked", ""))
 			case errors.Is(err, auth.ErrInvalidCredentials):
-				http.Error(w, "account disabled", status)
+				_ = apierrors.WriteError(w, apierrors.Unauthorized("account disabled", ""))
 			default:
-				http.Error(w, fmt.Sprintf("refresh: %v", err), http.StatusInternalServerError)
+				_ = apierrors.WriteError(w, apierrors.InternalServerError("token refresh failed", ""))
 			}
 			return
 		}
@@ -109,7 +108,7 @@ func NewAuthRefreshHandler(cfg config.Config, authMgr *auth.Manager) http.Handle
 
 		claims, err := authMgr.ValidateAccessToken(pair.AccessToken)
 		if err != nil {
-			http.Error(w, "invalid access token", http.StatusInternalServerError)
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("invalid access token", ""))
 			return
 		}
 

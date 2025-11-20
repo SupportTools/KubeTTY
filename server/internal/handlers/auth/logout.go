@@ -25,9 +25,10 @@ type LogoutRequest struct {
 // Content-Type: application/json
 //
 // Request Body (optional):
-//   {
-//     "refreshToken": string  // Refresh token to revoke (if not provided via cookie)
-//   }
+//
+//	{
+//	  "refreshToken": string  // Refresh token to revoke (if not provided via cookie)
+//	}
 //
 // The refresh token can be provided either in the request body or via the
 // "kubetty_refresh" HTTP-only cookie.
@@ -53,7 +54,8 @@ func NewAuthLogoutHandler(cfg config.Config, authMgr *auth.Manager, authStore au
 
 		var req LogoutRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", err.Error()))
+			// Don't expose JSON parsing details to client for security
+			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
 			return
 		}
 

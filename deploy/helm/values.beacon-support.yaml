@@ -18,16 +18,7 @@ env:
   claudeConfigDir: "/home/mmattox/.claude"
   extra: {}
 auth:
-  mode: local
-  jwtSecret: ""
-  jwtSecretSecret:
-    name: beacon-beacon-support-auth
-    key: jwt-secret
-  issuer: kubetty
-  accessTTL: 15m
-  refreshTTL: 720h
-  cookieDomain: beacon-kubetty.support.tools
-  cookieSecure: true
+  mode: disabled
 
 cnpg:
   host: 172.28.58.5

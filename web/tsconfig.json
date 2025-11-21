@@ -13,9 +13,10 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
+    "skipLibCheck": true,
     "types": ["vite/client"]
   },
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "node_modules"],
+  "exclude": ["node_modules", "**/*.test.ts", "**/*.test.tsx", "setupTests.ts", "vitest.config.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

@@ -1,0 +1,200 @@
+# KubeTTY Project Pod Deployment Template
+# Copy this file and customize for each project:
+#   cp values.project-template.yaml values.your-project.yaml
+#
+# Project pods provide single-user terminal environments accessed through the gateway.
+# Auth is handled by the gateway, so auth mode is disabled for project pods.
+
+# Container image configuration
+image:
+  repository: harbor.support.tools/kubetty/kubetty
+  tag: v0.5.1  # Update to match gateway version
+  pullPolicy: IfNotPresent
+
+# Image pull secrets for private registries
+imagePullSecrets:
+  - harbor-supporttools
+
+# Namespace where this project pod will run
+# IMPORTANT: This must match the namespace registered in the gateway's projects catalog
+namespace: kubetty-your-project  # CHANGE THIS
+
+# Release name (typically matches project name)
+releaseName: kubetty-your-project  # CHANGE THIS
+
+# Unique deployment ID (used for session identification)
+deploymentId: your-project  # CHANGE THIS
+
+# Environment variables for the KubeTTY container
+env:
+  # Session UUID for this project's default session
+  # IMPORTANT: Generate once during project creation and keep stable
+  # This UUID persists sessions across pod restarts and upgrades
+  # DO NOT change after initial deployment - breaks session continuity
+  # DO NOT use placeholder UUIDs like "00000000-0000-0000-0000-000000000000"
+  #
+  # Generate a new UUID with: uuidgen (Linux/Mac) or New-Guid (PowerShell)
+  # Example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  #
+  # CHANGE THIS - Generate a unique stable UUID for this project
+  sessionID: ""
+
+  # KubeTTY operating mode
+  # Project mode provides single-user terminal accessed via gateway
+  kubettyMode: "project"
+
+  # Project identifier (must match the gateway catalog entry)
+  # CHANGE THIS - Should match deploymentId and gateway projects.yaml entry
+  kubettyProject: "your-project"
+
+  # User identity for this deployment
+  # Used for file ownership and session attribution
+  # CHANGE THIS - Set to the user who owns this terminal
+  kubettyUser: "mmattox"
+
+  # Claude Code maximum output tokens
+  claudeMaxTokens: "64000"
+
+  # Anthropic API base URL override
+  # IMPORTANT: Leave empty to use default Anthropic API (https://api.anthropic.com)
+  # Only set this if you're using a custom proxy or local API endpoint
+  # Example: "http://anthropic-proxy.internal:8080"
+  anthropicBaseURL: ""
+
+  # Node.js runtime options
+  nodeOptions: "--max-old-space-size=32768"
+
+  # Claude Code configuration directory
+  claudeConfigDir: "/home/mmattox/.claude"
+
+  # Additional environment variables (optional)
+  extra: {}
+
+# Authentication configuration
+# Project pods are accessed via gateway - auth is handled there
+auth:
+  mode: disabled
+
+# CloudNativePG (CNPG) database configuration
+# REQUIRED: Project pods share PostgreSQL with gateway for session persistence
+cnpg:
+  # PostgreSQL host (CNPG cluster service name recommended)
+  # Examples:
+  #   - Service name: "kubetty-postgres-rw.kubetty-shared.svc.cluster.local"
+  #   - Short name: "kubetty-postgres-rw" (if in same namespace)
+  #   - IP address: "172.28.58.5" (not recommended, use service name)
+  #
+  # CHANGE THIS - Should match gateway database configuration
+  host: kubetty-postgres-rw.kubetty-shared.svc.cluster.local
+
+  # PostgreSQL port
+  port: 5432
+
+  # Database name (must match gateway database)
+  database: kubetty
+
+  # Kubernetes secret containing database credentials
+  # Shared secret for all project pods
+  # CHANGE THIS - Verify this secret exists in your namespace
+  userSecret: kubetty-shared-app
+
+  # Key name for username in the secret
+  usernameKey: username
+
+  # Key name for password in the secret
+  passwordKey: password
+
+# Kubernetes Service configuration
+# ClusterIP only - project pods are accessed via gateway WebSocket proxy
+service:
+  type: ClusterIP
+  port: 8080
+
+# Persistent Volume Claim for data storage
+# Stores home directory, project files, Go modules, Docker layers, etc.
+dataPVC:
+  # Enable persistent storage (recommended for project pods)
+  enabled: true
+
+  # Create new PVC (true) or use existing (false)
+  create: true
+
+  # Existing PVC name (required if create=false)
+  existingClaim: ""
+
+  # PVC name (auto-generated from release name if empty)
+  name: ""
+
+  # Storage class
+  storageClass: longhorn
+
+  # Access modes
+  accessModes:
+    - ReadWriteOnce
+
+  # Storage size (adjust based on project needs)
+  size: 50Gi
+
+  # Sub-paths to mount from the PVC
+  # Each path preserves data across pod restarts
+  subPaths:
+    - path: /opt
+      subPath: opt
+    - path: /home
+      subPath: home
+    - path: /usr/local/go
+      subPath: usr-local-go
+    - path: /var/lib/docker
+      subPath: var-lib-docker
+
+# ServiceAccount for this project pod
+serviceAccount:
+  # Create dedicated ServiceAccount
+  create: true
+
+  # ServiceAccount name (auto-generated from release name if empty)
+  name: ""
+
+# RBAC configuration
+# Project pods operate within assigned namespaces, not cluster-wide
+rbac:
+  # Create RBAC resources (Role/RoleBinding)
+  create: true
+
+  # Namespaces where this project has admin access
+  # CHANGE THIS - Add namespaces this project should manage
+  adminNamespaces:
+    - kubetty-your-project
+
+  # Namespaces where this project has read-only access (optional)
+  readNamespaces: []
+
+# Ingress configuration
+# DISABLED - project pods are accessed via gateway WebSocket proxy, not directly
+ingress:
+  enabled: false
+
+# Docker-in-Docker configuration
+# Enable for CI/CD pipelines or Docker-based development
+pipelines:
+  dind:
+    # Enable DinD sidecar (requires privileged container)
+    enabled: false
+
+# Prometheus monitoring configuration
+prometheus:
+  # Pod annotation-based scraping (legacy)
+  scrape:
+    enabled: true
+    port: 8080
+    path: /metrics
+
+# Resource limits
+# Adjust based on project workload requirements
+resources:
+  requests:
+    memory: "2Gi"
+    cpu: "500m"
+  limits:
+    memory: "8Gi"
+    cpu: "4000m"

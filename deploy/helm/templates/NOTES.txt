@@ -1,0 +1,173 @@
+{{- $gatewayEnabled := .Values.gateway.enabled | default false }}
+{{- $authMode := .Values.auth.mode | default "disabled" }}
+{{- $ingressEnabled := .Values.ingress.enabled | default false }}
+================================================================================
+KubeTTY has been deployed successfully!
+================================================================================
+
+{{- if $gatewayEnabled }}
+
+🌐 GATEWAY MODE
+--------------------------------------------------------------------------------
+You've deployed KubeTTY in gateway mode, which provides a multi-project tabbed
+interface with authentication.
+
+{{- if $ingressEnabled }}
+{{- $host := index .Values.ingress.hosts 0 }}
+{{- $scheme := ternary "https" "http" (ne .Values.ingress.tlsSecret "") }}
+
+📍 Access URL:
+   {{ $scheme }}://{{ $host.host }}
+
+{{- if eq $authMode "local" }}
+🔐 Authentication: Enabled (local mode)
+   Default credentials are managed by your team.
+   Contact your administrator for login credentials.
+{{- else }}
+⚠️  Authentication: Disabled
+   WARNING: Your gateway is publicly accessible without authentication.
+   Consider enabling auth.mode=local for production deployments.
+{{- end }}
+
+{{- else }}
+⚠️  Ingress is disabled. To access KubeTTY gateway:
+
+   Option 1: Enable ingress in values.yaml
+   Option 2: Use kubectl port-forward
+      kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kubetty.fullname" . }} 8080:8080
+      Then access: http://localhost:8080
+{{- end }}
+
+📂 Project Catalog:
+{{- if .Values.gateway.catalog.inline }}
+   Inline configuration (YAML embedded in values)
+{{- else if .Values.gateway.catalog.existingConfigMap }}
+   Using ConfigMap: {{ .Values.gateway.catalog.existingConfigMap }}
+{{- else }}
+   ⚠️  No projects configured. Add projects to gateway.catalog.inline in values.yaml
+{{- end }}
+
+{{- else }}
+
+📱 PROJECT MODE
+--------------------------------------------------------------------------------
+You've deployed KubeTTY in project mode, which provides a single-user terminal
+environment accessed through a gateway.
+
+{{- if $ingressEnabled }}
+{{- $host := index .Values.ingress.hosts 0 }}
+{{- $scheme := ternary "https" "http" (ne .Values.ingress.tlsSecret "") }}
+
+📍 Direct Access URL:
+   {{ $scheme }}://{{ $host.host }}
+
+   ⚠️  Note: Project pods are typically accessed via gateway, not directly.
+   Direct access bypasses gateway authentication.
+{{- else }}
+✅ Ingress is disabled (recommended for project pods).
+   This pod should be accessed via the gateway's WebSocket proxy.
+{{- end }}
+
+🔧 Project Configuration:
+   - Deployment ID: {{ .Values.deploymentId | default "kubetty" }}
+   - Namespace: {{ .Release.Namespace }}
+   - Service: {{ include "kubetty.fullname" . }}
+   - Port: {{ .Values.service.port }}
+{{- if .Values.env.sessionID }}
+   - Session UUID: {{ .Values.env.sessionID }}
+{{- end }}
+
+📝 Register this project in your gateway's catalog:
+   projects:
+     - id: {{ .Values.deploymentId | default "kubetty" }}
+       displayName: "{{ .Values.deploymentId | default "kubetty" | title }}"
+       namespace: {{ .Release.Namespace }}
+       service: {{ include "kubetty.fullname" . }}
+       port: {{ .Values.service.port }}
+
+{{- end }}
+
+================================================================================
+CONFIGURATION CHECKLIST
+================================================================================
+
+{{- if not .Values.cnpg.host }}
+❌ CNPG Host: NOT CONFIGURED
+   Please set cnpg.host to your PostgreSQL service name or IP.
+{{- else }}
+✅ CNPG Host: {{ .Values.cnpg.host }}
+{{- end }}
+
+{{- if not .Values.cnpg.userSecret }}
+❌ CNPG Secret: NOT CONFIGURED
+   Please create a secret with database credentials and set cnpg.userSecret.
+{{- else }}
+✅ CNPG Secret: {{ .Values.cnpg.userSecret }}
+{{- end }}
+
+{{- if eq .Values.env.sessionID "00000000-0000-0000-0000-000000000000" }}
+❌ Session UUID: PLACEHOLDER DETECTED
+   Generate a stable UUID with: uuidgen (Linux/Mac) or New-Guid (PowerShell)
+   Then update env.sessionID in your values file.
+{{- else if .Values.env.sessionID }}
+✅ Session UUID: Configured (stable across restarts)
+{{- else }}
+⚠️  Session UUID: Empty (valid for gateway mode, required for project mode)
+{{- end }}
+
+{{- if .Values.dataPVC.enabled }}
+✅ Persistent Storage: Enabled ({{ .Values.dataPVC.size }})
+{{- else }}
+⚠️  Persistent Storage: Disabled
+   Data will be lost when pod restarts. Enable dataPVC.enabled for persistence.
+{{- end }}
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Check pod status:
+   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/name={{ include "kubetty.name" . }}
+
+2. View logs:
+   kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "kubetty.name" . }} -f
+
+3. Check database connectivity:
+   kubectl -n {{ .Release.Namespace }} exec -it deploy/{{ include "kubetty.fullname" . }} -- \
+     psql -h {{ .Values.cnpg.host }} -U $(echo $CNPG_USER) -d {{ .Values.cnpg.database }}
+
+{{- if and $gatewayEnabled (eq $authMode "local") }}
+
+4. Manage users (gateway mode):
+   # List users
+   kubectl -n {{ .Release.Namespace }} exec -it deploy/{{ include "kubetty.fullname" . }} -- \
+     /server/kubetty-authuser list
+
+   # Add user
+   kubectl -n {{ .Release.Namespace }} exec -it deploy/{{ include "kubetty.fullname" . }} -- \
+     /server/kubetty-authuser add <username> <password>
+{{- end }}
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Pod won't start?
+  • Check CNPG secret exists: kubectl get secret {{ .Values.cnpg.userSecret }} -n {{ .Release.Namespace }}
+  • Verify database is reachable from pod network
+  • Check pod events: kubectl describe pod -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "kubetty.name" . }}
+
+Connection timeouts?
+  • Ensure ingress annotations include WebSocket support (proxy-read-timeout: 3600)
+  • Check service and pod are in the same namespace
+  • Verify firewall rules allow traffic on port {{ .Values.service.port }}
+
+Session not persisting?
+  • Verify sessionID is stable (not changing between deployments)
+  • Check PostgreSQL sessions table for entries
+  • Ensure dataPVC is enabled and mounted correctly
+
+================================================================================
+📚 Documentation: https://github.com/supporttools/KubeTTY
+💬 Support: https://github.com/supporttools/KubeTTY/issues
+================================================================================

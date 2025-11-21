@@ -229,8 +229,11 @@ jobs:
         id: extract-tag
         run: |
           # Use proper quoting to prevent shell injection
+          # For semver tags (v0.6.0), docker/metadata-action creates tag without 'v' prefix (0.6.0)
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             TAG="${{ github.ref_name }}"
+            # Strip 'v' prefix to match docker/metadata-action semver pattern
+            TAG="${TAG#v}"
           elif [[ "${{ github.ref_name }}" == "main" ]]; then
             TAG="latest"
           else
@@ -386,8 +389,11 @@ jobs:
         id: extract-tag
         run: |
           # Use tag version if this is a tag push, otherwise use 'latest'
+          # For semver tags (v0.6.0), docker/metadata-action creates tag without 'v' prefix (0.6.0)
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
+            # Strip 'v' prefix to match docker/metadata-action semver pattern
+            TAG="${TAG#v}"
           else
             TAG="latest"
           fi

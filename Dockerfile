@@ -170,9 +170,8 @@ RUN curl -fsSL https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/y
 # Install python-based helpers for LLM tooling (placeholders for Claude/Codex/Gemini CLIs).
 RUN pip3 install --no-cache-dir anthropic google-generativeai openai
 
-# Optional hook: copy proprietary CLI binaries if supplied in build context.
-COPY third_party/bin/ /opt/ai/bin/
-RUN chmod -R +x /opt/ai/bin || true
+# Create directory for optional proprietary CLI binaries (installed at runtime).
+RUN mkdir -p /opt/ai/bin && chmod 755 /opt/ai/bin
 
 # Install Claude logging helper.
 COPY scripts/claude_with_log.sh /etc/profile.d/claude.sh

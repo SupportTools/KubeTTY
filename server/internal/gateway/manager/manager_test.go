@@ -89,34 +89,34 @@ func TestRestoreTabs(t *testing.T) {
 // TestCreateTab_LimitEnforcement verifies that tab creation respects maxTabsPerClient limits.
 func TestCreateTab_LimitEnforcement(t *testing.T) {
 	tests := []struct {
-		name        string
-		limit       int
+		name         string
+		limit        int
 		existingTabs int
-		expectError bool
+		expectError  bool
 	}{
 		{
-			name:        "No limit (0) allows unlimited tabs",
-			limit:       0,
+			name:         "No limit (0) allows unlimited tabs",
+			limit:        0,
 			existingTabs: 10,
-			expectError: false,
+			expectError:  false,
 		},
 		{
-			name:        "Under limit allows creation",
-			limit:       3,
+			name:         "Under limit allows creation",
+			limit:        3,
 			existingTabs: 2,
-			expectError: false,
+			expectError:  false,
 		},
 		{
-			name:        "At limit blocks creation",
-			limit:       3,
+			name:         "At limit blocks creation",
+			limit:        3,
 			existingTabs: 3,
-			expectError: true,
+			expectError:  true,
 		},
 		{
-			name:        "Over limit blocks creation",
-			limit:       2,
+			name:         "Over limit blocks creation",
+			limit:        2,
 			existingTabs: 5,
-			expectError: true,
+			expectError:  true,
 		},
 	}
 

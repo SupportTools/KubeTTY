@@ -12,7 +12,7 @@ import (
 
 // cleanupMetrics tracks log retention cleanup operations
 type cleanupMetrics struct {
-	logsDeleted *prometheus.CounterVec
+	logsDeleted          *prometheus.CounterVec
 	logRetentionDuration *prometheus.HistogramVec
 }
 

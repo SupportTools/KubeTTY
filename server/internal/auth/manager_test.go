@@ -318,9 +318,9 @@ func TestIssueTokenPair(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "token issuance with minimal metadata",
-			user: user,
-			meta: TokenMetadata{},
+			name:    "token issuance with minimal metadata",
+			user:    user,
+			meta:    TokenMetadata{},
 			wantErr: false,
 		},
 	}

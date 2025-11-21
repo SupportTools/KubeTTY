@@ -8,25 +8,25 @@ import (
 
 func TestLoadProjectConfig(t *testing.T) {
 	tests := []struct {
-		name    string
-		envVars map[string]string
-		wantErr bool
-		errMsg  string
+		name     string
+		envVars  map[string]string
+		wantErr  bool
+		errMsg   string
 		validate func(*testing.T, ProjectConfig)
 	}{
 		{
 			name: "valid project config with all fields",
 			envVars: map[string]string{
-				"SESSION_ID":    "test-session-123",
-				"DEPLOYMENT_ID": "test-deployment-456",
-				"CNPG_HOST":     "postgres.example.com",
-				"CNPG_PORT":     "5432",
-				"CNPG_DATABASE": "kubetty_db",
-				"CNPG_USER":     "kubetty_user",
-				"CNPG_PASSWORD": "secret123",
-				"PORT":          "9090",
-				"SHELL":         "/bin/zsh",
-				"KUBETTY_USER":  "testuser",
+				"SESSION_ID":      "test-session-123",
+				"DEPLOYMENT_ID":   "test-deployment-456",
+				"CNPG_HOST":       "postgres.example.com",
+				"CNPG_PORT":       "5432",
+				"CNPG_DATABASE":   "kubetty_db",
+				"CNPG_USER":       "kubetty_user",
+				"CNPG_PASSWORD":   "secret123",
+				"PORT":            "9090",
+				"SHELL":           "/bin/zsh",
+				"KUBETTY_USER":    "testuser",
 				"KUBETTY_PROJECT": "test-project",
 			},
 			wantErr: false,

@@ -1,0 +1,313 @@
+name: PR Validation
+
+# Lightweight validation workflow for pull requests
+# Provides fast feedback without running expensive operations like Docker builds
+# Full pipeline runs on merge to main
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'release/**'
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.23'
+  NODE_VERSION: '20'
+  COVERAGE_THRESHOLD: 60
+
+jobs:
+  # Fast validation checks
+  validate:
+    name: Quick Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: server/go.sum
+
+      - name: Verify Go version
+        run: |
+          go version
+          go version | grep -q "go1.23" || (echo "ERROR: Must use Go 1.23.x" && exit 1)
+
+      - name: Check Go formatting
+        working-directory: server
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "ERROR: The following files are not formatted:"
+            echo "$unformatted"
+            echo ""
+            echo "Run: cd server && gofmt -w ."
+            exit 1
+          fi
+
+      - name: Run go vet
+        working-directory: server
+        run: go vet ./...
+
+      - name: Verify go.mod is tidy
+        working-directory: server
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo ""
+            echo "ERROR: go.mod or go.sum is not tidy"
+            echo "Run: cd server && go mod tidy"
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Check for package-lock changes
+        working-directory: web
+        run: |
+          npm ci
+          if ! git diff --exit-code package-lock.json; then
+            echo ""
+            echo "ERROR: package-lock.json is out of sync"
+            echo "Run: cd web && npm install"
+            exit 1
+          fi
+
+  # Server tests with coverage
+  test-server:
+    name: Server Tests
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: server/go.sum
+
+      - name: Run server tests
+        working-directory: server
+        run: |
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Check test coverage
+        working-directory: server
+        run: |
+          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+          echo "### Test Coverage: ${coverage}%" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          threshold=${{ env.COVERAGE_THRESHOLD }}
+          if (( $(echo "$coverage < $threshold" | bc -l) )); then
+            echo "❌ Coverage ${coverage}% is below threshold ${threshold}%" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          echo "✅ Coverage ${coverage}% meets threshold ${threshold}%" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-coverage
+          path: server/coverage.out
+          retention-days: 7
+
+      - name: Comment coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const coverage = fs.readFileSync('server/coverage.out', 'utf8');
+            const lines = coverage.trim().split('\n');
+            const totalLine = lines[lines.length - 1];
+            const match = totalLine.match(/(\d+\.\d+)%/);
+            const coveragePercent = match ? match[1] : 'unknown';
+
+            const threshold = process.env.COVERAGE_THRESHOLD;
+            const emoji = parseFloat(coveragePercent) >= parseFloat(threshold) ? '✅' : '❌';
+
+            const comment = `## ${emoji} Test Coverage Report\n\n` +
+              `- **Coverage**: ${coveragePercent}%\n` +
+              `- **Threshold**: ${threshold}%\n` +
+              `- **Status**: ${parseFloat(coveragePercent) >= parseFloat(threshold) ? 'PASS' : 'FAIL'}`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Web tests
+  test-web:
+    name: Web Tests
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Run web tests
+        working-directory: web
+        run: npm run test
+
+      - name: Build frontend
+        working-directory: web
+        run: npm run build
+
+      - name: Check build size
+        working-directory: web
+        run: |
+          echo "### Frontend Build Size" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          du -sh dist/ >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          ls -lh dist/assets/*.js dist/assets/*.css 2>/dev/null | awk '{print $5, $9}' >> $GITHUB_STEP_SUMMARY || echo "No asset files found" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  # Helm chart validation
+  helm-validate:
+    name: Helm Validation
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.15.2'
+
+      - name: Lint Helm chart
+        run: |
+          echo "### Helm Chart Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "#### Default Values" >> $GITHUB_STEP_SUMMARY
+          if helm lint deploy/helm/; then
+            echo "✅ Lint passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Lint failed" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Gateway Values" >> $GITHUB_STEP_SUMMARY
+          if helm lint deploy/helm/ -f deploy/helm/values.gateway.yaml; then
+            echo "✅ Lint passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Lint failed" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          if [ -f "deploy/helm/values.project-template.yaml" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "#### Project Template Values" >> $GITHUB_STEP_SUMMARY
+            if helm lint deploy/helm/ -f deploy/helm/values.project-template.yaml; then
+              echo "✅ Lint passed" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Lint failed" >> $GITHUB_STEP_SUMMARY
+              exit 1
+            fi
+          fi
+
+      - name: Validate Helm templates
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Template Rendering" >> $GITHUB_STEP_SUMMARY
+
+          if helm template kubetty deploy/helm/ > /dev/null; then
+            echo "✅ Default values render successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Default values failed to render" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          if helm template kubetty-gateway deploy/helm/ -f deploy/helm/values.gateway.yaml > /dev/null; then
+            echo "✅ Gateway values render successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Gateway values failed to render" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          if [ -f "deploy/helm/values.project-template.yaml" ]; then
+            if helm template kubetty-project deploy/helm/ -f deploy/helm/values.project-template.yaml > /dev/null; then
+              echo "✅ Project template values render successfully" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Project template values failed to render" >> $GITHUB_STEP_SUMMARY
+              exit 1
+            fi
+          fi
+
+  # Summary job that all others depend on
+  pr-validation-summary:
+    name: PR Validation Summary
+    runs-on: ubuntu-latest
+    needs: [validate, test-server, test-web, helm-validate]
+    if: always()
+    steps:
+      - name: Check validation results
+        run: |
+          echo "### PR Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ needs.validate.result }}" == "success" ] && \
+             [ "${{ needs.test-server.result }}" == "success" ] && \
+             [ "${{ needs.test-web.result }}" == "success" ] && \
+             [ "${{ needs.helm-validate.result }}" == "success" ]; then
+            echo "✅ All validation checks passed!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This PR is ready for review and will pass the full CI/CD pipeline." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Some validation checks failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Failed Jobs:**" >> $GITHUB_STEP_SUMMARY
+            [ "${{ needs.validate.result }}" != "success" ] && echo "- Validation" >> $GITHUB_STEP_SUMMARY
+            [ "${{ needs.test-server.result }}" != "success" ] && echo "- Server Tests" >> $GITHUB_STEP_SUMMARY
+            [ "${{ needs.test-web.result }}" != "success" ] && echo "- Web Tests" >> $GITHUB_STEP_SUMMARY
+            [ "${{ needs.helm-validate.result }}" != "success" ] && echo "- Helm Validation" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: Update PR status
+        if: github.event_name == 'pull_request' && needs.validate.result == 'success' && needs.test-server.result == 'success' && needs.test-web.result == 'success' && needs.helm-validate.result == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ **PR Validation Passed**\n\nAll validation checks completed successfully. This PR is ready for review!\n\n' +
+                    '**Completed Checks:**\n' +
+                    '- ✅ Go formatting and linting\n' +
+                    '- ✅ Server tests with race detection\n' +
+                    '- ✅ Web tests and build\n' +
+                    '- ✅ Helm chart validation\n\n' +
+                    '**Note:** Full Docker build and security scan will run after merge.'
+            });

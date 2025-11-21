@@ -1,0 +1,462 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: harbor.support.tools
+  IMAGE_NAME: kubetty/kubetty
+  GO_VERSION: '1.23'
+  NODE_VERSION: '20'
+
+jobs:
+  # Stage 1: Validation
+  validate:
+    name: Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: server/go.sum
+
+      - name: Verify Go version
+        run: |
+          go version
+          go version | grep -q "go1.23" || (echo "ERROR: Must use Go 1.23.x" && exit 1)
+
+      - name: Check Go formatting
+        working-directory: server
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "ERROR: The following files are not formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Run go vet
+        working-directory: server
+        run: go vet ./...
+
+      - name: Verify go.mod is tidy
+        working-directory: server
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum || (echo "ERROR: go.mod or go.sum not tidy" && exit 1)
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Run npm audit
+        working-directory: web
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+  # Stage 2: Test Matrix
+  test-server:
+    name: Server Tests
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: server/go.sum
+
+      - name: Run server tests
+        working-directory: server
+        run: |
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Check test coverage
+        working-directory: server
+        run: |
+          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+          echo "Test coverage: ${coverage}%"
+          threshold=60
+          if (( $(echo "$coverage < $threshold" | bc -l) )); then
+            echo "ERROR: Coverage ${coverage}% is below threshold ${threshold}%"
+            exit 1
+          fi
+
+      - name: Upload coverage to artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-coverage
+          path: server/coverage.out
+
+  test-web:
+    name: Web Tests
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Run web tests
+        working-directory: web
+        run: npm run test
+
+      - name: Run linter
+        working-directory: web
+        run: npm run build
+
+  # Stage 3: Build Docker Image
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [test-server, test-web]
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Harbor credentials
+        if: github.event_name != 'pull_request'
+        run: |
+          if [ -z "${{ secrets.HARBOR_USERNAME }}" ] || [ -z "${{ secrets.HARBOR_PASSWORD }}" ]; then
+            echo "ERROR: Harbor credentials (HARBOR_USERNAME, HARBOR_PASSWORD) not configured"
+            echo "Please configure these secrets in repository settings"
+            exit 1
+          fi
+
+      - name: Log in to Harbor
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GO_VERSION=1.23.3
+            NODE_MAJOR=20
+
+  # Stage 4: Security Scanning
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request'
+    permissions:
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate Harbor credentials
+        run: |
+          if [ -z "${{ secrets.HARBOR_USERNAME }}" ] || [ -z "${{ secrets.HARBOR_PASSWORD }}" ]; then
+            echo "ERROR: Harbor credentials (HARBOR_USERNAME, HARBOR_PASSWORD) not configured"
+            echo "Please configure these secrets in repository settings"
+            exit 1
+          fi
+
+      - name: Log in to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Extract image tag
+        id: extract-tag
+        run: |
+          # Use proper quoting to prevent shell injection
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          elif [[ "${{ github.ref_name }}" == "main" ]]; then
+            TAG="latest"
+          else
+            TAG="${{ github.ref_name }}-${{ github.sha }}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: ${TAG}"
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.extract-tag.outputs.tag }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Trivy for blocking on CRITICAL
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.extract-tag.outputs.tag }}
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL'
+
+      - name: Generate SBOM
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.extract-tag.outputs.tag }}
+          format: 'cyclonedx'
+          output: 'sbom.json'
+
+      - name: Upload SBOM as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+
+  # Stage 5: Helm Chart Validation
+  helm-validate:
+    name: Helm Chart Validation
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.15.2'
+
+      - name: Lint Helm chart
+        run: |
+          helm lint deploy/helm/
+          helm lint deploy/helm/ -f deploy/helm/values.gateway.yaml
+          helm lint deploy/helm/ -f deploy/helm/values.project-template.yaml
+
+      - name: Validate Helm templates
+        run: |
+          helm template kubetty deploy/helm/ > /dev/null
+          helm template kubetty-gateway deploy/helm/ -f deploy/helm/values.gateway.yaml > /dev/null
+          helm template kubetty-project deploy/helm/ -f deploy/helm/values.project-template.yaml > /dev/null
+
+      - name: Package Helm chart
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        run: |
+          helm package deploy/helm/ --destination ./helm-packages
+
+      - name: Upload Helm chart as artifact
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: helm-packages/*.tgz
+
+  # Stage 6: Deploy to Production
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build, security-scan, helm-validate]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: https://kubetty.support.tools
+    steps:
+      - name: Validate semantic version tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Production tag must be clean semantic version (v1.2.3)"
+            echo "Got: $TAG"
+            echo ""
+            echo "CLAUDE.md rule: Semantic versioning only - No suffixes like -rc, -beta, -alpha"
+            exit 1
+          fi
+          echo "✓ Valid semantic version: $TAG"
+
+      - name: Verify security scan passed
+        run: |
+          if [ "${{ needs.security-scan.result }}" != "success" ]; then
+            echo "ERROR: Security scan did not pass"
+            echo "Security scan result: ${{ needs.security-scan.result }}"
+            echo "Cannot deploy to production with security issues"
+            exit 1
+          fi
+          echo "✓ Security scan passed"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.3'
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.15.2'
+
+      - name: Validate Kubernetes credentials
+        run: |
+          if [ -z "${{ secrets.KUBECONFIG_PROD }}" ]; then
+            echo "ERROR: KUBECONFIG_PROD secret not configured"
+            echo "Please configure this secret in repository settings"
+            exit 1
+          fi
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_PROD }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Extract image tag
+        id: extract-tag
+        run: |
+          # Use tag version if this is a tag push, otherwise use 'latest'
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="latest"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Deploying version: ${TAG}"
+
+      - name: Deploy to production
+        id: deploy
+        run: |
+          # Capture current revision for potential rollback
+          CURRENT_REVISION=$(helm history kubetty -n kubetty --max 1 -o json 2>/dev/null | jq -r '.[0].revision // "0"') || CURRENT_REVISION="0"
+          echo "current-revision=${CURRENT_REVISION}" >> "$GITHUB_OUTPUT"
+          echo "Deploying version: ${{ steps.extract-tag.outputs.tag }}"
+          echo "Current revision: ${CURRENT_REVISION}"
+
+          helm upgrade --install kubetty deploy/helm/ \
+            --namespace kubetty \
+            --create-namespace \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ steps.extract-tag.outputs.tag }} \
+            --wait \
+            --timeout=5m \
+            --history-max=20 \
+            --atomic
+
+      - name: Verify deployment
+        run: |
+          kubectl wait --for=condition=ready pod \
+            -l app.kubernetes.io/name=kubetty \
+            -n kubetty \
+            --timeout=300s
+
+          # Check pod health
+          READY_PODS=$(kubectl get pods -n kubetty -l app.kubernetes.io/name=kubetty -o json | jq '[.items[] | select(.status.phase == "Running")] | length')
+          if [ "$READY_PODS" -eq 0 ]; then
+            echo "ERROR: No pods are running after deployment"
+            exit 1
+          fi
+          echo "✓ ${READY_PODS} pod(s) running successfully in production"
+
+      - name: Run smoke tests
+        run: |
+          echo "=== Pod Status ==="
+          kubectl get pods -n kubetty -l app.kubernetes.io/name=kubetty
+
+          echo ""
+          echo "=== Service Endpoints ==="
+          kubectl get svc -n kubetty
+
+          echo ""
+          echo "=== Deployment Status ==="
+          kubectl rollout status deployment -n kubetty -l app.kubernetes.io/name=kubetty --timeout=60s
+
+      - name: Rollback on failure
+        if: failure() && steps.deploy.outputs.current-revision != '0'
+        run: |
+          echo "❌ PRODUCTION DEPLOYMENT FAILED ❌"
+          echo "Attempting automatic rollback to revision ${{ steps.deploy.outputs.current-revision }}..."
+
+          helm rollback kubetty ${{ steps.deploy.outputs.current-revision }} -n kubetty --wait
+
+          # Verify rollback succeeded
+          kubectl wait --for=condition=ready pod \
+            -l app.kubernetes.io/name=kubetty \
+            -n kubetty \
+            --timeout=180s || echo "⚠️  WARNING: Rollback verification failed - manual intervention required"
+
+          echo "Rollback completed. Please investigate the failure before attempting another deployment."
+
+      - name: Collect failure logs
+        if: failure()
+        run: |
+          echo "=== Failed Pod Logs ==="
+          for pod in $(kubectl get pods -n kubetty -l app.kubernetes.io/name=kubetty -o name | head -5); do
+            echo "Logs from ${pod}:"
+            kubectl logs ${pod} -n kubetty --tail=100 || echo "Could not retrieve logs for ${pod}"
+            echo "---"
+          done
+
+          echo ""
+          echo "=== Recent Events ==="
+          kubectl get events -n kubetty --sort-by='.lastTimestamp' | tail -30

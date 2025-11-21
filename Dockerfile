@@ -195,37 +195,27 @@ COPY .claude/settings.json /home/mmattox/.claude/settings.json
 RUN chown -R mmattox:mmattox /home/mmattox/.claude
 
 # Create bash profile with KubeTTY configuration.
-RUN cat > /home/mmattox/.bash_profile << 'EOF'
-# Display MOTD (Message of the Day)
-if [ -f /etc/motd ]; then
-    cat /etc/motd
-    echo ""
-fi
-
-# Custom prompt using KUBETTY_USER and KUBETTY_PROJECT from environment
-export PS1='\[\033[01;32m\]${KUBETTY_USER:-$USER}@${KUBETTY_PROJECT:-kubetty}\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
-
-# bash autocompletion
-if [ -f /usr/local/share/bash-completion/bash_completion ]; then
-    . /usr/local/share/bash-completion/bash_completion
-fi
-
-# kubebuilder autocompletion (if installed)
-if command -v kubebuilder &> /dev/null; then
-    . <(kubebuilder completion bash)
-fi
-
-alias reload='source $HOME/.bash_profile'
-alias grep='grep --color=auto'
-alias ls='ls --color=auto'
-alias ll='ls -la'
-
-export KUBE_EDITOR="nano"
-export GOROOT=/usr/local/go
-export GOPATH=$HOME/go
-export PATH=$GOPATH/bin:$GOROOT/bin:$PATH
-EOF
-RUN chown mmattox:mmattox /home/mmattox/.bash_profile
+RUN { \
+    echo '# Display MOTD (Message of the Day)'; \
+    echo 'if [ -f /etc/motd ]; then cat /etc/motd; echo ""; fi'; \
+    echo ''; \
+    echo '# Custom prompt using KUBETTY_USER and KUBETTY_PROJECT from environment'; \
+    echo "export PS1='\\[\\033[01;32m\\]\${KUBETTY_USER:-\$USER}@\${KUBETTY_PROJECT:-kubetty}\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ '"; \
+    echo ''; \
+    echo '# bash autocompletion'; \
+    echo 'if [ -f /usr/local/share/bash-completion/bash_completion ]; then . /usr/local/share/bash-completion/bash_completion; fi'; \
+    echo ''; \
+    echo 'alias reload="source \$HOME/.bash_profile"'; \
+    echo 'alias grep="grep --color=auto"'; \
+    echo 'alias ls="ls --color=auto"'; \
+    echo 'alias ll="ls -la"'; \
+    echo ''; \
+    echo 'export KUBE_EDITOR="nano"'; \
+    echo 'export GOROOT=/usr/local/go'; \
+    echo 'export GOPATH=\$HOME/go'; \
+    echo 'export PATH=\$GOPATH/bin:\$GOROOT/bin:\$PATH'; \
+    } > /home/mmattox/.bash_profile && \
+    chown mmattox:mmattox /home/mmattox/.bash_profile
 
 # Copy MOTD (Message of the Day) with ASCII art.
 COPY motd /etc/motd

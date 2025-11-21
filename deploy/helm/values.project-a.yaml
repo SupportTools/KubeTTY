@@ -3,8 +3,13 @@
 
 # Container image configuration
 image:
-  repository: harbor.support.tools/kubetty/project-a
+  repository: harbor.support.tools/kubetty/kubetty
   tag: v0.6.0
+  pullPolicy: IfNotPresent
+
+# Image pull secrets for private registries
+imagePullSecrets:
+  - harbor-supporttools
 
 # Deployment configuration
 namespace: kubetty-project-a
@@ -50,3 +55,26 @@ cnpg:
 service:
   type: ClusterIP
   port: 8080
+
+# Persistent Volume Claim for data storage
+dataPVC:
+  enabled: true
+  create: true
+  storageClass: longhorn
+  accessModes:
+    - ReadWriteOnce
+  size: 50Gi
+  subPaths:
+    - path: /opt
+      subPath: opt
+    - path: /home
+      subPath: home
+    - path: /usr/local/go
+      subPath: usr-local-go
+    - path: /var/lib/docker
+      subPath: var-lib-docker
+
+# Docker-in-Docker support
+pipelines:
+  dind:
+    enabled: true

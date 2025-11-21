@@ -9,10 +9,10 @@ import (
 
 func TestLoadGatewayConfig(t *testing.T) {
 	tests := []struct {
-		name    string
-		envVars map[string]string
-		wantErr bool
-		errMsg  string
+		name     string
+		envVars  map[string]string
+		wantErr  bool
+		errMsg   string
 		validate func(*testing.T, GatewayConfig)
 	}{
 		{
@@ -332,11 +332,11 @@ func TestGatewayConfig_ConnString(t *testing.T) {
 
 func TestGatewayConfig_AuthMethods(t *testing.T) {
 	tests := []struct {
-		name         string
-		config       GatewayConfig
-		wantMode     string
-		wantDomain   string
-		wantSecure   bool
+		name       string
+		config     GatewayConfig
+		wantMode   string
+		wantDomain string
+		wantSecure bool
 	}{
 		{
 			name: "local auth with secure cookie",

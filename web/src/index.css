@@ -551,3 +551,382 @@ button.secondary {
   color: #b0b3c4;
   text-align: center;
 }
+
+/* Project health status indicators */
+.project-info {
+  flex: 1;
+}
+
+.project-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.project-namespace {
+  color: #6e7280;
+  font-size: 0.8rem;
+}
+
+.status-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.status-online {
+  background-color: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+}
+
+.status-degraded {
+  background-color: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
+}
+
+.status-offline {
+  background-color: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+}
+
+.status-unknown {
+  background-color: #6b7280;
+}
+
+/* Auth styles */
+.main.auth {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.auth-card {
+  background: #11131a;
+  border: 1px solid #2c303a;
+  border-radius: 10px;
+  padding: 1.5rem;
+  width: 320px;
+  max-width: 90%;
+}
+
+.auth-card h2 {
+  margin: 0 0 1rem;
+  font-size: 1.2rem;
+}
+
+.auth-card label {
+  display: block;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  color: #b3b6c2;
+}
+
+.auth-card input {
+  display: block;
+  width: 100%;
+  margin-top: 0.35rem;
+  padding: 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #2b2f38;
+  background: #0b0c0f;
+  color: #f2f4f8;
+  box-sizing: border-box;
+}
+
+.auth-card input:focus {
+  outline: none;
+  border-color: #3f7df4;
+}
+
+.auth-card input:disabled {
+  opacity: 0.6;
+}
+
+.auth-card button[type="submit"] {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.6rem;
+  border-radius: 6px;
+  background: #3f7df4;
+  color: white;
+  font-weight: 600;
+}
+
+.auth-card button[type="submit"]:hover:not(:disabled) {
+  background: #5a94ff;
+}
+
+.auth-card .error {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem;
+  background: rgba(255, 119, 119, 0.1);
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+/* Session info in header */
+.session-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  color: #b3b6c2;
+}
+
+.session-info .username-button {
+  background: none;
+  border: none;
+  color: #7aa7ff;
+  padding: 0;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.session-info .username-button:hover {
+  text-decoration: underline;
+}
+
+.session-info button.secondary {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+/* Danger button style */
+button.danger {
+  background: #d9534f;
+  color: white;
+}
+
+button.danger:hover:not(:disabled) {
+  background: #e36460;
+}
+
+/* Profile modal styles */
+.profile-modal {
+  width: 400px;
+}
+
+.profile-modal .modal-close {
+  background: none;
+  border: none;
+  color: #b3b6c2;
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.profile-modal .modal-close:hover {
+  color: #fff;
+}
+
+.profile-modal .modal-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.profile-modal .modal-footer {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid #1d1f26;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.profile-modal .modal-footer button {
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.profile-info {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.profile-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #3f7df4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: white;
+  flex-shrink: 0;
+}
+
+.profile-details {
+  flex: 1;
+}
+
+.profile-field {
+  margin-bottom: 0.75rem;
+}
+
+.profile-field:last-child {
+  margin-bottom: 0;
+}
+
+.profile-field label {
+  display: block;
+  font-size: 0.75rem;
+  color: #7b7f8f;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.25rem;
+}
+
+.profile-field span {
+  font-size: 0.9rem;
+}
+
+.profile-field .user-id {
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: #b3b6c2;
+}
+
+/* Password change modal */
+.password-modal {
+  width: 380px;
+}
+
+.password-modal .modal-close {
+  background: none;
+  border: none;
+  color: #b3b6c2;
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.password-modal .modal-close:hover {
+  color: #fff;
+}
+
+.password-modal .modal-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.password-modal .modal-body {
+  padding: 1rem;
+}
+
+.password-modal .modal-footer {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid #1d1f26;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.password-modal .modal-footer button {
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.password-modal .modal-footer button:not(.secondary) {
+  background: #3f7df4;
+  color: white;
+}
+
+.password-modal .modal-footer button:not(.secondary):hover:not(:disabled) {
+  background: #5a94ff;
+}
+
+.password-modal .error {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem;
+  background: rgba(255, 119, 119, 0.1);
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+/* Form field styles */
+.form-field {
+  margin-bottom: 0.75rem;
+}
+
+.form-field:last-child {
+  margin-bottom: 0;
+}
+
+.form-field label {
+  display: block;
+  font-size: 0.85rem;
+  color: #b3b6c2;
+  margin-bottom: 0.35rem;
+}
+
+.form-field input {
+  display: block;
+  width: 100%;
+  padding: 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #2b2f38;
+  background: #0b0c0f;
+  color: #f2f4f8;
+  box-sizing: border-box;
+}
+
+.form-field input:focus {
+  outline: none;
+  border-color: #3f7df4;
+}
+
+.form-field input:disabled {
+  opacity: 0.6;
+}
+
+.field-hint {
+  display: block;
+  font-size: 0.75rem;
+  color: #7b7f8f;
+  margin-top: 0.25rem;
+}
+
+/* Confirm dialog styles */
+.confirm-dialog {
+  width: 360px;
+}
+
+.confirm-dialog .modal-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.confirm-dialog .modal-body p {
+  margin: 0 0 0.5rem;
+}
+
+.confirm-dialog .modal-body p:last-child {
+  margin-bottom: 0;
+}
+
+.confirm-dialog .modal-body .hint {
+  font-size: 0.85rem;
+  color: #7b7f8f;
+}
+
+.confirm-dialog .modal-footer {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid #1d1f26;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.confirm-dialog .modal-footer button {
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}

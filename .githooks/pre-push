@@ -1,0 +1,106 @@
+#!/bin/bash
+#
+# pre-push hook - Comprehensive validation before pushing
+#
+# This hook runs validate-pipeline-local.sh to ensure changes will pass CI/CD.
+# Install with: git config core.hooksPath .githooks
+#
+# Branch-aware behavior:
+# - main, release/* branches: Full validation (tests, coverage, linting)
+# - Feature branches: Quick validation (formatting, vetting only)
+#
+# This prevents pushing code that will fail the CI/CD pipeline.
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Get the root of the repository
+REPO_ROOT=$(git rev-parse --show-toplevel)
+
+print_error() {
+    echo -e "${RED}[pre-push] ERROR: $1${NC}" >&2
+}
+
+print_success() {
+    echo -e "${GREEN}[pre-push] $1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[pre-push] WARNING: $1${NC}"
+}
+
+print_info() {
+    echo -e "${BLUE}[pre-push] $1${NC}"
+}
+
+# Get current branch name
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+echo ""
+print_info "Pre-push validation for branch: $BRANCH"
+echo ""
+
+# Check if validate-pipeline-local.sh exists
+VALIDATE_SCRIPT="$REPO_ROOT/validate-pipeline-local.sh"
+
+if [ ! -f "$VALIDATE_SCRIPT" ]; then
+    print_error "validate-pipeline-local.sh not found at $VALIDATE_SCRIPT"
+    print_error "This script is required for pre-push validation"
+    exit 1
+fi
+
+if [ ! -x "$VALIDATE_SCRIPT" ]; then
+    print_warning "Making validate-pipeline-local.sh executable..."
+    chmod +x "$VALIDATE_SCRIPT"
+fi
+
+# Determine validation mode based on branch
+case "$BRANCH" in
+    main|master)
+        print_info "Target branch is main - running FULL validation"
+        print_info "This includes tests, coverage checks, and all linting"
+        echo ""
+        "$VALIDATE_SCRIPT"
+        ;;
+    release/*)
+        print_info "Target branch is release/* - running FULL validation"
+        print_info "This includes tests, coverage checks, and all linting"
+        echo ""
+        "$VALIDATE_SCRIPT"
+        ;;
+    hotfix/*)
+        print_info "Target branch is hotfix/* - running FULL validation"
+        print_info "Hotfixes require full validation before push"
+        echo ""
+        "$VALIDATE_SCRIPT"
+        ;;
+    *)
+        print_info "Feature branch detected - running QUICK validation"
+        print_info "Quick mode skips tests for faster iteration"
+        print_warning "Full validation will run on PR merge"
+        echo ""
+        "$VALIDATE_SCRIPT" --quick
+        ;;
+esac
+
+RESULT=$?
+
+echo ""
+if [ $RESULT -eq 0 ]; then
+    print_success "Pre-push validation passed!"
+    print_success "Your changes are ready to be pushed"
+else
+    print_error "Pre-push validation failed!"
+    print_error "Please fix the issues above before pushing"
+    echo ""
+    echo "To bypass this hook (not recommended), use: git push --no-verify"
+    exit 1
+fi
+
+exit 0

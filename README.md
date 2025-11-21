@@ -5,11 +5,13 @@ A lightweight, internal-use-only browser-based terminal backed by a Kubernetes p
 ## Features
 
 - **Browser-based Terminal**: Full interactive shell with xterm.js (supports colors, cursor control, vim, tmux, etc.)
-- **Session Persistence**: Sessions stored in CNPG database survive pod restarts
+- **Single Session Per Pod**: One PTY session is created and reused for the lifetime of each pod
+- **Session Persistence**: Session metadata and logs stored in CNPG database survive pod restarts
+- **Single Client Enforcement**: Only one browser client can connect at a time per session
+- **Built-in Authentication**: Local user auth with JWT tokens (optional, configurable)
 - **AI Tools Integration**: Pre-installed Claude Code, Codex, and other LLM CLIs
 - **Development Tooling**: kubectl, helm, docker, go, node/npm, git, and more
-- **Resume/Fork Sessions**: Claude-style session management (`--continue`, `--resume`, `--fork-session`)
-- **Logging**: Built-in session logging for Claude CLI interactions
+- **Logging**: Built-in session logging for Claude CLI interactions and PTY transcripts
 
 ## Quick Start
 
@@ -109,13 +111,12 @@ ls ~/claude_logs/
 
 ### Session Management
 
-Sessions are automatically persisted in CNPG. You can:
+Each pod has a single session that is created on first connection and reused for the pod lifetime:
 
-- **Resume** a session after browser disconnect
-- **Fork** a session to create a new branch
-- **Continue** from the most recent session
-
-The UI provides a session picker on connection.
+- **Automatic Reconnection**: Browser automatically reconnects after network drops
+- **Single Client**: Only one browser can connect at a time (second connection is rejected)
+- **PTY Persistence**: Shell remains running even when browser disconnects
+- **Session Logs**: All PTY I/O is logged to CNPG for auditing via the logs modal
 
 ## Architecture
 
@@ -135,9 +136,9 @@ Store
 
 ### Components
 
-- **Go Backend**: PTY server with WebSocket support, session management
-- **React Frontend**: xterm.js-based terminal UI with session picker
-- **CNPG Database**: Session metadata and persistence
+- **Go Backend**: PTY server with WebSocket support, session management, and authentication
+- **React Frontend**: xterm.js-based terminal UI with login form and auto-reconnection
+- **CNPG Database**: Session metadata, logs, user credentials, and persistence
 - **Docker Image**: All development tools pre-installed
 
 ## Documentation
@@ -172,6 +173,47 @@ KubeTTY/
 └── .bash_profile       # Shell configuration (no secrets)
 ```
 
+### Git Hooks Setup
+
+The repository includes Git hooks to catch issues before they reach CI/CD:
+
+```bash
+# Enable the hooks (one-time setup)
+git config core.hooksPath .githooks
+```
+
+**Pre-commit hook** runs automatically on `git commit`:
+- Forbidden file detection (*.key, *.pem, secrets, credentials)
+- Go formatting check (gofmt)
+- Go linting (go vet)
+- Merge conflict marker detection
+
+**Pre-push hook** runs automatically on `git push`:
+- Full validation for main/release/* branches
+- Quick validation for feature branches
+- Calls `validate-pipeline-local.sh` to mirror CI checks
+
+To bypass hooks temporarily (not recommended):
+```bash
+git commit --no-verify
+git push --no-verify
+```
+
+### Local Pipeline Validation
+
+Before pushing, you can manually run the local validation:
+
+```bash
+# Full validation (matches CI/CD)
+./validate-pipeline-local.sh
+
+# Quick validation (skip tests)
+./validate-pipeline-local.sh --quick
+
+# Full validation with Docker build and security scan
+./validate-pipeline-local.sh --full
+```
+
 ### Environment Variables
 
 KubeTTY is configured via environment variables injected by Helm:
@@ -198,6 +240,36 @@ KubeTTY is configured via environment variables injected by Helm:
 **Claude Configuration:**
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` - Token limit for Claude Code
 - `CLAUDE_CONFIG_DIR` - Claude configuration directory
+
+**Authentication (optional):**
+- `AUTH_MODE` - Set to `local` to enable built-in login (default: `disabled`).
+- `AUTH_JWT_SECRET` - Base64 (recommended) or raw secret used to sign JWTs. Generate via `openssl rand -base64 48`.
+- `AUTH_ACCESS_TTL` / `AUTH_REFRESH_TTL` - Token lifetimes (e.g., `15m`, `720h`).
+- `AUTH_ISSUER` - JWT issuer claim (default: `kubetty`).
+- `AUTH_COOKIE_DOMAIN` - Optional domain for auth cookies.
+- `AUTH_COOKIE_SECURE` - `true` by default; set to `false` only for HTTP/dev environments.
+
+These knobs are exposed through the Helm chart under the `auth` section (`deploy/helm/values.yaml`). You can point `AUTH_JWT_SECRET` at a Kubernetes Secret via `auth.jwtSecretSecret` to avoid storing raw secrets in values files.
+
+### Creating Users
+
+After enabling `AUTH_MODE=local`, create a CNPG user with the helper:
+
+```bash
+# ensure SESSION_ID is set (the helper defaults to kubetty-authuser)
+export SESSION_ID=kubetty-authuser
+export CNPG_HOST=...
+export CNPG_DATABASE=...
+export CNPG_USER=...
+export CNPG_PASSWORD=...
+
+go run ./server/cmd/kubetty-authuser create --username alice --password 's3cret'
+go run ./server/cmd/kubetty-authuser list
+go run ./server/cmd/kubetty-authuser update-password --username alice --password 'newpass'
+go run ./server/cmd/kubetty-authuser set-active --username alice --active=false
+```
+
+Subsequent logins happen through the `/api/auth/login` endpoint (the UI shows a form automatically). You can also call `/api/auth/refresh` and `/api/auth/logout`, and every request now includes auth cookies/callbacks.
 
 ## Security
 

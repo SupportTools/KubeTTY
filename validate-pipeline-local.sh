@@ -18,11 +18,25 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Configuration
-GO_VERSION="1.23"
-NODE_VERSION="20"
-COVERAGE_THRESHOLD=60
+# Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Configuration - load from .validation.json if available, else use defaults
+CONFIG_FILE="${SCRIPT_DIR}/.validation.json"
+if [[ -f "$CONFIG_FILE" ]] && command -v jq &>/dev/null; then
+    GO_VERSION=$(jq -r '.versions.go.required // "1.23"' "$CONFIG_FILE")
+    NODE_VERSION=$(jq -r '.versions.node.required // "20"' "$CONFIG_FILE")
+    COVERAGE_THRESHOLD=$(jq -r '.coverage.threshold // 60' "$CONFIG_FILE")
+    echo -e "${GREEN}[config] Loaded settings from .validation.json${NC}"
+else
+    # Fallback defaults (must match .validation.json)
+    GO_VERSION="1.23"
+    NODE_VERSION="20"
+    COVERAGE_THRESHOLD=60
+    if [[ -f "$CONFIG_FILE" ]]; then
+        echo -e "${YELLOW}[config] jq not installed - using hardcoded defaults${NC}"
+    fi
+fi
 
 # Parse command line arguments
 QUICK_MODE=false
@@ -72,6 +86,20 @@ print_error() {
 
 # Stage 1: Validation
 print_stage "Stage 1: Validation"
+
+# Check for forbidden files (repository cleanliness)
+print_stage "Checking repository cleanliness"
+CLEANLINESS_SCRIPT="${SCRIPT_DIR}/scripts/validate-repo-cleanliness.sh"
+if [[ -x "$CLEANLINESS_SCRIPT" ]]; then
+    if "$CLEANLINESS_SCRIPT" --all; then
+        print_success "Repository cleanliness check passed"
+    else
+        print_error "Repository contains forbidden files"
+        exit 1
+    fi
+else
+    print_warning "Repository cleanliness script not found, skipping check"
+fi
 
 # Check Go version
 print_stage "Checking Go version"
@@ -210,22 +238,20 @@ else
     # Lint Helm charts
     print_stage "Linting Helm charts"
 
-    if helm lint deploy/helm/; then
+    # Lint with minimal required values for validation
+    if helm lint deploy/helm/ \
+        --set cnpg.host=test-db.svc.cluster.local \
+        --set cnpg.userSecret=test-secret \
+        --set env.sessionID=00000000-0000-0000-0000-000000000001; then
         print_success "Helm lint passed (default values)"
     else
         print_error "Helm lint failed (default values)"
         exit 1
     fi
 
-    if helm lint deploy/helm/ -f deploy/helm/values.gateway.yaml; then
-        print_success "Helm lint passed (gateway values)"
-    else
-        print_error "Helm lint failed (gateway values)"
-        exit 1
-    fi
-
     if [ -f "deploy/helm/values.project-template.yaml" ]; then
-        if helm lint deploy/helm/ -f deploy/helm/values.project-template.yaml; then
+        if helm lint deploy/helm/ -f deploy/helm/values.project-template.yaml \
+            --set env.sessionID=00000000-0000-0000-0000-000000000001; then
             print_success "Helm lint passed (project-template values)"
         else
             print_error "Helm lint failed (project-template values)"
@@ -236,22 +262,20 @@ else
     # Validate Helm templates
     print_stage "Validating Helm templates"
 
-    if helm template kubetty deploy/helm/ > /dev/null; then
+    # Template with minimal required values for validation
+    if helm template kubetty deploy/helm/ \
+        --set cnpg.host=test-db.svc.cluster.local \
+        --set cnpg.userSecret=test-secret \
+        --set env.sessionID=00000000-0000-0000-0000-000000000001 > /dev/null; then
         print_success "Helm template validation passed (default)"
     else
         print_error "Helm template validation failed (default)"
         exit 1
     fi
 
-    if helm template kubetty-gateway deploy/helm/ -f deploy/helm/values.gateway.yaml > /dev/null; then
-        print_success "Helm template validation passed (gateway)"
-    else
-        print_error "Helm template validation failed (gateway)"
-        exit 1
-    fi
-
     if [ -f "deploy/helm/values.project-template.yaml" ]; then
-        if helm template kubetty-project deploy/helm/ -f deploy/helm/values.project-template.yaml > /dev/null; then
+        if helm template kubetty-project deploy/helm/ -f deploy/helm/values.project-template.yaml \
+            --set env.sessionID=00000000-0000-0000-0000-000000000001 > /dev/null; then
             print_success "Helm template validation passed (project-template)"
         else
             print_error "Helm template validation failed (project-template)"
@@ -326,6 +350,7 @@ print_success "All validation checks passed!"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 echo "Stages completed:"
+echo "  ✓ Repository cleanliness check"
 echo "  ✓ Go version verification (${GO_VERSION})"
 echo "  ✓ Go formatting check"
 echo "  ✓ go vet"

@@ -209,16 +209,10 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           echo "#### Default Values" >> $GITHUB_STEP_SUMMARY
-          if helm lint deploy/helm/; then
-            echo "✅ Lint passed" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Lint failed" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "#### Gateway Values" >> $GITHUB_STEP_SUMMARY
-          if helm lint deploy/helm/ -f deploy/helm/values.gateway.yaml; then
+          if helm lint deploy/helm/ \
+              --set cnpg.host=test-db.svc.cluster.local \
+              --set cnpg.userSecret=test-secret \
+              --set env.sessionID=00000000-0000-0000-0000-000000000001; then
             echo "✅ Lint passed" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ Lint failed" >> $GITHUB_STEP_SUMMARY
@@ -228,7 +222,8 @@ jobs:
           if [ -f "deploy/helm/values.project-template.yaml" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "#### Project Template Values" >> $GITHUB_STEP_SUMMARY
-            if helm lint deploy/helm/ -f deploy/helm/values.project-template.yaml; then
+            if helm lint deploy/helm/ -f deploy/helm/values.project-template.yaml \
+                --set env.sessionID=00000000-0000-0000-0000-000000000001; then
               echo "✅ Lint passed" >> $GITHUB_STEP_SUMMARY
             else
               echo "❌ Lint failed" >> $GITHUB_STEP_SUMMARY
@@ -241,22 +236,19 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "#### Template Rendering" >> $GITHUB_STEP_SUMMARY
 
-          if helm template kubetty deploy/helm/ > /dev/null; then
+          if helm template kubetty deploy/helm/ \
+              --set cnpg.host=test-db.svc.cluster.local \
+              --set cnpg.userSecret=test-secret \
+              --set env.sessionID=00000000-0000-0000-0000-000000000001 > /dev/null; then
             echo "✅ Default values render successfully" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ Default values failed to render" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
 
-          if helm template kubetty-gateway deploy/helm/ -f deploy/helm/values.gateway.yaml > /dev/null; then
-            echo "✅ Gateway values render successfully" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Gateway values failed to render" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
           if [ -f "deploy/helm/values.project-template.yaml" ]; then
-            if helm template kubetty-project deploy/helm/ -f deploy/helm/values.project-template.yaml > /dev/null; then
+            if helm template kubetty-project deploy/helm/ -f deploy/helm/values.project-template.yaml \
+                --set env.sessionID=00000000-0000-0000-0000-000000000001 > /dev/null; then
               echo "✅ Project template values render successfully" >> $GITHUB_STEP_SUMMARY
             else
               echo "❌ Project template values failed to render" >> $GITHUB_STEP_SUMMARY

@@ -108,10 +108,11 @@ apiSecrets:
 Or via command line:
 
 ```bash
-helm upgrade --install kubetty-beacon-support ./deploy/helm \
-  -n kubetty-beacon-support \
-  -f deploy/helm/values.beacon-support.yaml \
-  --set apiSecrets.existingSecret=kubetty-api-keys
+helm upgrade --install kubetty-my-project ./deploy/helm \
+  -n kubetty-my-project \
+  -f deploy/helm/values.project-template.yaml \
+  --set apiSecrets.existingSecret=kubetty-api-keys \
+  --set env.sessionID="$(uuidgen)"
 ```
 
 ## Verifying Secret Configuration

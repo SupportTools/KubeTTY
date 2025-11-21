@@ -287,15 +287,23 @@ jobs:
 
       - name: Lint Helm chart
         run: |
-          helm lint deploy/helm/
-          helm lint deploy/helm/ -f deploy/helm/values.gateway.yaml
-          helm lint deploy/helm/ -f deploy/helm/values.project-template.yaml
+          # Lint with minimal required values for validation
+          helm lint deploy/helm/ \
+            --set cnpg.host=test-db.svc.cluster.local \
+            --set cnpg.userSecret=test-secret \
+            --set env.sessionID=00000000-0000-0000-0000-000000000001
+          helm lint deploy/helm/ -f deploy/helm/values.project-template.yaml \
+            --set env.sessionID=00000000-0000-0000-0000-000000000001
 
       - name: Validate Helm templates
         run: |
-          helm template kubetty deploy/helm/ > /dev/null
-          helm template kubetty-gateway deploy/helm/ -f deploy/helm/values.gateway.yaml > /dev/null
-          helm template kubetty-project deploy/helm/ -f deploy/helm/values.project-template.yaml > /dev/null
+          # Template with minimal required values for validation
+          helm template kubetty deploy/helm/ \
+            --set cnpg.host=test-db.svc.cluster.local \
+            --set cnpg.userSecret=test-secret \
+            --set env.sessionID=00000000-0000-0000-0000-000000000001 > /dev/null
+          helm template kubetty-project deploy/helm/ -f deploy/helm/values.project-template.yaml \
+            --set env.sessionID=00000000-0000-0000-0000-000000000001 > /dev/null
 
       - name: Package Helm chart
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')

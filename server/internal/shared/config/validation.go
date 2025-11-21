@@ -5,13 +5,19 @@ import "fmt"
 // ValidateAuth validates authentication configuration settings.
 // It ensures that:
 //   - When auth mode is "local", JWT secret and TTLs are properly configured
-//   - Auth mode is one of the supported values: "", "disabled", "local"
+//   - Auth mode is explicitly set to either "disabled" or "local"
+//   - Empty auth mode is rejected to prevent accidental insecure deployments
 //
 // Returns an error if validation fails, nil otherwise.
 func ValidateAuth(cfg AuthConfig) error {
 	switch cfg.Mode {
-	case "", "disabled":
-		// No authentication, no validation needed
+	case "":
+		// Empty auth mode is rejected - require explicit configuration
+		return fmt.Errorf("AUTH_MODE must be explicitly set to 'disabled' or 'local'; empty value is not allowed to prevent accidental insecure deployments")
+
+	case "disabled":
+		// Explicit disabled mode - no authentication, no validation needed
+		// Warning is logged at startup in gateway main.go
 		return nil
 
 	case "local":
@@ -28,7 +34,7 @@ func ValidateAuth(cfg AuthConfig) error {
 		return nil
 
 	default:
-		return fmt.Errorf("unsupported auth mode: %q (valid options: \"\", \"disabled\", \"local\")", cfg.Mode)
+		return fmt.Errorf("unsupported auth mode: %q (valid options: \"disabled\", \"local\")", cfg.Mode)
 	}
 }
 

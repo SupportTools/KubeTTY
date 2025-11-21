@@ -31,11 +31,12 @@ func TestValidateAuth(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "valid empty mode (disabled)",
+			name: "empty mode rejected - requires explicit setting",
 			cfg: AuthConfig{
 				Mode: "",
 			},
-			wantErr: false,
+			wantErr: true,
+			errMsg:  "AUTH_MODE must be explicitly set",
 		},
 		{
 			name: "missing JWT secret for local mode",

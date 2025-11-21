@@ -70,6 +70,12 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
+	// Security warning when authentication is disabled
+	if cfg.AuthMode != "local" {
+		log.Printf("⚠️  SECURITY WARNING: Authentication is DISABLED (AUTH_MODE=%q)", cfg.AuthMode)
+		log.Printf("⚠️  All routes are unprotected. Set AUTH_MODE=local and configure AUTH_JWT_SECRET to enable authentication.")
+	}
+
 	if err := runMigrations(ctx, cfg.ConnString()); err != nil {
 		log.Fatalf("apply migrations: %v", err)
 	}
@@ -228,9 +234,13 @@ func main() {
 	// Static files are always public (React handles auth state)
 	mux.Handle("/", srv.appMetrics.InstrumentHandler("static", srv.staticHandler()))
 
+	// Apply middlewares: auth warning (adds X-Auth-Warning header when auth disabled), then logging
+	handler := sharedserver.AuthWarningMiddleware(cfg.AuthMode)(mux)
+	handler = sharedserver.LoggingMiddleware(handler)
+
 	httpSrv := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: sharedserver.LoggingMiddleware(mux),
+		Handler: handler,
 	}
 
 	// Start graceful shutdown handler in background

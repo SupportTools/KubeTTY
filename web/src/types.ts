@@ -28,6 +28,8 @@ export type SessionLogsResponse = {
   logs: SessionLogEntry[];
 };
 
+export type ProjectHealthStatus = 'online' | 'degraded' | 'offline' | 'unknown';
+
 export type ProjectInfo = {
   id: string;
   displayName: string;
@@ -37,6 +39,8 @@ export type ProjectInfo = {
   description?: string;
   icon?: string;
   tags?: string[];
+  status?: ProjectHealthStatus;
+  lastCheckedAt?: string;
 };
 
 export type ProjectsResponse = {

@@ -128,6 +128,8 @@ func main() {
 		}
 		// Start idle checker goroutine for tab timeout monitoring
 		go tabManager.StartIdleChecker(ctx)
+		// Start background health checking for projects
+		tabManager.StartHealthChecker()
 	}
 	if tabPool != nil {
 		defer tabPool.Close()
@@ -201,7 +203,7 @@ func main() {
 				apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 				return
 			}
-			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
+			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjectsWithStatus()})
 		})))
 		mux.Handle("/api/tabs", requireAuth(http.HandlerFunc(srv.handleTabs)))
 		mux.Handle("/api/tabs/", requireAuth(http.HandlerFunc(srv.handleTabByID)))
@@ -217,7 +219,7 @@ func main() {
 				apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 				return
 			}
-			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjects()})
+			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjectsWithStatus()})
 		}))
 		mux.Handle("/api/tabs", http.HandlerFunc(srv.handleTabs))
 		mux.Handle("/api/tabs/", http.HandlerFunc(srv.handleTabByID))
@@ -292,7 +294,6 @@ func (s *server) staticHandler() http.Handler {
 func (s *server) authEnabled() bool {
 	return s != nil && s.cfg.AuthMode == "local" && s.authMgr != nil
 }
-
 
 // ObserveStore implements handlers_session.StoreMetricsObserver interface
 func (s *server) ObserveStore(operation string, start time.Time, err error) {

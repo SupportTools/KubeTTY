@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	gatewayconfig "github.com/supporttools/KubeTTY/server/internal/gateway/config"
+	"github.com/supporttools/KubeTTY/server/internal/gateway/health"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/relay"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
 )
@@ -29,6 +30,7 @@ type Manager struct {
 	idleTimeout       time.Duration // Tab idle timeout duration
 	idleWarningBefore time.Duration // Warning time before idle timeout
 	stopIdleChecker   chan struct{} // Signal to stop idle checker goroutine
+	healthChecker     *health.Checker
 }
 
 type tabEntry struct {
@@ -63,6 +65,7 @@ func New(cat gatewayconfig.Catalog, store tabs.Store, idleTimeout time.Duration)
 		idleTimeout:       idleTimeout,
 		idleWarningBefore: 5 * time.Minute, // Fixed: warn 5 minutes before timeout
 		stopIdleChecker:   make(chan struct{}),
+		healthChecker:     health.NewChecker(cat.Projects),
 	}
 }
 
@@ -170,6 +173,37 @@ func (m *Manager) ListProjects() []gatewayconfig.Project {
 	result := make([]gatewayconfig.Project, 0, len(m.projects))
 	for _, p := range m.projects {
 		result = append(result, p)
+	}
+	return result
+}
+
+// ProjectWithStatus combines project metadata with health status.
+type ProjectWithStatus struct {
+	gatewayconfig.Project
+	Status        string     `json:"status"`
+	LastCheckedAt *time.Time `json:"lastCheckedAt,omitempty"`
+}
+
+// ListProjectsWithStatus returns all projects with their current health status.
+func (m *Manager) ListProjectsWithStatus() []ProjectWithStatus {
+	result := make([]ProjectWithStatus, 0, len(m.projects))
+	statuses := make(map[string]*health.ProjectStatus)
+	if m.healthChecker != nil {
+		statuses = m.healthChecker.GetAllStatuses()
+	}
+
+	for _, p := range m.projects {
+		pws := ProjectWithStatus{
+			Project: p,
+			Status:  string(health.StatusUnknown),
+		}
+		if status, ok := statuses[p.ID]; ok {
+			pws.Status = string(status.Status)
+			if !status.LastCheckedAt.IsZero() {
+				pws.LastCheckedAt = &status.LastCheckedAt
+			}
+		}
+		result = append(result, pws)
 	}
 	return result
 }
@@ -309,9 +343,19 @@ func (m *Manager) StartIdleChecker(ctx context.Context) {
 	}
 }
 
-// Stop gracefully shuts down the manager and idle checker.
+// Stop gracefully shuts down the manager, idle checker, and health checker.
 func (m *Manager) Stop() {
 	close(m.stopIdleChecker)
+	if m.healthChecker != nil {
+		m.healthChecker.Stop()
+	}
+}
+
+// StartHealthChecker begins the background health checking goroutine.
+func (m *Manager) StartHealthChecker() {
+	if m.healthChecker != nil {
+		m.healthChecker.Start()
+	}
 }
 
 // checkIdleTabs scans all tabs and handles idle warnings and closures.

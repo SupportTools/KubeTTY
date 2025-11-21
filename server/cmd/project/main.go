@@ -55,7 +55,7 @@ type ptySession struct {
 }
 
 type server struct {
-	cfg   *config.Config
+	cfg   *config.ProjectConfig
 	store sessions.Store
 
 	// PTY session management
@@ -75,7 +75,7 @@ func main() {
 		FullTimestamp: true,
 	})
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadProjectConfig()
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
@@ -89,7 +89,11 @@ func main() {
 	}
 
 	// Initialize stores
-	store, err := sessions.NewPGXStore(ctx, cfg.ConnString())
+	poolConfig, err := cfg.ConnConfig()
+	if err != nil {
+		log.Fatalf("build pool config: %v", err)
+	}
+	store, err := sessions.NewPGXStore(ctx, poolConfig)
 	if err != nil {
 		log.Fatalf("create session store: %v", err)
 	}

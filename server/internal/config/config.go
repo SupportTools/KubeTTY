@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	gatewayconfig "github.com/supporttools/KubeTTY/server/internal/gateway/config"
 	sharedconfig "github.com/supporttools/KubeTTY/server/internal/shared/config"
 )
@@ -93,8 +94,21 @@ func Load() (Config, error) {
 }
 
 // ConnString builds the pgx connection string using the shared config builder.
+//
+// DEPRECATED: Use ConnConfig() instead for better security and type safety.
+// This method is maintained for backward compatibility but uses string concatenation
+// which could lead to injection vulnerabilities if parameters come from untrusted sources.
 func (c Config) ConnString() string {
 	return sharedconfig.BuildPostgresConnString(c.CNPGHost, c.CNPGPort, c.CNPGDatabase, c.CNPGUser, c.CNPGPassword)
+}
+
+// ConnConfig creates a secure, injection-proof PostgreSQL connection configuration
+// using the shared BuildPostgresConfig function. This is the recommended method
+// for creating database connections.
+//
+// Returns an error if the configuration parameters are invalid (e.g., invalid port range).
+func (c Config) ConnConfig() (*pgxpool.Config, error) {
+	return sharedconfig.BuildPostgresConfig(c.CNPGHost, c.CNPGPort, c.CNPGDatabase, c.CNPGUser, c.CNPGPassword)
 }
 
 // GetAuthMode returns the authentication mode for AuthConfig interface.

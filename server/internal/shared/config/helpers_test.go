@@ -355,3 +355,399 @@ func TestBuildPostgresConnString(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildPostgresConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		host     string
+		port     string
+		database string
+		user     string
+		password string
+		wantErr  bool
+		errMsg   string
+		validate func(*testing.T, string, string, string, string, string)
+	}{
+		{
+			name:     "standard alphanumeric password",
+			host:     "localhost",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "secret123",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Host != host {
+					t.Errorf("Host = %v, want %v", cfg.ConnConfig.Host, host)
+				}
+				if cfg.ConnConfig.Port != 5432 {
+					t.Errorf("Port = %v, want 5432", cfg.ConnConfig.Port)
+				}
+				if cfg.ConnConfig.Database != db {
+					t.Errorf("Database = %v, want %v", cfg.ConnConfig.Database, db)
+				}
+				if cfg.ConnConfig.User != user {
+					t.Errorf("User = %v, want %v", cfg.ConnConfig.User, user)
+				}
+				if cfg.ConnConfig.Password != pass {
+					t.Errorf("Password = %v, want %v", cfg.ConnConfig.Password, pass)
+				}
+				if cfg.ConnConfig.TLSConfig != nil {
+					t.Error("TLSConfig should be nil (sslmode=disable)")
+				}
+			},
+		},
+		{
+			name:     "password with spaces",
+			host:     "localhost",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "my password with spaces",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Password != pass {
+					t.Errorf("Password = %v, want %v", cfg.ConnConfig.Password, pass)
+				}
+			},
+		},
+		{
+			name:     "password with single quotes",
+			host:     "localhost",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "it's a secret",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Password != pass {
+					t.Errorf("Password = %v, want %v", cfg.ConnConfig.Password, pass)
+				}
+			},
+		},
+		{
+			name:     "password with double quotes",
+			host:     "localhost",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: `say "hello"`,
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Password != pass {
+					t.Errorf("Password = %v, want %v", cfg.ConnConfig.Password, pass)
+				}
+			},
+		},
+		{
+			name:     "password with backslashes",
+			host:     "localhost",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: `c:\path\to\key`,
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Password != pass {
+					t.Errorf("Password = %v, want %v", cfg.ConnConfig.Password, pass)
+				}
+			},
+		},
+		{
+			name:     "password with unicode",
+			host:     "localhost",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "пароль123",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Password != pass {
+					t.Errorf("Password = %v, want %v", cfg.ConnConfig.Password, pass)
+				}
+			},
+		},
+		{
+			name:     "password with symbols",
+			host:     "localhost",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "p@ssw0rd!#$%^&*()",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Password != pass {
+					t.Errorf("Password = %v, want %v", cfg.ConnConfig.Password, pass)
+				}
+			},
+		},
+		{
+			name:     "CNPG cluster DNS name",
+			host:     "postgres-primary.default.svc.cluster.local",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty",
+			password: "password123",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Host != host {
+					t.Errorf("Host = %v, want %v", cfg.ConnConfig.Host, host)
+				}
+			},
+		},
+		{
+			name:     "empty password is allowed",
+			host:     "localhost",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Password != "" {
+					t.Errorf("Password = %v, want empty", cfg.ConnConfig.Password)
+				}
+			},
+		},
+		{
+			name:     "custom port",
+			host:     "localhost",
+			port:     "5433",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "secret",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Port != 5433 {
+					t.Errorf("Port = %v, want 5433", cfg.ConnConfig.Port)
+				}
+			},
+		},
+		{
+			name:     "minimum valid port",
+			host:     "localhost",
+			port:     "1",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "secret",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Port != 1 {
+					t.Errorf("Port = %v, want 1", cfg.ConnConfig.Port)
+				}
+			},
+		},
+		{
+			name:     "maximum valid port",
+			host:     "localhost",
+			port:     "65535",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "secret",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.ConnConfig.Port != 65535 {
+					t.Errorf("Port = %v, want 65535", cfg.ConnConfig.Port)
+				}
+			},
+		},
+		{
+			name:     "empty host returns error",
+			host:     "",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "secret",
+			wantErr:  true,
+			errMsg:   "database host is required",
+		},
+		{
+			name:     "empty database returns error",
+			host:     "localhost",
+			port:     "5432",
+			database: "",
+			user:     "kubetty_user",
+			password: "secret",
+			wantErr:  true,
+			errMsg:   "database name is required",
+		},
+		{
+			name:     "empty user returns error",
+			host:     "localhost",
+			port:     "5432",
+			database: "kubetty",
+			user:     "",
+			password: "secret",
+			wantErr:  true,
+			errMsg:   "database user is required",
+		},
+		{
+			name:     "non-numeric port returns error",
+			host:     "localhost",
+			port:     "abc",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "secret",
+			wantErr:  true,
+			errMsg:   "invalid port number",
+		},
+		{
+			name:     "port zero returns error",
+			host:     "localhost",
+			port:     "0",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "secret",
+			wantErr:  true,
+			errMsg:   "must be between 1 and 65535",
+		},
+		{
+			name:     "negative port returns error",
+			host:     "localhost",
+			port:     "-1",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "secret",
+			wantErr:  true,
+			errMsg:   "must be between 1 and 65535",
+		},
+		{
+			name:     "port above 65535 returns error",
+			host:     "localhost",
+			port:     "65536",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "secret",
+			wantErr:  true,
+			errMsg:   "must be between 1 and 65535",
+		},
+		{
+			name:     "injection attempt in password is safely handled",
+			host:     "localhost",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "secret' OR '1'='1",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// The password should be stored exactly as-is with no interpretation
+				if cfg.ConnConfig.Password != pass {
+					t.Errorf("Password = %v, want %v", cfg.ConnConfig.Password, pass)
+				}
+			},
+		},
+		{
+			name:     "connection parameter injection attempt is safely handled",
+			host:     "localhost",
+			port:     "5432",
+			database: "kubetty",
+			user:     "kubetty_user",
+			password: "secret sslmode=require host=evil.com",
+			wantErr:  false,
+			validate: func(t *testing.T, host, port, db, user, pass string) {
+				cfg, err := BuildPostgresConfig(host, port, db, user, pass)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// Verify the password is stored as-is and doesn't affect other config
+				if cfg.ConnConfig.Password != pass {
+					t.Errorf("Password = %v, want %v", cfg.ConnConfig.Password, pass)
+				}
+				// Verify host wasn't affected by injection attempt
+				if cfg.ConnConfig.Host != "localhost" {
+					t.Errorf("Host = %v, want localhost (injection attempt affected config)", cfg.ConnConfig.Host)
+				}
+				// Verify TLS is still disabled
+				if cfg.ConnConfig.TLSConfig != nil {
+					t.Error("TLSConfig should still be nil (injection attempt affected config)")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.wantErr {
+				_, err := BuildPostgresConfig(tt.host, tt.port, tt.database, tt.user, tt.password)
+				if err == nil {
+					t.Errorf("BuildPostgresConfig() expected error, got nil")
+					return
+				}
+				if tt.errMsg != "" && !contains(err.Error(), tt.errMsg) {
+					t.Errorf("BuildPostgresConfig() error = %v, want error containing %q", err, tt.errMsg)
+				}
+			} else {
+				if tt.validate != nil {
+					tt.validate(t, tt.host, tt.port, tt.database, tt.user, tt.password)
+				}
+			}
+		})
+	}
+}
+
+// Helper function for error message checking
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
+		(len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}

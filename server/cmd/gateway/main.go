@@ -74,7 +74,12 @@ func main() {
 		log.Fatalf("apply migrations: %v", err)
 	}
 
-	store, err := sessions.NewPGXStore(ctx, cfg.ConnString())
+	poolConfig, err := cfg.ConnConfig()
+	if err != nil {
+		log.Fatalf("build pool config: %v", err)
+	}
+
+	store, err := sessions.NewPGXStore(ctx, poolConfig)
 	if err != nil {
 		log.Fatalf("connect cnpg: %v", err)
 	}
@@ -85,7 +90,11 @@ func main() {
 		authManager *auth.Manager
 	)
 	if cfg.AuthMode == "local" {
-		authStore, err = auth.NewStore(ctx, cfg.ConnString())
+		authPoolConfig, err := cfg.ConnConfig()
+		if err != nil {
+			log.Fatalf("build auth pool config: %v", err)
+		}
+		authStore, err = auth.NewStore(ctx, authPoolConfig)
 		if err != nil {
 			log.Fatalf("connect auth store: %v", err)
 		}
@@ -104,7 +113,11 @@ func main() {
 		tabPool    *pgxpool.Pool
 	)
 	if len(cfg.ProjectCatalog.Projects) > 0 {
-		tabPool, err = pgxpool.New(ctx, cfg.ConnString())
+		tabPoolConfig, err := cfg.ConnConfig()
+		if err != nil {
+			log.Fatalf("build tab pool config: %v", err)
+		}
+		tabPool, err = pgxpool.NewWithConfig(ctx, tabPoolConfig)
 		if err != nil {
 			log.Fatalf("gateway pool: %v", err)
 		}

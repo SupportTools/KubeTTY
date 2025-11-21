@@ -15,6 +15,7 @@ import (
 var (
 	ErrUserNotFound         = errors.New("auth user not found")
 	ErrRefreshTokenNotFound = errors.New("refresh token not found")
+	ErrDuplicateUsername    = errors.New("username already exists")
 )
 
 // User represents a KubeTTY local user account.
@@ -64,9 +65,24 @@ type PGStore struct {
 	pool *pgxpool.Pool
 }
 
-// NewStore creates a new store using its own connection pool.
-func NewStore(ctx context.Context, conn string) (*PGStore, error) {
-	pool, err := pgxpool.New(ctx, conn)
+// NewStore creates a new store using its own connection pool with secure, structured configuration.
+//
+// The config parameter should be created using sharedconfig.BuildPostgresConfig() or
+// the CommonConfig.ConnConfig() method, which provide injection-proof configuration.
+//
+// Example:
+//
+//	cfg, err := config.LoadGatewayConfig()
+//	if err != nil {
+//	    return err
+//	}
+//	poolConfig, err := cfg.ConnConfig()
+//	if err != nil {
+//	    return fmt.Errorf("build pool config: %w", err)
+//	}
+//	store, err := auth.NewStore(ctx, poolConfig)
+func NewStore(ctx context.Context, config *pgxpool.Config) (*PGStore, error) {
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("auth store connect: %w", err)
 	}

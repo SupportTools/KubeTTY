@@ -15,9 +15,25 @@ type PGXStore struct {
 	pool *pgxpool.Pool
 }
 
-// NewPGXStore creates the connection pool. Schema migrations are run separately.
-func NewPGXStore(ctx context.Context, connString string) (*PGXStore, error) {
-	pool, err := pgxpool.New(ctx, connString)
+// NewPGXStore creates the connection pool using a secure, structured configuration.
+// Schema migrations are run separately.
+//
+// The config parameter should be created using sharedconfig.BuildPostgresConfig() or
+// the CommonConfig.ConnConfig() method, which provide injection-proof configuration.
+//
+// Example:
+//
+//	cfg, err := config.LoadGatewayConfig()
+//	if err != nil {
+//	    return err
+//	}
+//	poolConfig, err := cfg.ConnConfig()
+//	if err != nil {
+//	    return fmt.Errorf("build pool config: %w", err)
+//	}
+//	store, err := sessions.NewPGXStore(ctx, poolConfig)
+func NewPGXStore(ctx context.Context, config *pgxpool.Config) (*PGXStore, error) {
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("connect pgx: %w", err)
 	}
@@ -29,6 +45,11 @@ func (s *PGXStore) Close() {
 	if s.pool != nil {
 		s.pool.Close()
 	}
+}
+
+// Ping checks database connectivity for health checks.
+func (s *PGXStore) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
 }
 
 // GetSession retrieves a session row.

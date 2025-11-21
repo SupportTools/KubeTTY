@@ -1,6 +1,19 @@
+// Package util provides common HTTP utility functions for KubeTTY server components.
+//
+// This package offers standardized helpers for JSON response writing, client IP extraction
+// with proxy support, and WebSocket scheme detection based on TLS configuration.
+//
+// Key features:
+//   - Safe JSON encoding with atomic header/body writes
+//   - X-Forwarded-For header parsing for proxied requests
+//   - Automatic ws/wss scheme selection based on TLS
+//
+// These utilities are shared across gateway, project, and handler packages to ensure
+// consistent HTTP request/response handling throughout the KubeTTY application.
 package util
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -8,12 +21,22 @@ import (
 )
 
 // WriteJSON writes a JSON response with the specified status code.
-// It sets the Content-Type header and encodes the payload.
+// It encodes the payload to a buffer first, then sets headers and writes
+// the response body. This ensures headers are only sent if encoding succeeds.
 // Returns any encoding error encountered.
 func WriteJSON(w http.ResponseWriter, status int, payload any) error {
+	// Encode to buffer first to ensure encoding succeeds
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		// Encoding failed - don't send any headers
+		return err
+	}
+
+	// Encoding succeeded - now set headers and write response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	return json.NewEncoder(w).Encode(payload)
+	_, err := w.Write(buf.Bytes())
+	return err
 }
 
 // ClientIPFromRequest extracts the client IP address from an HTTP request.

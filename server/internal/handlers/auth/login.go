@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
-	"github.com/supporttools/KubeTTY/server/internal/config"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
@@ -71,7 +70,7 @@ type LoginResponse struct {
 //
 // The handler validates credentials, issues JWT tokens, sets HTTP-only
 // cookies, and updates the user's last login timestamp.
-func NewAuthLoginHandler(cfg config.Config, authMgr *auth.Manager, authStore auth.Store) http.HandlerFunc {
+func NewAuthLoginHandler(cfg AuthConfig, authMgr *auth.Manager, authStore auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !AuthEnabled(cfg, authMgr) {
 			_ = apierrors.WriteError(w, apierrors.ServiceUnavailable("authentication disabled", ""))

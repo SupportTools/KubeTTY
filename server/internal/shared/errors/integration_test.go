@@ -495,11 +495,11 @@ func (m *mockSessionStore) AppendLog(ctx context.Context, entry sessions.LogEntr
 	return errors.New("not implemented")
 }
 
-func (m *mockSessionStore) ListLogs(ctx context.Context, sessionID string, limit int) ([]sessions.LogEntry, error) {
+func (m *mockSessionStore) ListLogs(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error) {
 	if m.listLogsErr != nil {
-		return nil, m.listLogsErr
+		return sessions.LogsResult{}, m.listLogsErr
 	}
-	return []sessions.LogEntry{}, nil
+	return sessions.LogsResult{Logs: []sessions.LogEntry{}, MatchCount: 0}, nil
 }
 
 func (m *mockSessionStore) PruneLogs(ctx context.Context, cutoff time.Time) (int64, error) {

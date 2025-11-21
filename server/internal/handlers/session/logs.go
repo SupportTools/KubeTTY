@@ -18,8 +18,9 @@ type StoreMetricsObserver interface {
 
 // LogsResponse represents the session logs response.
 type LogsResponse struct {
-	SessionID string              `json:"sessionId"` // Session UUID
-	Logs      []sessions.LogEntry `json:"logs"`      // Log entries for the session
+	SessionID  string              `json:"sessionId"`  // Session UUID
+	Logs       []sessions.LogEntry `json:"logs"`       // Log entries for the session
+	MatchCount int                 `json:"matchCount"` // Total entries matching filter (before limit)
 }
 
 // NewSessionLogsHandler creates an HTTP handler for retrieving session logs.
@@ -28,6 +29,8 @@ type LogsResponse struct {
 // Query Parameters:
 //   - session (required): The session ID to retrieve logs for
 //   - limit (optional): Maximum number of logs to return (default: 200, max: 2000)
+//   - search (optional): Case-insensitive substring search on log content
+//   - direction (optional): Filter by direction ("in" for client input, "out" for session output)
 //
 // Response (200 OK):
 //
@@ -36,29 +39,37 @@ type LogsResponse struct {
 //	  "logs": [
 //	    {
 //	      "sessionId": string,
-//	      "direction": string,  // "input" or "output"
+//	      "direction": string,  // "in" or "out"
 //	      "data": string,       // Base64-encoded data
 //	      "createdAt": string   // ISO 8601 timestamp
 //	    }
-//	  ]
+//	  ],
+//	  "matchCount": number      // Total entries matching filter (before limit)
 //	}
 //
 // Response (400 Bad Request):
 //   - "missing session parameter" - No session ID provided
+//   - "invalid direction parameter" - Direction must be "in" or "out"
 //
 // Response (500 Internal Server Error):
 //   - "list logs: <error>" - Database query error
 //   - "encode response: <error>" - JSON encoding error
 //
-// The handler queries the sessions store with configurable pagination and
-// returns logs as JSON. The observer parameter can be nil if metrics
-// tracking is not needed.
+// The handler queries the sessions store with configurable pagination,
+// optional search, and direction filtering. Returns logs as JSON.
+// The observer parameter can be nil if metrics tracking is not needed.
 func NewSessionLogsHandler(store sessions.Store, observer StoreMetricsObserver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		sessionID := r.URL.Query().Get("session")
 		if sessionID == "" {
 			_ = apierrors.WriteError(w, apierrors.BadRequest("missing session parameter", ""))
+			return
+		}
+
+		// Validate session ID length (UUIDs are 36 chars)
+		if len(sessionID) > 64 {
+			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid session parameter", "session ID too long"))
 			return
 		}
 
@@ -77,9 +88,34 @@ func NewSessionLogsHandler(store sessions.Store, observer StoreMetricsObserver) 
 			}
 		}
 
+		// Parse optional filter parameters
+		var filter *sessions.LogFilter
+		search := r.URL.Query().Get("search")
+		direction := r.URL.Query().Get("direction")
+
+		// Validate search term length to prevent DoS
+		if len(search) > 500 {
+			_ = apierrors.WriteError(w, apierrors.BadRequest("search term too long", "maximum 500 characters"))
+			return
+		}
+
+		// Validate direction if provided
+		if direction != "" && direction != "in" && direction != "out" {
+			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid direction parameter", "direction must be 'in' or 'out'"))
+			return
+		}
+
+		// Build filter if any filter params are provided
+		if search != "" || direction != "" {
+			filter = &sessions.LogFilter{
+				Search:    search,
+				Direction: direction,
+			}
+		}
+
 		// Query logs from store
 		start := time.Now()
-		logs, err := store.ListLogs(ctx, sessionID, limit)
+		result, err := store.ListLogs(ctx, sessionID, limit, filter)
 
 		// Observe metrics if observer is provided
 		if observer != nil {
@@ -94,14 +130,16 @@ func NewSessionLogsHandler(store sessions.Store, observer StoreMetricsObserver) 
 		}
 
 		// Ensure non-nil slice for JSON response
+		logs := result.Logs
 		if logs == nil {
 			logs = []sessions.LogEntry{}
 		}
 
 		// Build and send response
 		resp := LogsResponse{
-			SessionID: sessionID,
-			Logs:      logs,
+			SessionID:  sessionID,
+			Logs:       logs,
+			MatchCount: result.MatchCount,
 		}
 
 		if err := util.WriteJSON(w, http.StatusOK, resp); err != nil {

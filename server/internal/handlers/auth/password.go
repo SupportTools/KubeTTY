@@ -7,7 +7,6 @@ import (
 	"net/http"
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
-	"github.com/supporttools/KubeTTY/server/internal/config"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
@@ -63,7 +62,7 @@ type PasswordChangeResponse struct {
 //
 // This handler must be used with the RequireAuth middleware to ensure
 // the user is authenticated.
-func NewAuthPasswordChangeHandler(cfg config.Config, authMgr *auth.Manager) http.HandlerFunc {
+func NewAuthPasswordChangeHandler(cfg AuthConfig, authMgr *auth.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			_ = apierrors.WriteError(w, apierrors.ErrorResponse{

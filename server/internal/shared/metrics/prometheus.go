@@ -1,3 +1,18 @@
+// Package metrics provides Prometheus instrumentation for KubeTTY server components.
+//
+// This package centralizes all Prometheus metrics collection for WebSocket connections,
+// database operations, and HTTP request tracking. It powers the /metrics endpoint used
+// by Prometheus scraping and Grafana dashboards for KubeTTY observability.
+//
+// Collected metrics include:
+//   - kubetty_websocket_bytes_total: WebSocket byte transmission (rx/tx)
+//   - kubetty_store_duration_seconds: Database operation latency histograms
+//   - kubetty_store_errors_total: Database operation error counts
+//   - kubetty_http_duration_seconds: HTTP request latency histograms
+//   - kubetty_http_requests_total: HTTP request counts by route/method/status
+//
+// All metrics are automatically registered with Prometheus default registry via promauto
+// and follow Prometheus naming conventions for consistency with Kubernetes ecosystem monitoring.
 package metrics
 
 import (

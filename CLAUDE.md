@@ -20,21 +20,36 @@ KubeTTY is a **monorepo** with the following structure:
 ```
 KubeTTY/
 ├── server/           # Go backend
-│   ├── main.go       # Entry point, HTTP handlers, WebSocket
+│   ├── cmd/          # Binary entry points
+│   │   ├── gateway/main.go      # Gateway mode binary (multi-project tab UI)
+│   │   ├── project/main.go      # Project mode binary (single PTY)
+│   │   └── kubetty-authuser/    # User management CLI
 │   ├── internal/     # Internal packages
-│   │   ├── auth/     # Authentication/JWT
-│   │   ├── config/   # Configuration
-│   │   ├── gateway/  # Multi-project gateway
-│   │   └── sessions/ # Session persistence
+│   │   ├── handlers/auth/       # Authentication handlers
+│   │   ├── handlers/session/    # Session handlers
+│   │   ├── gateway/             # Multi-project gateway logic
+│   │   ├── sessions/            # Session persistence (pgx_store)
+│   │   └── shared/              # Shared utilities (config, errors, health, metrics)
 │   ├── migrations/   # Database migrations
 │   └── ui/dist/      # Embedded frontend (built from web/)
 ├── web/              # React frontend
 │   └── src/
 │       ├── components/  # UI components
 │       └── contexts/    # React contexts
-├── deploy/helm/      # Helm chart
+├── deploy/helm/      # Helm chart (supports both gateway and project modes)
 └── docs/             # Documentation
 ```
+
+### Binary Modes
+
+KubeTTY builds two separate binaries from the `server/cmd/` directory:
+
+| Binary | Entry Point | Description |
+|--------|-------------|-------------|
+| `kubetty-gateway` | `server/cmd/gateway/main.go` | Multi-project gateway with tabbed UI, auth, SSE events |
+| `kubetty-project` | `server/cmd/project/main.go` | Single PTY session per pod, WebSocket streaming |
+
+The Dockerfile and Helm chart use `KUBETTY_MODE` environment variable to select which binary runs.
 
 ## Technology Stack
 
@@ -102,8 +117,11 @@ See `docs/development/task-execution-workflow.md` for complete workflow.
 ### Building
 
 ```bash
-# Server
-cd server && go build .
+# Server (both binaries)
+cd server && go build ./cmd/gateway && go build ./cmd/project
+
+# Or using Makefile
+make build-server-local
 
 # Web (outputs to server/ui/dist/)
 cd web && npm run build
@@ -191,8 +209,10 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 - `deploy/helm/values.yaml` - Helm values
 
 ### Core Handlers
-- `server/main.go` - HTTP handlers, WebSocket, PTY management
-- `server/internal/auth/manager.go` - JWT authentication
+- `server/cmd/gateway/main.go` - Gateway mode: tabs, projects, SSE, auth middleware
+- `server/cmd/project/main.go` - Project mode: PTY, WebSocket, session management
+- `server/internal/handlers/auth/` - Authentication handlers (login, logout, refresh, middleware)
+- `server/internal/handlers/session/` - Session log handlers
 
 ### Frontend Components
 - `web/src/App.tsx` - Main application
@@ -225,12 +245,16 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 ### Adding a New API Endpoint
 
-1. Add handler method to `server` struct in `main.go`
-2. Register route in `main()` mux setup
-3. Add input validation
-4. Implement operation with proper error handling
-5. Write tests
-6. Update documentation if needed
+1. Determine which binary needs the endpoint (gateway or project)
+2. Add handler in the appropriate location:
+   - Gateway routes: `server/cmd/gateway/main.go` or `server/internal/handlers/`
+   - Project routes: `server/cmd/project/main.go` or `server/internal/handlers/`
+   - Shared handlers: `server/internal/shared/handlers/`
+3. Register route in the binary's `main()` mux setup
+4. Add input validation using shared utilities
+5. Implement operation with proper error handling (use `shared/errors`)
+6. Write tests
+7. Update documentation if needed
 
 ### Adding Database Feature
 

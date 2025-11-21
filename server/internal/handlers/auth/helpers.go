@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
-	"github.com/supporttools/KubeTTY/server/internal/config"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
 
@@ -35,6 +34,14 @@ var (
 	ErrAuthMissingToken = errors.New("authentication token missing")
 	ErrAuthDisabled     = errors.New("authentication disabled")
 )
+
+// AuthConfig defines the configuration interface needed for auth handlers.
+// Both config.Config and config.GatewayConfig implement this interface.
+type AuthConfig interface {
+	GetAuthMode() string
+	GetAuthCookieDomain() string
+	GetAuthCookieSecure() bool
+}
 
 // contextKey is used for storing values in request context
 type contextKey string
@@ -107,7 +114,7 @@ func TokenMetadataFromRequest(r *http.Request) auth.TokenMetadata {
 }
 
 // SetAuthCookies sets both access and refresh token cookies in the response.
-func SetAuthCookies(w http.ResponseWriter, pair *auth.TokenPair, cfg config.Config) {
+func SetAuthCookies(w http.ResponseWriter, pair *auth.TokenPair, cfg AuthConfig) {
 	if pair == nil {
 		return
 	}
@@ -116,13 +123,13 @@ func SetAuthCookies(w http.ResponseWriter, pair *auth.TokenPair, cfg config.Conf
 }
 
 // ClearAuthCookies clears both access and refresh token cookies.
-func ClearAuthCookies(w http.ResponseWriter, cfg config.Config) {
+func ClearAuthCookies(w http.ResponseWriter, cfg AuthConfig) {
 	ClearAccessCookie(w, cfg)
 	ClearRefreshCookie(w, cfg)
 }
 
 // ClearAccessCookie clears the access token cookie.
-func ClearAccessCookie(w http.ResponseWriter, cfg config.Config) {
+func ClearAccessCookie(w http.ResponseWriter, cfg AuthConfig) {
 	c := cookieTemplate(AccessTokenCookieName, "", time.Time{}, cfg)
 	c.MaxAge = -1
 	c.Expires = time.Unix(0, 0)
@@ -130,7 +137,7 @@ func ClearAccessCookie(w http.ResponseWriter, cfg config.Config) {
 }
 
 // ClearRefreshCookie clears the refresh token cookie.
-func ClearRefreshCookie(w http.ResponseWriter, cfg config.Config) {
+func ClearRefreshCookie(w http.ResponseWriter, cfg AuthConfig) {
 	c := cookieTemplate(RefreshTokenCookieName, "", time.Time{}, cfg)
 	c.MaxAge = -1
 	c.Expires = time.Unix(0, 0)
@@ -138,17 +145,17 @@ func ClearRefreshCookie(w http.ResponseWriter, cfg config.Config) {
 }
 
 // cookieTemplate creates an HTTP cookie with standard security settings.
-func cookieTemplate(name, value string, expires time.Time, cfg config.Config) *http.Cookie {
+func cookieTemplate(name, value string, expires time.Time, cfg AuthConfig) *http.Cookie {
 	c := &http.Cookie{
 		Name:     name,
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   cfg.AuthCookieSecure,
+		Secure:   cfg.GetAuthCookieSecure(),
 		SameSite: http.SameSiteLaxMode,
 	}
-	if cfg.AuthCookieDomain != "" {
-		c.Domain = cfg.AuthCookieDomain
+	if cfg.GetAuthCookieDomain() != "" {
+		c.Domain = cfg.GetAuthCookieDomain()
 	}
 	if !expires.IsZero() {
 		c.Expires = expires
@@ -162,8 +169,8 @@ func cookieTemplate(name, value string, expires time.Time, cfg config.Config) *h
 }
 
 // AuthEnabled checks if authentication is enabled based on configuration.
-func AuthEnabled(cfg config.Config, authMgr *auth.Manager) bool {
-	return cfg.AuthMode == "local" && authMgr != nil
+func AuthEnabled(cfg AuthConfig, authMgr *auth.Manager) bool {
+	return cfg.GetAuthMode() == "local" && authMgr != nil
 }
 
 // AuthenticateRequest validates the access token from the request and returns
@@ -187,7 +194,7 @@ func AuthenticateRequest(r *http.Request, authMgr *auth.Manager) (*User, error) 
 // HandleAuthFailure sends a standardized authentication failure response.
 // It clears the access cookie and sets appropriate error messages based on
 // the error type.
-func HandleAuthFailure(w http.ResponseWriter, err error, cfg config.Config) {
+func HandleAuthFailure(w http.ResponseWriter, err error, cfg AuthConfig) {
 	msg := "unauthorized"
 	status := http.StatusUnauthorized
 	switch {

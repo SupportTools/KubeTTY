@@ -6,16 +6,16 @@
 - Decide how namespaces are created (script or manual `kubectl create namespace <name>`), especially for per-project releases.
 
 ## 2. Backend Tasks
-- Flesh out `internal/sessions` with real CNPG queries (already scaffolded) and add unit tests covering upsert/list/attachment logic.
-- Expand PTY management: handle resize messages, heartbeat logging, and graceful shutdown when shell exits.
-- Implement reconnect handshake messages (ack/nack) so the frontend can surface errors.
+- [DONE] Flesh out `internal/sessions` with real CNPG queries for single-session-per-pod model.
+- [DONE] Expand PTY management: handle resize messages, heartbeat logging, and graceful shutdown when shell exits.
+- [DONE] Implement single-client enforcement (reject additional connections until first disconnects).
 - Add structured logging and configurable log destination (stdout + optional file).
 
 ## 3. Frontend Tasks
-- Polish SessionPicker UX (loading states, error surfaces, ability to display fork lineage).
-- Wire terminal resize events to backend when implemented; persist theme/keyboard settings locally.
-- Add status banner for Claude-style CLI shortcuts (e.g., showing `--continue` mapping).
-- Include minimal smoke tests (Vitest/React Testing Library) for SessionPicker state handling.
+- [DONE] Wire terminal resize events to backend; persist theme/keyboard settings locally.
+- [DONE] Implement login form and auth flow for protected deployments.
+- Add session logs viewer modal for reviewing past PTY transcripts.
+- Include minimal smoke tests (Vitest/React Testing Library) for auth and terminal state handling.
 
 ## 4. Tooling & Scripts
 - Add `Makefile` targets: `build-ui`, `build-server`, `docker-build`, `docker-push`, `helm-install`.
@@ -32,13 +32,13 @@
 - Finish Helm chart templates (Service, Deployment, ConfigMap/Secret if needed) and add NOTES about port-forwarding.
 - Parameterize env vars (`SESSION_ID`, `CLAUDE_*`, `ANTHROPIC_BASE_URL`, CNPG host/port/db/user/pass) via `values.yaml`.
 - Offer sample values files for Project A/B, each with unique namespaces and session UUIDs.
-- Document deployment procedure: create namespace, `helm upgrade --install`, `kubectl port-forward`, and verifying `/session` + `/ws`.
+- Document deployment procedure: create namespace, `helm upgrade --install`, `kubectl port-forward`, and verifying `/ws` + `/api/auth/me`.
 
 ## 7. Validation & Ops
 - Smoke test end-to-end: start backend, connect via browser, run CLI tools (Claude alias), confirm logs land under `$HOME/claude_logs`.
 - Validate CNPG persistence by restarting pod and ensuring session resumes.
-- Add operational runbook: how to rotate session UUIDs, how to fork sessions via CLI flags, how to clean up CNPG rows.
-- Capture troubleshooting steps for WebSocket errors, database outages, or missing tools in the container.
+- Add operational runbook: session management, auth user creation/rotation, JWT secret rotation, CNPG cleanup.
+- Capture troubleshooting steps for WebSocket errors, database outages, auth failures, or missing tools in the container.
 
 ## 8. Documentation
 - Update README/AGENTS to describe build/run instructions, env vars, CLI aliases, and deployment workflow.
@@ -53,7 +53,6 @@
 3. `make docker-build IMAGE=harbor.support.tools/kubetty/<repo> TAG=<tag>` – multi-stage build producing a tool-rich runtime image.
 4. `make docker-push IMAGE=... TAG=...` – pushes the image to Harbor once authenticated (`docker login harbor.support.tools`).
 5. `helm upgrade --install <release> deploy/helm -n <namespace> -f <values>` – deploys using the freshly pushed image, referencing CNPG secrets in `kubetty-shared`.
-- TODO: update DESIGN/README with session picker refresh behavior.
 
 ---
 
@@ -99,3 +98,47 @@
    - Update DESIGN.md/README with the new architecture diagrams and operational guidance.
    - Capture load-testing expectations (e.g., 20 concurrent tabs) and include soak test checklist.
    - Add synthetic monitoring job that periodically opens a tab for each project to verify end-to-end connectivity.
+
+## 10. Authentication Implementation Plan (complete)
+
+1. **Configuration & Secrets**
+   - Added `AUTH_*` env var plumbing to `internal/config`, added validation, and surfaced the values in the Helm charts (`deploy/helm/values*.yaml`).
+   - Documented secret handling plus helper instructions in `README.md` and exposed `auth.jwtSecretSecret` so operators can point to a Kubernetes Secret instead of embedding raw secrets.
+
+2. **Database Layer**
+   - Created migrations for `kubetty_users` and `kubetty_refresh_tokens` with citext usernames and indexed refresh token metadata.
+   - Implemented `internal/auth/store.go` for user and refresh token CRUD with proper error handling.
+
+3. **Auth Manager & Tokens**
+   - Built `internal/auth/manager.go` to hash passwords, issue HMAC-SHA256 JWTs, rotate hashed refresh tokens, and validate incoming tokens.
+
+4. **HTTP Middleware & Handlers**
+   - Added `/api/auth/login`, `/api/auth/me`, `/api/auth/refresh`, `/api/auth/logout` and wrapped all routes (including `/ws`) with middleware that enforces access tokens and injects user context.
+   - Auth cookies are now Secure/HttpOnly and configurable via `AUTH_COOKIE_*` env vars.
+
+5. **CLI & Ops Tooling**
+   - Added `server/cmd/kubetty-authuser` for creating/updating/listing users and toggling activation states.
+   - README now includes step-by-step auth enablement, user creation commands, and notes on token rotation.
+
+6. **Frontend Experience**
+   - SPA probes `/api/auth/me`, renders login UI when unauthenticated, sends credentials with every request, and shows logout/user info once logged in.
+   - Session log requests now send cookies to remain operable under auth.
+
+7. **Testing & Validation**
+   - Ran `go test ./...` and `npm --prefix web run build`; tests currently rely on the embedded binaries without additional coverage at this stage.
+
+## 11. Post-auth Deployment & Docs
+
+1. **Secrets & User Bootstrap**
+   - Seed the first user via `go run ./server/cmd/kubetty-authuser create ...`.
+   - Store `AUTH_JWT_SECRET` in a Kubernetes Secret and reference it from the Helm `auth` block before enabling `mode: local`.
+   - Document rotation steps in `README.md`.
+
+2. **Verification**
+   - Manually verify login/refresh/logout flows via browser + curl (using cookies and Bearer tokens).
+   - Ensure `/session/logs` + gateway tab APIs continue working when auth is enabled.
+   - Update any CI or rollout scripts to pass `AUTH_*` env vars where needed.
+
+3. **Next Incorporations**
+   - Consider adding health endpoints or metrics around login failures/refresh attempts once real usage starts.
+   - Monitor `kubetty_refresh_tokens` growth and tune cleanup (via `auth.DeleteExpiredRefreshTokens`) as part of ongoing maintenance.

@@ -6,6 +6,18 @@ import (
 	"time"
 )
 
+// LogFilter provides optional filtering for log queries.
+type LogFilter struct {
+	Search    string // Case-insensitive substring search on log content
+	Direction string // Filter by direction ("in" or "out")
+}
+
+// LogsResult contains the query results and total match count.
+type LogsResult struct {
+	Logs       []LogEntry
+	MatchCount int // Total entries matching the filter (before limit)
+}
+
 // Store defines operations required to persist session metadata in CNPG.
 type Store interface {
 	GetSession(ctx context.Context, sessionID string) (*Session, error)
@@ -15,7 +27,7 @@ type Store interface {
 	ClearAttachments(ctx context.Context, deploymentID string) error
 	SetAttachment(ctx context.Context, sessionID, clientID string, attached bool) error
 	AppendLog(ctx context.Context, entry LogEntry) error
-	ListLogs(ctx context.Context, sessionID string, limit int) ([]LogEntry, error)
+	ListLogs(ctx context.Context, sessionID string, limit int, filter *LogFilter) (LogsResult, error)
 	PruneLogs(ctx context.Context, cutoff time.Time) (int64, error)
 	TrimLogs(ctx context.Context, maxEntries int) (int64, error)
 }

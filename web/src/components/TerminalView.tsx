@@ -10,6 +10,10 @@ type Props = {
   externalStatus?: 'connecting' | 'connected' | 'reconnecting' | 'closed';
 };
 
+// PTY resize limits - must match server constants
+const MAX_PTY_COLS = 500;
+const MAX_PTY_ROWS = 200;
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -70,8 +74,6 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
       return `${protocol}://${window.location.host}/ws`;
     })();
 
-    console.log(`[WS] Connecting to ${targetUrl} (attempt ${reconnectAttempts.current + 1})`);
-
     socketRef.current?.close();
     const socket = new WebSocket(targetUrl);
     socket.binaryType = 'arraybuffer';
@@ -83,7 +85,6 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
       const wasReconnecting = connectedOnceRef.current;
       connectedOnceRef.current = true;
       reconnectAttempts.current = 0; // Reset on successful connection
-      console.log(`[WS] Connected successfully (reconnect: ${wasReconnecting})`);
       setStatus(wasReconnecting ? 'Reconnected' : 'Connected');
       if (wasReconnecting && onReconnect) {
         onReconnect();
@@ -92,15 +93,13 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
       notifyResize();
     };
 
-    socket.onclose = (event) => {
-      console.log(`[WS] Connection closed: code=${event.code}, reason=${event.reason || 'none'}, wasClean=${event.wasClean}`);
+    socket.onclose = () => {
       setStatus('Disconnected');
       pingTimer.current && clearInterval(pingTimer.current);
       if (!closingRef.current) {
         // Exponential backoff: 1s, 2s, 4s, 8s, max 16s
         const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 16000);
         reconnectAttempts.current++;
-        console.log(`[WS] Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempts.current})`);
         reconnectTimer.current = setTimeout(() => {
           setRetrySignal((prev) => prev + 1);
         }, delay);
@@ -108,13 +107,23 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
       }
     };
 
-    socket.onerror = (event) => {
-      console.error('[WS] Connection error:', event);
+    socket.onerror = () => {
       setStatus('Error');
     };
 
     socket.onmessage = (event) => {
       const payload = event.data instanceof ArrayBuffer ? decoder.decode(event.data) : String(event.data);
+      // Filter out control messages (pong responses)
+      if (payload.startsWith('{"type":')) {
+        try {
+          const msg = JSON.parse(payload);
+          if (msg.type === 'pong') {
+            return; // Don't write pong to terminal
+          }
+        } catch {
+          // Not valid JSON, write to terminal
+        }
+      }
       termRef.current?.write(payload);
     };
 
@@ -129,8 +138,6 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
     pingTimer.current = setInterval(() => {
       if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
         socketRef.current.send(JSON.stringify({ type: 'ping' }));
-      } else {
-        console.log(`[WS] Ping skipped - socket state: ${socketRef.current?.readyState}`);
       }
     }, 10000); // Reduced from 15s to 10s for faster dead connection detection
 
@@ -153,8 +160,9 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
     if (!socket || !term || socket.readyState !== WebSocket.OPEN) {
       return;
     }
-    const cols = term.cols;
-    const rows = term.rows;
+    // Clamp to server-enforced limits
+    const cols = Math.min(Math.max(1, term.cols), MAX_PTY_COLS);
+    const rows = Math.min(Math.max(1, term.rows), MAX_PTY_ROWS);
     const payload = JSON.stringify({ type: 'resize', cols, rows });
     socket.send(payload);
   };

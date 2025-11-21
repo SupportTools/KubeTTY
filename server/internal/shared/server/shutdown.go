@@ -1,3 +1,19 @@
+// Package server provides HTTP server lifecycle management utilities for KubeTTY.
+//
+// This package centralizes common server patterns including graceful shutdown handling,
+// request logging middleware, and signal-based termination coordination. It ensures
+// KubeTTY components shut down cleanly when receiving SIGINT or SIGTERM from Kubernetes.
+//
+// Key features:
+//   - Graceful shutdown with 30-second timeout for HTTP servers
+//   - SIGINT/SIGTERM signal handling for Kubernetes pod lifecycle
+//   - Pluggable ShutdownHandler interface for custom cleanup logic
+//   - Request logging middleware with structured logrus fields
+//   - Automatic status code capture for HTTP responses
+//
+// The shutdown system coordinates HTTP server termination with database connection cleanup,
+// session persistence, and other stateful component shutdown to prevent data loss during
+// pod restarts or cluster operations.
 package server
 
 import (

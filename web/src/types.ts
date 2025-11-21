@@ -26,6 +26,7 @@ export type SessionLogEntry = {
 export type SessionLogsResponse = {
   sessionId: string;
   logs: SessionLogEntry[];
+  matchCount: number;
 };
 
 export type ProjectHealthStatus = 'online' | 'degraded' | 'offline' | 'unknown';

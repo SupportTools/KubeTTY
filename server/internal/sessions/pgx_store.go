@@ -184,31 +184,72 @@ VALUES ($1,$2,$3,COALESCE($4,NOW()))`
 	return nil
 }
 
-// ListLogs returns the most recent log entries for a session.
-func (s *PGXStore) ListLogs(ctx context.Context, sessionID string, limit int) ([]LogEntry, error) {
+// ListLogs returns log entries for a session with optional filtering.
+// The filter parameter can be nil for unfiltered results.
+func (s *PGXStore) ListLogs(ctx context.Context, sessionID string, limit int, filter *LogFilter) (LogsResult, error) {
 	if limit <= 0 {
 		limit = 200
 	}
-	const stmt = `
+
+	// Build dynamic query based on filter
+	args := []interface{}{sessionID}
+	argIdx := 2
+
+	whereClause := "WHERE session_uuid=$1"
+
+	// Add direction filter if specified
+	if filter != nil && filter.Direction != "" {
+		whereClause += fmt.Sprintf(" AND direction=$%d", argIdx)
+		args = append(args, filter.Direction)
+		argIdx++
+	}
+
+	// Add search filter if specified (case-insensitive search on decoded payload)
+	if filter != nil && filter.Search != "" {
+		// Use convert_from with error handling - skip non-UTF8 rows
+		whereClause += fmt.Sprintf(" AND convert_from(payload, 'UTF8') ILIKE $%d", argIdx)
+		args = append(args, "%"+filter.Search+"%")
+		argIdx++
+	}
+
+	// First, get the total count matching the filter
+	countStmt := fmt.Sprintf(`SELECT COUNT(*) FROM session_logs %s`, whereClause)
+	var matchCount int
+	if err := s.pool.QueryRow(ctx, countStmt, args...).Scan(&matchCount); err != nil {
+		return LogsResult{}, fmt.Errorf("count logs: %w", err)
+	}
+
+	// Then fetch the actual logs with limit
+	args = append(args, limit)
+	stmt := fmt.Sprintf(`
 SELECT session_uuid, direction, payload, created_at
 FROM session_logs
-WHERE session_uuid=$1
+%s
 ORDER BY created_at ASC
-LIMIT $2`
-	rows, err := s.pool.Query(ctx, stmt, sessionID, limit)
+LIMIT $%d`, whereClause, argIdx)
+
+	rows, err := s.pool.Query(ctx, stmt, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list logs: %w", err)
+		return LogsResult{}, fmt.Errorf("list logs: %w", err)
 	}
 	defer rows.Close()
+
 	var logs []LogEntry
 	for rows.Next() {
 		var entry LogEntry
 		if err := rows.Scan(&entry.SessionID, &entry.Direction, &entry.Data, &entry.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan log: %w", err)
+			return LogsResult{}, fmt.Errorf("scan log: %w", err)
 		}
 		logs = append(logs, entry)
 	}
-	return logs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return LogsResult{}, err
+	}
+
+	return LogsResult{
+		Logs:       logs,
+		MatchCount: matchCount,
+	}, nil
 }
 
 // PruneLogs deletes entries older than the cutoff.

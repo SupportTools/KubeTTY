@@ -22,11 +22,16 @@ func setupTestStore(t *testing.T) (*PGXStore, func()) {
 	// Use test database connection from environment
 	connStr := "postgres://postgres:postgres@localhost:5432/kubetty_test?sslmode=disable"
 	pool, err := pgxpool.New(context.Background(), connStr)
-	require.NoError(t, err, "failed to connect to test database")
+	if err != nil {
+		t.Skipf("Skipping database test: database not available: %v", err)
+	}
 
 	// Clean up any existing test data
 	_, err = pool.Exec(context.Background(), "DELETE FROM gateway_tabs")
-	require.NoError(t, err, "failed to clean test data")
+	if err != nil {
+		pool.Close()
+		t.Skipf("Skipping database test: failed to clean test data: %v", err)
+	}
 
 	store := NewPGXStore(pool)
 

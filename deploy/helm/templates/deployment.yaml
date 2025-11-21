@@ -1,3 +1,18 @@
+{{/*
+Validation: Ensure required configuration is provided
+*/}}
+{{- if not .Values.cnpg.host }}
+  {{- fail "cnpg.host is required. Please specify the PostgreSQL host (CNPG cluster service name or IP address)." }}
+{{- end }}
+{{- if not .Values.cnpg.userSecret }}
+  {{- fail "cnpg.userSecret is required. Please create a Kubernetes secret with database credentials and specify its name." }}
+{{- end }}
+{{- if not .Values.env.sessionID }}
+  {{- fail "sessionID is required. Please generate a unique stable UUID with 'uuidgen' or 'New-Guid'." }}
+{{- end }}
+{{- if eq .Values.env.sessionID "00000000-0000-0000-0000-000000000000" }}
+  {{- fail "sessionID cannot be the placeholder UUID '00000000-0000-0000-0000-000000000000'. Please generate a unique stable UUID with 'uuidgen' or 'New-Guid'." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

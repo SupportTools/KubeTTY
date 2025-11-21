@@ -1,39 +1,97 @@
+# KubeTTY Gateway Deployment Values
+# This file contains production configuration for KubeTTY gateway mode.
+# Gateway mode provides a multi-project tabbed interface with authentication.
+
+# Container image configuration
 image:
   repository: harbor.support.tools/kubetty/kubetty
   tag: v0.5.1
   pullPolicy: IfNotPresent
 
+# Image pull secrets for private registries
 imagePullSecrets:
   - harbor-supporttools
 
+# Kubernetes namespace for deployment
 namespace: kubetty-shared
+
+# Helm release name
 releaseName: kubetty-shared-gateway
 
+# Unique identifier for this deployment instance
+# Used for session persistence and logging
 deploymentId: kubetty-gateway
 
+# Environment variables for the KubeTTY container
 env:
+  # Session UUID for default session
+  # IMPORTANT: This is a stable UUID for this gateway instance
+  # Generate once during project creation and keep stable
+  # DO NOT change after initial deployment - breaks session continuity
   sessionID: "11111111-2222-3333-4444-555555555555"
+
+  # KubeTTY operating mode
+  # Gateway mode provides multi-project tabbed interface
   kubettyMode: "gateway"
+
+  # Claude Code maximum output tokens
   claudeMaxTokens: "64000"
-  anthropicBaseURL: "http://172.25.1.66:8080"
+
+  # Anthropic API base URL override
+  # IMPORTANT: Leave empty to use default Anthropic API (https://api.anthropic.com)
+  # Only set this if you're using a custom proxy or local API endpoint
+  # Production deployments should use empty string to connect to official API
+  anthropicBaseURL: ""
+
+  # Node.js runtime options
   nodeOptions: "--max-old-space-size=32768"
+
+  # Claude Code configuration directory
   claudeConfigDir: "/home/mmattox/.claude"
+
+  # Additional environment variables
   extra: {}
+
+# Authentication configuration
+# Gateway mode requires authentication
 auth:
+  # Authentication mode - "local" for username/password
   mode: local
+
+  # JWT secret (inline value - not recommended for production)
+  # Leave empty to use jwtSecretSecret instead (recommended)
   jwtSecret: ""
+
+  # JWT secret from Kubernetes secret (recommended)
   jwtSecretSecret:
-    name: kubetty-gateway-auth
-    key: jwt-secret
+    name: kubetty-gateway-auth  # Name of the secret
+    key: jwt-secret              # Key within the secret
+
+  # JWT token issuer claim
   issuer: kubetty
+
+  # Access token time-to-live
   accessTTL: 15m
+
+  # Refresh token time-to-live (30 days)
   refreshTTL: 720h
+
+  # Cookie domain for JWT tokens
+  # Set to your domain to allow subdomain access
   cookieDomain: kubetty.support.tools
+
+  # Use secure cookies (HTTPS only)
   cookieSecure: true
 
+# Gateway mode configuration
 gateway:
+  # Enable multi-project tabbed interface
   enabled: true
+
+  # Project catalog configuration
   catalog:
+    # Inline YAML content defining accessible projects
+    # Each project represents a downstream KubeTTY instance
     inline: |
       projects:
         - id: beacon
@@ -46,33 +104,70 @@ gateway:
           #   maxTabsPerClient: 1   # Recommended: single shell per user per project
           #   maxTabsTotal: 10      # Total concurrent shells for this project
         # Add other project pods here
+
+    # Mount path for the catalog file
     mountPath: /etc/kubetty
+
+    # Catalog filename
     fileName: projects.yaml
 
+# CloudNativePG (CNPG) database configuration
+# REQUIRED: Gateway mode requires PostgreSQL for session persistence
 cnpg:
-  host: 172.28.58.5
+  # PostgreSQL host (CNPG cluster service name recommended)
+  # Examples:
+  #   - Service name: "kubetty-postgres-rw.kubetty-shared.svc.cluster.local"
+  #   - Short name: "kubetty-postgres-rw" (if in same namespace)
+  #   - IP address: "172.28.58.5" (not recommended, use service name)
+  host: kubetty-postgres-rw.kubetty-shared.svc.cluster.local
+
+  # PostgreSQL port
   port: 5432
+
+  # Database name
   database: kubetty
+
+  # Kubernetes secret containing database credentials
+  # Create with:
+  #   kubectl create secret generic kubetty-postgres-user \
+  #     --from-literal=username=kubetty_user \
+  #     --from-literal=password=<secure-password>
   userSecret: kubetty-postgres-user
+
+  # Key name for username in the secret
   usernameKey: username
+
+  # Key name for password in the secret
   passwordKey: password
 
+# Kubernetes Service configuration
 service:
   type: ClusterIP
   port: 8080
 
+# Ingress configuration
+# Exposes gateway to external traffic
 ingress:
   enabled: true
   className: nginx
+
+  # TLS secret for HTTPS
   tlsSecret: star-support-tools-tls
+
+  # Ingress hosts
   hosts:
     - host: kubetty.support.tools
       path: /
+
+  # Ingress annotations for WebSocket support
   annotations:
     nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+
+# Pipeline configuration
 pipelines:
+  # Docker-in-Docker support (disabled for gateway)
   dind:
     enabled: false

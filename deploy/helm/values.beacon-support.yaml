@@ -1,38 +1,64 @@
+# KubeTTY Project: Beacon Support
+# Production configuration for beacon-support project pod
+
+# Container image configuration
 image:
   repository: harbor.support.tools/kubetty/kubetty
   tag: v0.5.1
 
+# Image pull secrets for private registries
 imagePullSecrets:
   - harbor-supporttools
 
+# Deployment configuration
 namespace: kubetty-beacon-support
 releaseName: kubetty-beacon-support
-
 deploymentId: beacon-support
 
+# Environment variables
 env:
+  # Stable session UUID for this project (DO NOT CHANGE)
   sessionID: "302ed84c-08b9-4445-ad92-c9899e7abea6"
+
+  # Operating mode: project (accessed via gateway)
   kubettyMode: "project"
+
+  # Claude Code configuration
   claudeMaxTokens: "64000"
-  anthropicBaseURL: "http://172.25.1.66:8080"
+
+  # Anthropic API base URL override
+  # Empty = use default Anthropic API (https://api.anthropic.com)
+  anthropicBaseURL: ""
+
+  # Node.js runtime options
   nodeOptions: "--max-old-space-size=32768"
+
+  # Claude Code configuration directory
   claudeConfigDir: "/home/mmattox/.claude"
+
+  # Additional environment variables
   extra: {}
+
+# Authentication (disabled - handled by gateway)
 auth:
   mode: disabled
 
+# CloudNativePG database configuration
 cnpg:
-  host: 172.28.58.5
+  # PostgreSQL host (CNPG cluster service name)
+  host: kubetty-postgres-rw.kubetty-shared.svc.cluster.local
   port: 5432
   database: kubetty
   userSecret: kubetty-shared-app
   usernameKey: username
   passwordKey: password
 
+# Kubernetes Service
 service:
   type: ClusterIP
   port: 8080
 
+# Persistent storage for project data
 dataPVC:
   enabled: true
   create: true
@@ -52,10 +78,14 @@ dataPVC:
     - path: /var/lib/docker
       subPath: var-lib-docker
 
+# ServiceAccount
 serviceAccount:
   create: true
   name: ""
 
+# RBAC configuration
+# Admin access: kubetty-beacon-support, beacon-dev, beacon-stg
+# Read access: beacon-prod
 rbac:
   create: true
   adminNamespaces:
@@ -65,6 +95,7 @@ rbac:
   readNamespaces:
     - beacon-prod
 
+# Ingress (direct access - not typical for project pods)
 ingress:
   enabled: true
   className: nginx

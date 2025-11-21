@@ -1,30 +1,52 @@
+# KubeTTY Project: Project B
+# Production configuration for project-b pod
+
+# Container image configuration
 image:
   repository: harbor.support.tools/kubetty/project-b
   tag: v0.1.0
 
+# Deployment configuration
 namespace: kubetty-project-b
 releaseName: kubetty-project-b
-
 deploymentId: project-b
 
+# Environment variables
 env:
+  # Stable session UUID for this project (DO NOT CHANGE)
   sessionID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+  # Operating mode: project (accessed via gateway)
   kubettyMode: "project"
+
+  # Claude Code configuration
   claudeMaxTokens: "64000"
-  anthropicBaseURL: "http://172.25.1.66:8080"
+
+  # Anthropic API base URL override
+  # Empty = use default Anthropic API (https://api.anthropic.com)
+  anthropicBaseURL: ""
+
+  # Node.js runtime options
   nodeOptions: "--max-old-space-size=32768"
+
+  # Claude Code configuration directory
   claudeConfigDir: "/home/mmattox/.claude"
+
+  # Additional environment variables
   extra:
     CLAUDE_EXTRA_FLAG: "1"
 
+# CloudNativePG database configuration
 cnpg:
-  host: 172.28.58.5
+  # PostgreSQL host (CNPG cluster service name)
+  host: kubetty-postgres-rw.kubetty-shared.svc.cluster.local
   port: 5432
   database: kubetty
   userSecret: kubetty-shared-app
   usernameKey: username
   passwordKey: password
 
+# Kubernetes Service
 service:
   type: ClusterIP
   port: 8080

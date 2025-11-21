@@ -1,77 +1,254 @@
+# KubeTTY Helm Chart Values
+# This file contains default configuration values for KubeTTY deployment.
+# Override these values using -f your-values.yaml during helm install/upgrade.
+
+# Container image configuration
 image:
   repository: harbor.support.tools/kubetty/kubetty
   tag: latest
   pullPolicy: IfNotPresent
 
+# Image pull secrets for private registries
+# Example: imagePullSecrets: ["harbor-credentials"]
 imagePullSecrets: []
 
+# Unique identifier for this deployment instance
+# Used for session persistence and logging
 deploymentId: kubetty-dev
 
+# Environment variables for the KubeTTY container
 env:
-  sessionID: "00000000-0000-0000-0000-000000000000"
+  # Session UUID for default session
+  # IMPORTANT: Generate once during project creation and keep stable
+  # This UUID persists sessions across pod restarts and upgrades
+  # DO NOT change after initial deployment - breaks session continuity
+  # DO NOT use placeholder UUIDs like "00000000-0000-0000-0000-000000000000"
+  #
+  # Generate a new UUID with: uuidgen (Linux/Mac) or New-Guid (PowerShell)
+  # Example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  #
+  # Leave empty to skip default session creation (gateway mode typically doesn't need this)
+  sessionID: ""
+
+  # KubeTTY operating mode
+  # - "gateway": Multi-project tabbed interface (requires gateway.enabled=true)
+  # - "project": Single project terminal (accessed via gateway)
+  kubettyMode: "gateway"
+
+  # User identity for this deployment
+  # Used for file ownership and session attribution
+  kubettyUser: "mmattox"
+
+  # Project identifier (typically matches deploymentId)
+  # Used when operating in project mode
+  kubettyProject: ""
+
+  # Claude Code maximum output tokens
+  # Higher values allow longer responses but increase API costs
   claudeMaxTokens: "64000"
-  anthropicBaseURL: "http://172.25.1.66:8080"
+
+  # Anthropic API base URL override
+  # IMPORTANT: Leave empty to use default Anthropic API (https://api.anthropic.com)
+  # Only set this if you're using a custom proxy or local API endpoint
+  # Example: "http://anthropic-proxy.internal:8080"
+  anthropicBaseURL: ""
+
+  # Node.js runtime options
+  # Increases heap size for Claude Code operations
   nodeOptions: "--max-old-space-size=32768"
+
+  # Claude Code configuration directory
+  # Contains settings, history, and cached data
   claudeConfigDir: "/home/mmattox/.claude"
+
+  # Additional environment variables (optional)
+  # Use this to pass custom env vars not covered above
+  # Example:
+  #   extra:
+  #     CUSTOM_VAR: "value"
+  #     DEBUG: "true"
   extra: {}
 
+# Authentication configuration
+auth:
+  # Authentication mode
+  # - "disabled": No authentication (not recommended for production)
+  # - "local": Username/password authentication with JWT tokens
+  mode: disabled
+
+  # JWT secret for signing tokens (inline value - not recommended for production)
+  # Leave empty to use jwtSecretSecret instead
+  jwtSecret: ""
+
+  # JWT secret from Kubernetes secret (recommended)
+  # Create secret with: kubectl create secret generic my-jwt-secret --from-literal=jwt-secret=<random-value>
+  jwtSecretSecret:
+    name: ""  # Name of the secret (e.g., "kubetty-jwt-secret")
+    key: jwt-secret  # Key within the secret containing the JWT secret
+
+  # JWT token issuer claim
+  issuer: kubetty
+
+  # Access token time-to-live
+  # Short-lived token for API requests (recommended: 15m-1h)
+  accessTTL: 15m
+
+  # Refresh token time-to-live
+  # Long-lived token for obtaining new access tokens (recommended: 7d-30d)
+  refreshTTL: 720h  # 30 days
+
+  # Cookie domain for JWT tokens
+  # Leave empty for current domain, or set to your domain (e.g., ".example.com")
+  cookieDomain: ""
+
+  # Use secure cookies (HTTPS only)
+  # Set to false only for local development without HTTPS
+  cookieSecure: true
+
+# Gateway mode configuration
+# Enables multi-project tabbed interface
 gateway:
   enabled: false
+
+  # Project catalog configuration
   catalog:
-    inline: "" # optional YAML content for projects.yaml
-    existingConfigMap: "" # alternative to inline; use existing ConfigMap name
+    # Inline YAML content for projects.yaml
+    # Define projects accessible through this gateway
+    # Example:
+    #   inline: |
+    #     projects:
+    #       - id: project-a
+    #         displayName: "Project A"
+    #         namespace: kubetty-project-a
+    #         service: kubetty-project-a-kubetty
+    #         port: 8080
+    #         limits:
+    #           maxTabsPerClient: 1
+    inline: ""
+
+    # Alternative: Use existing ConfigMap instead of inline
+    # The ConfigMap should contain the projects.yaml content
+    existingConfigMap: ""
+
+    # Mount path for the catalog file
     mountPath: /etc/kubetty
+
+    # Catalog filename
     fileName: projects.yaml
 
+# CloudNativePG (CNPG) database configuration
+# REQUIRED: KubeTTY requires PostgreSQL for session persistence
 cnpg:
-  host: 172.28.58.5
+  # PostgreSQL host (CNPG cluster service name or IP)
+  # Example: "kubetty-postgres-rw.kubetty-shared.svc.cluster.local"
+  host: ""
+
+  # PostgreSQL port
   port: 5432
+
+  # Database name
   database: kubetty
-  userSecret: kubetty-shared-app
+
+  # Kubernetes secret containing database credentials
+  # REQUIRED: This secret must exist before deployment
+  #
+  # Create CNPG secret with:
+  #   kubectl create secret generic kubetty-postgres-user \
+  #     --from-literal=username=kubetty_user \
+  #     --from-literal=password=<secure-password>
+  #
+  # The secret should contain:
+  #   - username: PostgreSQL username (key specified in usernameKey)
+  #   - password: PostgreSQL password (key specified in passwordKey)
+  userSecret: ""
+
+  # Key name for username in the secret
   usernameKey: username
+
+  # Key name for password in the secret
   passwordKey: password
 
 # API Secrets Configuration
+# Optional secrets for API integrations (GitHub, OpenAI, etc.)
 # These secrets should be created manually via kubectl before deploying
-# See SECRETS.md for detailed setup instructions
 apiSecrets:
   # Name of existing Kubernetes secret containing API keys
   # Leave empty to disable secret injection
+  # The secret will be mounted as environment variables
   existingSecret: ""
 
-  # Secret keys expected in the secret (for reference)
-  # The secret should contain these keys:
-  #   - github-token: GitHub personal access token
-  #   - openai-api-key: OpenAI API key
-  #   - google-cloud-project: Google Cloud project ID
-  #   - nexmonyx-access-key: Nexmonyx access key
-  #   - nexmonyx-access-secret: Nexmonyx access secret
-  #   - anthropic-base-url: (Optional) Anthropic API base URL override
+  # Secret keys expected in the secret (for reference):
+  # - github-token: GitHub personal access token
+  # - openai-api-key: OpenAI API key
+  # - google-cloud-project: Google Cloud project ID
+  # - nexmonyx-access-key: Nexmonyx access key
+  # - nexmonyx-access-secret: Nexmonyx access secret
+  # - anthropic-base-url: (Optional) Anthropic API base URL override
 
+# Kubernetes Service configuration
 service:
   type: ClusterIP
   port: 8080
 
+# Resource limits and requests
+# Example:
+#   resources:
+#     requests:
+#       memory: "2Gi"
+#       cpu: "1000m"
+#     limits:
+#       memory: "8Gi"
+#       cpu: "4000m"
 resources: {}
 
+# ServiceAccount configuration
 serviceAccount:
+  # Create a dedicated ServiceAccount for this deployment
   create: true
+
+  # ServiceAccount name (auto-generated if empty)
   name: ""
 
+# RBAC configuration for Kubernetes access
 rbac:
+  # Create RBAC resources (Role/RoleBinding or ClusterRole/ClusterRoleBinding)
   create: true
+
+  # Namespaces where this deployment has admin access
+  # Example: ["default", "my-app"]
   adminNamespaces: []
+
+  # Namespaces where this deployment has read-only access
+  # Example: ["monitoring", "logging"]
   readNamespaces: []
 
+# Persistent Volume Claim for data storage
 dataPVC:
+  # Enable persistent storage
+  # Recommended for project mode; optional for gateway mode
   enabled: false
+
+  # Create new PVC (true) or use existing (false)
   create: true
+
+  # Existing PVC name (required if create=false)
   existingClaim: ""
+
+  # PVC name (auto-generated if empty)
   name: ""
+
+  # Storage class for the PVC
   storageClass: longhorn
+
+  # Access modes
   accessModes:
     - ReadWriteOnce
+
+  # Storage size
   size: 50Gi
+
+  # Sub-paths to mount from the PVC
+  # Each path is mounted as a separate volume mount
   subPaths:
     - path: /opt
       subPath: opt
@@ -80,26 +257,38 @@ dataPVC:
     - path: /usr/local/go
       subPath: usr-local-go
 
+# Ingress configuration
 ingress:
   enabled: false
   className: nginx
-  tlsSecret: star-support-tools-tls
+  tlsSecret: ""  # Name of TLS secret for HTTPS
+
+  # Ingress hosts configuration
   hosts:
-    - host: example-kubetty.support.tools
+    - host: kubetty.example.com
       path: /
+
+  # Ingress annotations
+  # Recommended for WebSocket support:
   annotations:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+
+# Pod annotations
 podAnnotations: {}
 
+# Prometheus monitoring configuration
 prometheus:
+  # Pod annotation-based scraping (legacy)
   scrape:
     enabled: true
     path: /metrics
     port: 8080
     scheme: http
     annotations: {}
+
+  # PodMonitor for Prometheus Operator
   podMonitor:
     enabled: true
     portName: http
@@ -109,6 +298,8 @@ prometheus:
     scrapeTimeout: 10s
     labels: {}
     annotations: {}
+
+  # PrometheusRule for alerting
   rules:
     enabled: true
     ruleLabels: {}
@@ -119,6 +310,11 @@ prometheus:
     errorWindowMinutes: 30
     errorFor: 5m
     annotations: {}
+
+# Pipeline configuration
 pipelines:
+  # Docker-in-Docker support
   dind:
+    # Enable DinD sidecar for pipeline execution
+    # Requires privileged container
     enabled: true

@@ -2,12 +2,19 @@ package tabs
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
+
+// testUUID generates a deterministic UUID for testing based on an index.
+// Format: 00000000-0000-0000-0000-00000000000X where X is the index.
+func testUUID(index int) string {
+	return fmt.Sprintf("00000000-0000-0000-0000-%012d", index)
+}
 
 func setupTestStore(t *testing.T) (*PGXStore, func()) {
 	t.Helper()
@@ -50,7 +57,7 @@ func TestCountByClientAndProject_SingleTab(t *testing.T) {
 
 	// Create a tab for client-1 on project-a
 	tab := Tab{
-		TabID:     "tab-1",
+		TabID:     testUUID(1),
 		ProjectID: "project-a",
 		ClientID:  "client-1",
 		Status:    StatusConnecting,
@@ -75,7 +82,7 @@ func TestCountByClientAndProject_MultipleTabs_SameClient(t *testing.T) {
 	// Create 3 tabs for client-1 on project-a
 	for i := 1; i <= 3; i++ {
 		tab := Tab{
-			TabID:     "tab-" + string(rune(i)),
+			TabID:     testUUID(i),
 			ProjectID: "project-a",
 			ClientID:  "client-1",
 			Status:    StatusConnected,
@@ -100,10 +107,10 @@ func TestCountByClientAndProject_DifferentClients(t *testing.T) {
 
 	// Create tabs for different clients on same project
 	tabs := []Tab{
-		{TabID: "tab-1", ProjectID: "project-a", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{TabID: "tab-2", ProjectID: "project-a", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{TabID: "tab-3", ProjectID: "project-a", ClientID: "client-2", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{TabID: "tab-4", ProjectID: "project-a", ClientID: "client-3", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(1), ProjectID: "project-a", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(2), ProjectID: "project-a", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(3), ProjectID: "project-a", ClientID: "client-2", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(4), ProjectID: "project-a", ClientID: "client-3", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
 	}
 
 	for _, tab := range tabs {
@@ -135,10 +142,10 @@ func TestCountByClientAndProject_DifferentProjects(t *testing.T) {
 
 	// Create tabs for same client on different projects
 	tabs := []Tab{
-		{TabID: "tab-1", ProjectID: "project-a", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{TabID: "tab-2", ProjectID: "project-a", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{TabID: "tab-3", ProjectID: "project-b", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{TabID: "tab-4", ProjectID: "project-c", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(1), ProjectID: "project-a", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(2), ProjectID: "project-a", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(3), ProjectID: "project-b", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(4), ProjectID: "project-c", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
 	}
 
 	for _, tab := range tabs {
@@ -170,11 +177,11 @@ func TestCountByClientAndProject_MixedScenario(t *testing.T) {
 
 	// Create a complex scenario with multiple clients and projects
 	tabs := []Tab{
-		{TabID: "tab-1", ProjectID: "project-a", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{TabID: "tab-2", ProjectID: "project-a", ClientID: "client-2", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{TabID: "tab-3", ProjectID: "project-b", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{TabID: "tab-4", ProjectID: "project-b", ClientID: "client-2", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
-		{TabID: "tab-5", ProjectID: "project-a", ClientID: "client-1", Status: StatusClosed, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(1), ProjectID: "project-a", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(2), ProjectID: "project-a", ClientID: "client-2", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(3), ProjectID: "project-b", ClientID: "client-1", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(4), ProjectID: "project-b", ClientID: "client-2", Status: StatusConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{TabID: testUUID(5), ProjectID: "project-a", ClientID: "client-1", Status: StatusClosed, CreatedAt: time.Now(), UpdatedAt: time.Now()},
 	}
 
 	for _, tab := range tabs {
@@ -201,7 +208,7 @@ func TestCountByClientAndProject_AfterDelete(t *testing.T) {
 	// Create 3 tabs
 	for i := 1; i <= 3; i++ {
 		tab := Tab{
-			TabID:     "tab-" + string(rune(i)),
+			TabID:     testUUID(i),
 			ProjectID: "project-a",
 			ClientID:  "client-1",
 			Status:    StatusConnected,
@@ -218,7 +225,7 @@ func TestCountByClientAndProject_AfterDelete(t *testing.T) {
 	require.Equal(t, 3, count)
 
 	// Delete one tab
-	err = store.Delete(ctx, "tab-1")
+	err = store.Delete(ctx, testUUID(1))
 	require.NoError(t, err)
 
 	// Count should now be 2

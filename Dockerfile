@@ -87,6 +87,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nmap \
     nmon \
     openssl \
+    openssh-client \
+    openssh-server \
     pkg-config \
     postgresql-client \
     procps \
@@ -182,7 +184,7 @@ COPY --from=go-builder /workspace/kubetty-project /usr/local/bin/kubetty-project
 
 # Copy and install entrypoint script for mode selection.
 COPY scripts/entrypoint.sh /usr/local/bin/kubetty-entrypoint
-RUN chmod +x /usr/local/bin/kubetty-entrypoint
+RUN chmod 755 /usr/local/bin/kubetty-entrypoint
 
 # Default session storage/log directories.
 RUN mkdir -p /home/mmattox/claude_logs && chown -R mmattox:mmattox /home/mmattox

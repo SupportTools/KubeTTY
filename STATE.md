@@ -1,28 +1,29 @@
-# Current Debug State (2025-11-18)
+# Current Implementation State (2025-11-19)
+
+## Session Model
+- **Single session per pod**: One PTY is created on first WebSocket connection and reused for the pod lifetime.
+- **Single client enforcement**: Only one browser can connect at a time; additional connections are rejected.
+- **No multi-session features**: Fork/resume/continue commands were designed but never implemented; documentation has been updated to reflect actual behavior.
+- **Output buffering**: 64KB buffer replays initial output (MOTD) to new clients on connect.
 
 ## Repository context
-- Repo: `github.com/supporttools/KubeTTY`
-- Recent backend updates:
-  - Added baseline + attached_at migrations and removed runtime schema creation.
-  - PGX store now expects migrations; `DeleteSession` + `ClearAttachments` were added.
-  - HTTP server now listens via `httpSrv` and installs SIGINT/SIGTERM handlers that call `srv.shutdown()`; `shutdown()` iterates all `ptySessions`, kills the PTY, and deletes the row.
-  - On startup we call `store.ClearAttachments` for the deployment so restarts don’t leave `attached_to` set.
-- Frontend: refreshed `web/src/assets/logo.svg` (dark logo).
-- Helm: deployment strategy set to `Recreate`. Beacon Support values currently point at `harbor.support.tools/kubetty/beacon-support:v0.1.22` (release revision 42).
+- Backend now requires `AUTH_MODE=local` to enable the new JWT auth stack; migrations (`0004_auth_tables`) and `internal/auth/{store,manager}` implement users, refresh tokens, token issuance, and validation.
+- New CLI helper `server/cmd/kubetty-authuser` lets operators seed users, rotate passwords, and toggle activation without touching SQL. README documents the auth env vars, Helm `auth` block, and helper usage.
+- React UI probes `/api/auth/me`, shows a login form when needed, and sends `credentials: "include"` with every request; session log fetches also send cookies so auditing works once auth is turned on.
+- Helm charts expose the `auth` block, inject all `AUTH_*` env vars, and default to `AUTH_MODE=disabled` unless overridden by `values.gateway`/`values.beacon-support`.
 
-## Deployment state
-- Namespace: `kubetty-beacon-support`
-- Pod: `kubetty-beacon-support-kubetty-8c8d4fbd5-8nxsp` (running image `v0.1.22`).
-- CNPG cleanup performed: only session `302ed84c-08b9-4445-ad92-c9899e7abea6` remains; `attached_to` cleared manually.
+## Local deployment state
+- Built frontend (`npm --prefix web run build`) and Go server (`go test ./...`); generated assets live under `server/ui/dist`.
+- No running cluster state tracked locally; the current work is purely code/config updates for the auth flow.
 
-## Outstanding issue
-- UI still fails to connect to the default session; WebSocket attempts hit HTTP 409 (`session already attached`).
-- Manual Go websocket client inside the pod reproduces the 409 even immediately after restart.
-- Need to instrument `ensureSession`/`tryAttach` or inspect `s.ptySessions` map at runtime to see why the server thinks the session is still attached despite DB cleanup.
+## Outstanding issues / remediation
+1. **Migration rollout** – ensure the new `0004_auth_tables` migration is applied before enabling auth, and document how to seed the first user (`kubetty-authuser`).
+2. **Secret rotation** – `AUTH_JWT_SECRET` should live in a Kubernetes Secret (referenced via `auth.jwtSecretSecret`) and rotating it will log everyone out; note this in ops runbooks.
+3. **Login verification** – after restart confirm the SPA login form appears, successful login yields cookies, and `/session/logs` works under auth. Also test `curl -u` (Bearer header) flows once tokens are available.
+4. **Metrics & cleanup** – consider scheduling `auth.DeleteExpiredRefreshTokens` and exporting login metrics once more ideas land; currently only the infrastructure is in place.
 
 ## Next steps after restart
-1. Recreate any temporary tooling (e.g., `/tmp/wsclient`) if needed for diagnostics.
-2. Add logging or temporary endpoints to inspect `srv.ptySessions` to confirm whether the in-memory map retains stale entries.
-3. If necessary, add an admin endpoint or CLI flag to force clearing `ptySessions` and `attached_to` without manual SQL.
-4. Once root cause is known, rebuild image (bump tag) and redeploy via `helm upgrade --install kubetty-beacon-support …`.
-
+1. Recreate any temporary experiment branches/notes (e.g., `server/kubetty` binary) if needed.
+2. Seed initial user via `go run ./server/cmd/kubetty-authuser create ...` and store the hash per instructions.
+3. Validate Helm values (`values.yaml`, `values.gateway`, `values.beacon-support`) against secrets and adjust tokens before redeploying.
+4. Rebuild the Docker image once secrets/configs are stable, restart the pod, and manually verify the auth workflow end-to-end before handing back control.

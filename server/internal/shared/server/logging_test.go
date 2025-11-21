@@ -360,6 +360,209 @@ func TestLoggingMiddleware_DifferentStatusCodes(t *testing.T) {
 	}
 }
 
+// TestLoggingMiddleware_StatusCodeLogging verifies that HTTP status codes are captured and logged
+func TestLoggingMiddleware_StatusCodeLogging(t *testing.T) {
+	tests := []struct {
+		name              string
+		statusCode        int
+		writeHeaderCalled bool
+	}{
+		{
+			name:              "200 OK explicit",
+			statusCode:        http.StatusOK,
+			writeHeaderCalled: true,
+		},
+		{
+			name:              "201 Created",
+			statusCode:        http.StatusCreated,
+			writeHeaderCalled: true,
+		},
+		{
+			name:              "204 No Content",
+			statusCode:        http.StatusNoContent,
+			writeHeaderCalled: true,
+		},
+		{
+			name:              "400 Bad Request",
+			statusCode:        http.StatusBadRequest,
+			writeHeaderCalled: true,
+		},
+		{
+			name:              "401 Unauthorized",
+			statusCode:        http.StatusUnauthorized,
+			writeHeaderCalled: true,
+		},
+		{
+			name:              "403 Forbidden",
+			statusCode:        http.StatusForbidden,
+			writeHeaderCalled: true,
+		},
+		{
+			name:              "404 Not Found",
+			statusCode:        http.StatusNotFound,
+			writeHeaderCalled: true,
+		},
+		{
+			name:              "500 Internal Server Error",
+			statusCode:        http.StatusInternalServerError,
+			writeHeaderCalled: true,
+		},
+		{
+			name:              "200 OK default (no WriteHeader call)",
+			statusCode:        http.StatusOK,
+			writeHeaderCalled: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hook := test.NewGlobal()
+			defer hook.Reset()
+
+			originalLevel := log.GetLevel()
+			log.SetLevel(log.DebugLevel)
+			defer log.SetLevel(originalLevel)
+
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.writeHeaderCalled {
+					w.WriteHeader(tt.statusCode)
+				} else {
+					// Write body without calling WriteHeader - should default to 200
+					_, _ = w.Write([]byte("test body"))
+				}
+			})
+
+			wrappedHandler := LoggingMiddleware(handler)
+
+			req := httptest.NewRequest("GET", "/test", nil)
+			w := httptest.NewRecorder()
+
+			wrappedHandler.ServeHTTP(w, req)
+
+			// Find the info entry
+			var infoEntry *log.Entry
+			for i := range hook.Entries {
+				entry := &hook.Entries[i]
+				if entry.Level == log.InfoLevel && entry.Message == "Request completed" {
+					infoEntry = entry
+					break
+				}
+			}
+
+			if infoEntry == nil {
+				t.Fatal("expected info log entry not found")
+			}
+
+			// Verify status code is logged
+			status, ok := infoEntry.Data["status"]
+			if !ok {
+				t.Fatal("status field missing from log entry")
+			}
+
+			statusInt, ok := status.(int)
+			if !ok {
+				t.Fatalf("status field is not an int: %T", status)
+			}
+
+			if statusInt != tt.statusCode {
+				t.Errorf("logged status = %d, want %d", statusInt, tt.statusCode)
+			}
+
+			// Verify the actual HTTP response status code matches
+			if w.Code != tt.statusCode {
+				t.Errorf("response status = %d, want %d", w.Code, tt.statusCode)
+			}
+		})
+	}
+}
+
+// TestLoggingMiddleware_StatusCodeWithMultipleWrites verifies status code is captured correctly with multiple Write calls
+func TestLoggingMiddleware_StatusCodeWithMultipleWrites(t *testing.T) {
+	hook := test.NewGlobal()
+	defer hook.Reset()
+
+	originalLevel := log.GetLevel()
+	log.SetLevel(log.DebugLevel)
+	defer log.SetLevel(originalLevel)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("part 1"))
+		_, _ = w.Write([]byte("part 2"))
+		_, _ = w.Write([]byte("part 3"))
+	})
+
+	wrappedHandler := LoggingMiddleware(handler)
+
+	req := httptest.NewRequest("POST", "/test", nil)
+	w := httptest.NewRecorder()
+
+	wrappedHandler.ServeHTTP(w, req)
+
+	// Find the info entry
+	var infoEntry *log.Entry
+	for i := range hook.Entries {
+		entry := &hook.Entries[i]
+		if entry.Level == log.InfoLevel && entry.Message == "Request completed" {
+			infoEntry = entry
+			break
+		}
+	}
+
+	if infoEntry == nil {
+		t.Fatal("expected info log entry not found")
+	}
+
+	// Verify status code is 201 (not overwritten by subsequent writes)
+	status := infoEntry.Data["status"]
+	if status != http.StatusCreated {
+		t.Errorf("logged status = %v, want %d", status, http.StatusCreated)
+	}
+}
+
+// TestLoggingMiddleware_StatusCodeNotOverwritten verifies status code is only set once
+func TestLoggingMiddleware_StatusCodeNotOverwritten(t *testing.T) {
+	hook := test.NewGlobal()
+	defer hook.Reset()
+
+	originalLevel := log.GetLevel()
+	log.SetLevel(log.DebugLevel)
+	defer log.SetLevel(originalLevel)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// Attempt to write another status code (should be ignored)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	wrappedHandler := LoggingMiddleware(handler)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	w := httptest.NewRecorder()
+
+	wrappedHandler.ServeHTTP(w, req)
+
+	// Find the info entry
+	var infoEntry *log.Entry
+	for i := range hook.Entries {
+		entry := &hook.Entries[i]
+		if entry.Level == log.InfoLevel && entry.Message == "Request completed" {
+			infoEntry = entry
+			break
+		}
+	}
+
+	if infoEntry == nil {
+		t.Fatal("expected info log entry not found")
+	}
+
+	// Verify status code is the first one set (200, not 500)
+	status := infoEntry.Data["status"]
+	if status != http.StatusOK {
+		t.Errorf("logged status = %v, want %d (should not be overwritten)", status, http.StatusOK)
+	}
+}
+
 // TestLoggingMiddleware_DefaultPath tests logging with default path
 func TestLoggingMiddleware_DefaultPath(t *testing.T) {
 	hook := test.NewGlobal()

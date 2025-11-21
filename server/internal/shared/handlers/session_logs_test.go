@@ -15,7 +15,7 @@ import (
 
 // mockStore implements sessions.Store for testing
 type mockStore struct {
-	listLogsFunc func(ctx context.Context, sessionID string, limit int) ([]sessions.LogEntry, error)
+	listLogsFunc func(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error)
 }
 
 func (m *mockStore) GetSession(ctx context.Context, sessionID string) (*sessions.Session, error) {
@@ -46,11 +46,11 @@ func (m *mockStore) AppendLog(ctx context.Context, entry sessions.LogEntry) erro
 	return errors.New("not implemented")
 }
 
-func (m *mockStore) ListLogs(ctx context.Context, sessionID string, limit int) ([]sessions.LogEntry, error) {
+func (m *mockStore) ListLogs(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error) {
 	if m.listLogsFunc != nil {
-		return m.listLogsFunc(ctx, sessionID, limit)
+		return m.listLogsFunc(ctx, sessionID, limit, filter)
 	}
-	return nil, errors.New("not implemented")
+	return sessions.LogsResult{}, errors.New("not implemented")
 }
 
 func (m *mockStore) PruneLogs(ctx context.Context, cutoff time.Time) (int64, error) {
@@ -79,14 +79,17 @@ func TestNewSessionLogsHandler_Success(t *testing.T) {
 	}
 
 	store := &mockStore{
-		listLogsFunc: func(ctx context.Context, sessionID string, limit int) ([]sessions.LogEntry, error) {
+		listLogsFunc: func(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error) {
 			if sessionID != "test-session-123" {
 				t.Errorf("Expected sessionID 'test-session-123', got %q", sessionID)
 			}
 			if limit != 200 {
 				t.Errorf("Expected limit 200, got %d", limit)
 			}
-			return logs, nil
+			if filter != nil {
+				t.Errorf("Expected nil filter for basic query, got %+v", filter)
+			}
+			return sessions.LogsResult{Logs: logs, MatchCount: 2}, nil
 		},
 	}
 
@@ -113,6 +116,11 @@ func TestNewSessionLogsHandler_Success(t *testing.T) {
 
 	if response["sessionId"] != "test-session-123" {
 		t.Errorf("Expected sessionId 'test-session-123', got %v", response["sessionId"])
+	}
+
+	// Verify matchCount is returned
+	if response["matchCount"] != float64(2) {
+		t.Errorf("Expected matchCount 2, got %v", response["matchCount"])
 	}
 
 	// Verify observer was called
@@ -196,9 +204,9 @@ func TestNewSessionLogsHandler_CustomLimit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			actualLimit := 0
 			store := &mockStore{
-				listLogsFunc: func(ctx context.Context, sessionID string, limit int) ([]sessions.LogEntry, error) {
+				listLogsFunc: func(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error) {
 					actualLimit = limit
-					return []sessions.LogEntry{}, nil
+					return sessions.LogsResult{Logs: []sessions.LogEntry{}, MatchCount: 0}, nil
 				},
 			}
 
@@ -223,8 +231,8 @@ func TestNewSessionLogsHandler_CustomLimit(t *testing.T) {
 
 func TestNewSessionLogsHandler_StoreError(t *testing.T) {
 	store := &mockStore{
-		listLogsFunc: func(ctx context.Context, sessionID string, limit int) ([]sessions.LogEntry, error) {
-			return nil, errors.New("database connection failed")
+		listLogsFunc: func(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error) {
+			return sessions.LogsResult{}, errors.New("database connection failed")
 		},
 	}
 
@@ -271,8 +279,8 @@ func TestNewSessionLogsHandler_StoreError(t *testing.T) {
 
 func TestNewSessionLogsHandler_NilLogs(t *testing.T) {
 	store := &mockStore{
-		listLogsFunc: func(ctx context.Context, sessionID string, limit int) ([]sessions.LogEntry, error) {
-			return nil, nil // Explicitly return nil to test handling
+		listLogsFunc: func(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error) {
+			return sessions.LogsResult{Logs: nil, MatchCount: 0}, nil // Explicitly return nil logs to test handling
 		},
 	}
 
@@ -304,8 +312,8 @@ func TestNewSessionLogsHandler_NilLogs(t *testing.T) {
 
 func TestNewSessionLogsHandler_NilObserver(t *testing.T) {
 	store := &mockStore{
-		listLogsFunc: func(ctx context.Context, sessionID string, limit int) ([]sessions.LogEntry, error) {
-			return []sessions.LogEntry{}, nil
+		listLogsFunc: func(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error) {
+			return sessions.LogsResult{Logs: []sessions.LogEntry{}, MatchCount: 0}, nil
 		},
 	}
 
@@ -338,9 +346,9 @@ func TestNewSessionLogsHandler_LargeLimitBoundary(t *testing.T) {
 		t.Run(fmt.Sprintf("limit=%s", tt.limitParam), func(t *testing.T) {
 			actualLimit := 0
 			store := &mockStore{
-				listLogsFunc: func(ctx context.Context, sessionID string, limit int) ([]sessions.LogEntry, error) {
+				listLogsFunc: func(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error) {
 					actualLimit = limit
-					return []sessions.LogEntry{}, nil
+					return sessions.LogsResult{Logs: []sessions.LogEntry{}, MatchCount: 0}, nil
 				},
 			}
 
@@ -355,5 +363,144 @@ func TestNewSessionLogsHandler_LargeLimitBoundary(t *testing.T) {
 				t.Errorf("Expected limit %d, got %d", tt.expectedLimit, actualLimit)
 			}
 		})
+	}
+}
+
+func TestNewSessionLogsHandler_SearchFilter(t *testing.T) {
+	store := &mockStore{
+		listLogsFunc: func(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error) {
+			if filter == nil {
+				t.Error("Expected filter to be set")
+				return sessions.LogsResult{}, nil
+			}
+			if filter.Search != "test-search" {
+				t.Errorf("Expected search 'test-search', got %q", filter.Search)
+			}
+			return sessions.LogsResult{Logs: []sessions.LogEntry{}, MatchCount: 5}, nil
+		},
+	}
+
+	handler := NewSessionLogsHandler(store, nil)
+
+	req := httptest.NewRequest("GET", "/api/session-logs?session=test&search=test-search", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response["matchCount"] != float64(5) {
+		t.Errorf("Expected matchCount 5, got %v", response["matchCount"])
+	}
+}
+
+func TestNewSessionLogsHandler_DirectionFilter(t *testing.T) {
+	tests := []struct {
+		name              string
+		direction         string
+		expectedDirection string
+		expectedStatus    int
+	}{
+		{"filter by in", "in", "in", http.StatusOK},
+		{"filter by out", "out", "out", http.StatusOK},
+		{"invalid direction", "invalid", "", http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &mockStore{
+				listLogsFunc: func(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error) {
+					if tt.expectedDirection != "" && filter != nil && filter.Direction != tt.expectedDirection {
+						t.Errorf("Expected direction %q, got %q", tt.expectedDirection, filter.Direction)
+					}
+					return sessions.LogsResult{Logs: []sessions.LogEntry{}, MatchCount: 0}, nil
+				},
+			}
+
+			handler := NewSessionLogsHandler(store, nil)
+
+			req := httptest.NewRequest("GET", fmt.Sprintf("/api/session-logs?session=test&direction=%s", tt.direction), nil)
+			w := httptest.NewRecorder()
+
+			handler.ServeHTTP(w, req)
+
+			if w.Code != tt.expectedStatus {
+				t.Errorf("Expected status %d, got %d", tt.expectedStatus, w.Code)
+			}
+		})
+	}
+}
+
+func TestNewSessionLogsHandler_CombinedFilters(t *testing.T) {
+	store := &mockStore{
+		listLogsFunc: func(ctx context.Context, sessionID string, limit int, filter *sessions.LogFilter) (sessions.LogsResult, error) {
+			if filter == nil {
+				t.Error("Expected filter to be set")
+				return sessions.LogsResult{}, nil
+			}
+			if filter.Search != "hello" {
+				t.Errorf("Expected search 'hello', got %q", filter.Search)
+			}
+			if filter.Direction != "out" {
+				t.Errorf("Expected direction 'out', got %q", filter.Direction)
+			}
+			return sessions.LogsResult{Logs: []sessions.LogEntry{}, MatchCount: 10}, nil
+		},
+	}
+
+	handler := NewSessionLogsHandler(store, nil)
+
+	req := httptest.NewRequest("GET", "/api/session-logs?session=test&search=hello&direction=out&limit=100", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
+func TestNewSessionLogsHandler_SessionIDTooLong(t *testing.T) {
+	store := &mockStore{}
+	handler := NewSessionLogsHandler(store, nil)
+
+	// Create session ID longer than 64 chars
+	longSessionID := ""
+	for i := 0; i < 100; i++ {
+		longSessionID += "a"
+	}
+	req := httptest.NewRequest("GET", "/api/session-logs?session="+longSessionID, nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+func TestNewSessionLogsHandler_SearchTermTooLong(t *testing.T) {
+	store := &mockStore{}
+	handler := NewSessionLogsHandler(store, nil)
+
+	// Create search term longer than 500 chars
+	longSearch := ""
+	for i := 0; i < 600; i++ {
+		longSearch += "x"
+	}
+	req := httptest.NewRequest("GET", "/api/session-logs?session=test&search="+longSearch, nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
 	}
 }

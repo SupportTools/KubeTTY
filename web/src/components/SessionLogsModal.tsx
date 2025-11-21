@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SessionLogEntry, SessionLogsResponse, SessionMeta } from "../types";
 import { parseErrorResponse } from "../utils/errorParser";
 
@@ -8,12 +8,38 @@ type Props = {
 };
 
 const decoder = new TextDecoder();
+const DEBOUNCE_MS = 300;
 
 const SessionLogsModal = ({ session, onClose }: Props) => {
   const [logs, setLogs] = useState<SessionLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [limit, setLimit] = useState(200);
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [direction, setDirection] = useState<"" | "in" | "out">("");
+  const [matchCount, setMatchCount] = useState(0);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounce search input
+  const handleSearchChange = useCallback((value: string) => {
+    setSearch(value);
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    debounceRef.current = setTimeout(() => {
+      setDebouncedSearch(value);
+    }, DEBOUNCE_MS);
+  }, []);
+
+  // Cleanup debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const sessionId = session?.sessionId;
@@ -25,7 +51,17 @@ const SessionLogsModal = ({ session, onClose }: Props) => {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/session/logs?session=${sessionId}&limit=${limit}`, {
+        const params = new URLSearchParams({
+          session: sessionId,
+          limit: String(limit),
+        });
+        if (debouncedSearch) {
+          params.set("search", debouncedSearch);
+        }
+        if (direction) {
+          params.set("direction", direction);
+        }
+        const res = await fetch(`/session/logs?${params.toString()}`, {
           credentials: "include"
         });
         if (!res.ok) {
@@ -35,6 +71,7 @@ const SessionLogsModal = ({ session, onClose }: Props) => {
         const body = (await res.json()) as SessionLogsResponse;
         if (!cancelled) {
           setLogs(body.logs);
+          setMatchCount(body.matchCount);
         }
       } catch (err) {
         if (!cancelled) {
@@ -50,7 +87,7 @@ const SessionLogsModal = ({ session, onClose }: Props) => {
     return () => {
       cancelled = true;
     };
-  }, [session?.sessionId, limit]);
+  }, [session?.sessionId, limit, debouncedSearch, direction]);
 
   const decodedLogs = useMemo(
     () =>
@@ -60,6 +97,22 @@ const SessionLogsModal = ({ session, onClose }: Props) => {
       })),
     [logs],
   );
+
+  // Highlight matching text in log entry
+  const highlightText = useCallback((text: string) => {
+    if (!debouncedSearch) {
+      return text;
+    }
+    const regex = new RegExp(`(${escapeRegExp(debouncedSearch)})`, "gi");
+    const parts = text.split(regex);
+    return parts.map((part, i) =>
+      regex.test(part) ? (
+        <mark key={i} className="search-highlight">{part}</mark>
+      ) : (
+        part
+      )
+    );
+  }, [debouncedSearch]);
 
   if (!session) {
     return null;
@@ -83,9 +136,17 @@ const SessionLogsModal = ({ session, onClose }: Props) => {
     URL.revokeObjectURL(link.href);
   };
 
+  const handleClearSearch = () => {
+    setSearch("");
+    setDebouncedSearch("");
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+  };
+
   return (
     <div className="modal-backdrop">
-      <div className="modal">
+      <div className="modal session-logs-modal">
         <header className="modal-header">
           <div>
             <p className="eyebrow">Session Transcript</p>
@@ -96,15 +157,47 @@ const SessionLogsModal = ({ session, onClose }: Props) => {
           </button>
         </header>
         <div className="modal-toolbar">
+          <div className="search-container">
+            <input
+              type="text"
+              placeholder="Search logs..."
+              value={search}
+              onChange={(e) => handleSearchChange(e.target.value)}
+              className="search-input"
+              aria-label="Search session logs"
+            />
+            {search && (
+              <button
+                className="search-clear"
+                onClick={handleClearSearch}
+                aria-label="Clear search"
+              >
+                ×
+              </button>
+            )}
+            {debouncedSearch && (
+              <span className="match-count" title="Total matching entries">
+                {matchCount} {matchCount === 1 ? "match" : "matches"}
+              </span>
+            )}
+          </div>
+          <select
+            value={direction}
+            onChange={(e) => setDirection(e.target.value as "" | "in" | "out")}
+            aria-label="Filter by direction"
+          >
+            <option value="">All</option>
+            <option value="in">Client Input</option>
+            <option value="out">Session Output</option>
+          </select>
           <label>
-            Show last
+            Show
             <select value={limit} onChange={(event) => setLimit(Number(event.target.value))}>
               <option value={50}>50</option>
               <option value={200}>200</option>
               <option value={500}>500</option>
               <option value={1000}>1000</option>
             </select>
-            events
           </label>
           <div className="spacer" />
           <button className="secondary" onClick={handleDownload} disabled={!decodedLogs.length}>
@@ -116,11 +209,11 @@ const SessionLogsModal = ({ session, onClose }: Props) => {
           {error && <p className="error">{error}</p>}
           {!loading && !error && (
             <pre className="log-stream">
-              {decodedLogs.length === 0 && "No log entries recorded yet."}
+              {decodedLogs.length === 0 && (debouncedSearch ? "No matching log entries found." : "No log entries recorded yet.")}
               {decodedLogs.map((entry, index) => (
                 <span key={`${entry.createdAt}-${entry.direction}-${index}`}>
                   <strong>[{new Date(entry.createdAt).toLocaleTimeString()}]</strong>{" "}
-                  <em>{entry.direction === "in" ? "client" : "session"}:</em> {entry.text}
+                  <em>{entry.direction === "in" ? "client" : "session"}:</em> {highlightText(entry.text)}
                   {"\n"}
                 </span>
               ))}
@@ -143,6 +236,11 @@ const decodePayload = (payload: string) => {
   } catch {
     return "[binary]";
   }
+};
+
+// Escape special regex characters in search string
+const escapeRegExp = (str: string) => {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 };
 
 export default SessionLogsModal;

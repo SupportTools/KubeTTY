@@ -1,6 +1,15 @@
 # Build artifacts
 bin/
 server/ui/dist/
+server/kubetty
+server/kubetty-gateway
+server/kubetty-project
+server/kubetty-legacy
+server/gateway
+server/project
+server/server
+server/kubetty-authuser
+*.test
 
 # Node modules
 web/node_modules/
@@ -15,3 +24,12 @@ web/dist/
 .bash_profile.secrets
 *.secrets.yaml
 values.*.secrets.yaml
+
+.playwright-mcp/
+
+# Coverage files
+server/coverage*.out
+web/coverage/
+
+# TaskForge data
+kubetty-project/

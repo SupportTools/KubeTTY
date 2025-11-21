@@ -18,12 +18,13 @@ type MeResponse struct {
 // Authentication: Required (via access token)
 //
 // Response (200 OK):
-//   {
-//     "user": {
-//       "id": string,      // User UUID
-//       "username": string // Username
-//     }
-//   }
+//
+//	{
+//	  "user": {
+//	    "id": string,      // User UUID
+//	    "username": string // Username
+//	  }
+//	}
 //
 // Response (401 Unauthorized):
 //   - "unauthorized" - No authenticated user found in request context

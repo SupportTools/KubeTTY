@@ -1,3 +1,18 @@
+// Package health provides a flexible health check system for KubeTTY server components.
+//
+// This package implements an extensible health check framework that validates database
+// connectivity and allows custom health checkers to be plugged in. It powers the /api/healthz
+// endpoint used by Kubernetes liveness and readiness probes.
+//
+// Key features:
+//   - Database connectivity verification via Ping()
+//   - Pluggable custom health checkers via Checker interface
+//   - JSON health status responses with component-level details
+//   - 5-second timeout for health check operations
+//   - HTTP 503 Service Unavailable on failure, 200 OK on success
+//
+// The health check handler is designed to work with CloudNativePG database pools,
+// Kubernetes pod lifecycle management, and custom application-level health validation.
 package health
 
 import (

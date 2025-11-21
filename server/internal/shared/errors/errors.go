@@ -1,3 +1,31 @@
+// Package errors provides standardized HTTP API error responses for KubeTTY.
+//
+// This package implements the error handling patterns defined in docs/development/error-handling-guide.md,
+// ensuring consistent JSON error responses across all KubeTTY API endpoints. All error responses follow
+// a uniform structure with status code, machine-readable error code, human-readable message, and optional details.
+//
+// Error response format:
+//
+//	{
+//	  "status": 404,
+//	  "error": "not_found",
+//	  "message": "session not found",
+//	  "details": "optional context"
+//	}
+//
+// Available error constructors:
+//   - BadRequest (400): Invalid input, malformed JSON, validation failures
+//   - Unauthorized (401): Missing or invalid authentication tokens
+//   - Forbidden (403): Valid auth but insufficient permissions
+//   - NotFound (404): Requested resource does not exist
+//   - Conflict (409): Resource state conflicts (duplicates, locks)
+//   - ValidationError (422): Semantically incorrect data
+//   - RateLimitExceeded (429): Client exceeded rate limits
+//   - InternalServerError (500): Unexpected server errors (never expose internals)
+//   - ServiceUnavailable (503): Database or dependency unavailable
+//
+// All error responses should be written using WriteError() to ensure consistent
+// JSON formatting and proper Content-Type headers.
 package errors
 
 import "net/http"
@@ -5,9 +33,9 @@ import "net/http"
 // ErrorResponse represents a standardized API error response.
 // It follows the format specified in docs/development/error-handling-guide.md.
 type ErrorResponse struct {
-	Status  int    `json:"status"`           // HTTP status code
-	Error   string `json:"error"`            // Machine-readable error code
-	Message string `json:"message"`          // Human-readable description
+	Status  int    `json:"status"`            // HTTP status code
+	Error   string `json:"error"`             // Machine-readable error code
+	Message string `json:"message"`           // Human-readable description
 	Details string `json:"details,omitempty"` // Optional additional context
 }
 

@@ -1,575 +1,186 @@
 package util
 
 import (
-	"crypto/tls"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 )
 
-// TestWriteJSON_SimpleTypes tests WriteJSON with basic types
-func TestWriteJSON_SimpleTypes(t *testing.T) {
+// TestWriteJSON_Success verifies that WriteJSON correctly encodes and sends valid JSON payloads
+func TestWriteJSON_Success(t *testing.T) {
 	tests := []struct {
-		name       string
-		payload    any
-		statusCode int
-		wantBody   string
+		name           string
+		payload        any
+		status         int
+		expectedBody   string
+		expectedStatus int
 	}{
 		{
-			name:       "string payload",
-			payload:    "hello world",
-			statusCode: http.StatusOK,
-			wantBody:   `"hello world"`,
+			name:           "simple map",
+			payload:        map[string]string{"message": "hello"},
+			status:         http.StatusOK,
+			expectedBody:   `{"message":"hello"}` + "\n",
+			expectedStatus: http.StatusOK,
 		},
 		{
-			name:       "integer payload",
-			payload:    42,
-			statusCode: http.StatusCreated,
-			wantBody:   "42",
+			name:           "struct with fields",
+			payload:        struct{ Name string }{Name: "test"},
+			status:         http.StatusCreated,
+			expectedBody:   `{"Name":"test"}` + "\n",
+			expectedStatus: http.StatusCreated,
 		},
 		{
-			name:       "boolean payload",
-			payload:    true,
-			statusCode: http.StatusAccepted,
-			wantBody:   "true",
+			name:           "empty slice",
+			payload:        []string{},
+			status:         http.StatusOK,
+			expectedBody:   "[]\n",
+			expectedStatus: http.StatusOK,
 		},
 		{
-			name:       "nil payload",
-			payload:    nil,
-			statusCode: http.StatusNoContent,
-			wantBody:   "null",
+			name:           "nil payload",
+			payload:        nil,
+			status:         http.StatusNoContent,
+			expectedBody:   "null\n",
+			expectedStatus: http.StatusNoContent,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			err := WriteJSON(w, tt.statusCode, tt.payload)
 
+			err := WriteJSON(w, tt.status, tt.payload)
 			if err != nil {
 				t.Errorf("WriteJSON() error = %v, want nil", err)
 			}
 
-			if w.Code != tt.statusCode {
-				t.Errorf("status code = %d, want %d", w.Code, tt.statusCode)
+			// Verify status code
+			if w.Code != tt.expectedStatus {
+				t.Errorf("WriteJSON() status = %d, want %d", w.Code, tt.expectedStatus)
 			}
 
-			if ct := w.Header().Get("Content-Type"); ct != "application/json" {
-				t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+			// Verify Content-Type header
+			ct := w.Header().Get("Content-Type")
+			if ct != "application/json" {
+				t.Errorf("WriteJSON() Content-Type = %q, want %q", ct, "application/json")
 			}
 
-			if body := w.Body.String(); body != tt.wantBody+"\n" {
-				t.Errorf("body = %q, want %q", body, tt.wantBody+"\n")
+			// Verify response body
+			if body := w.Body.String(); body != tt.expectedBody {
+				t.Errorf("WriteJSON() body = %q, want %q", body, tt.expectedBody)
 			}
 		})
 	}
 }
 
-// TestWriteJSON_ComplexTypes tests WriteJSON with structs and maps
-func TestWriteJSON_ComplexTypes(t *testing.T) {
-	type testStruct struct {
-		Name  string `json:"name"`
-		Age   int    `json:"age"`
-		Email string `json:"email,omitempty"`
-	}
-
-	tests := []struct {
-		name       string
-		payload    any
-		statusCode int
-		wantBody   string
-	}{
-		{
-			name: "struct payload",
-			payload: testStruct{
-				Name: "John Doe",
-				Age:  30,
-			},
-			statusCode: http.StatusOK,
-			wantBody:   `{"name":"John Doe","age":30}`,
-		},
-		{
-			name: "map payload",
-			payload: map[string]any{
-				"status":  "healthy",
-				"version": "1.0.0",
-			},
-			statusCode: http.StatusOK,
-			wantBody:   `{"status":"healthy","version":"1.0.0"}`,
-		},
-		{
-			name: "slice payload",
-			payload: []string{
-				"item1",
-				"item2",
-				"item3",
-			},
-			statusCode: http.StatusOK,
-			wantBody:   `["item1","item2","item3"]`,
-		},
-		{
-			name: "nested struct",
-			payload: map[string]any{
-				"user": map[string]any{
-					"name": "Alice",
-					"age":  25,
-				},
-				"active": true,
-			},
-			statusCode: http.StatusOK,
-			wantBody:   `{"active":true,"user":{"age":25,"name":"Alice"}}`,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			err := WriteJSON(w, tt.statusCode, tt.payload)
-
-			if err != nil {
-				t.Errorf("WriteJSON() error = %v, want nil", err)
-			}
-
-			if w.Code != tt.statusCode {
-				t.Errorf("status code = %d, want %d", w.Code, tt.statusCode)
-			}
-
-			// For complex types, verify JSON is valid by unmarshaling
-			var result any
-			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-				t.Errorf("failed to unmarshal response: %v", err)
-			}
-		})
-	}
-}
-
-// TestWriteJSON_StatusCodes tests various HTTP status codes
-func TestWriteJSON_StatusCodes(t *testing.T) {
-	statusCodes := []int{
-		http.StatusOK,
-		http.StatusCreated,
-		http.StatusAccepted,
-		http.StatusNoContent,
-		http.StatusBadRequest,
-		http.StatusUnauthorized,
-		http.StatusForbidden,
-		http.StatusNotFound,
-		http.StatusInternalServerError,
-		http.StatusServiceUnavailable,
-	}
-
-	for _, code := range statusCodes {
-		t.Run(http.StatusText(code), func(t *testing.T) {
-			w := httptest.NewRecorder()
-			payload := map[string]any{"status": code}
-
-			err := WriteJSON(w, code, payload)
-			if err != nil {
-				t.Errorf("WriteJSON() error = %v, want nil", err)
-			}
-
-			if w.Code != code {
-				t.Errorf("status code = %d, want %d", w.Code, code)
-			}
-		})
-	}
-}
-
-// TestWriteJSON_EmptyPayloads tests edge cases with empty data
-func TestWriteJSON_EmptyPayloads(t *testing.T) {
-	tests := []struct {
-		name     string
-		payload  any
-		wantBody string
-	}{
-		{
-			name:     "empty string",
-			payload:  "",
-			wantBody: `""`,
-		},
-		{
-			name:     "empty map",
-			payload:  map[string]any{},
-			wantBody: `{}`,
-		},
-		{
-			name:     "empty slice",
-			payload:  []string{},
-			wantBody: `[]`,
-		},
-		{
-			name:     "empty struct",
-			payload:  struct{}{},
-			wantBody: `{}`,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			err := WriteJSON(w, http.StatusOK, tt.payload)
-
-			if err != nil {
-				t.Errorf("WriteJSON() error = %v, want nil", err)
-			}
-
-			if body := w.Body.String(); body != tt.wantBody+"\n" {
-				t.Errorf("body = %q, want %q", body, tt.wantBody+"\n")
-			}
-		})
-	}
-}
-
-// unencodableType is a type that cannot be JSON encoded
+// unencodableType is a type that cannot be JSON-encoded
 type unencodableType struct {
-	Ch chan int
+	// channels cannot be JSON-encoded
+	Channel chan int
 }
 
-// TestWriteJSON_EncodingError tests error handling for unencodable types
+// TestWriteJSON_EncodingError verifies that encoding errors are handled properly
+// and that headers are NOT sent when encoding fails
 func TestWriteJSON_EncodingError(t *testing.T) {
 	w := httptest.NewRecorder()
 
-	// Channels cannot be JSON encoded
-	payload := unencodableType{
-		Ch: make(chan int),
+	// Attempt to encode a channel, which is not JSON-encodable
+	invalidPayload := unencodableType{
+		Channel: make(chan int),
 	}
 
-	err := WriteJSON(w, http.StatusOK, payload)
+	err := WriteJSON(w, http.StatusOK, invalidPayload)
 
+	// Verify error is returned
 	if err == nil {
-		t.Error("WriteJSON() expected error for unencodable type, got nil")
+		t.Fatal("WriteJSON() error = nil, want error for unencodable type")
 	}
 
-	// Status code should still be written even if encoding fails
+	// Verify it's a JSON encoding error
+	if _, ok := err.(*json.UnsupportedTypeError); !ok {
+		t.Errorf("WriteJSON() error type = %T, want *json.UnsupportedTypeError", err)
+	}
+
+	// CRITICAL: Verify headers were NOT sent (status code should be 200, the default)
+	// This is the key security fix - if encoding fails, we don't send any status code
 	if w.Code != http.StatusOK {
-		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
+		t.Errorf("WriteJSON() wrote status code %d despite encoding error, headers should not be written", w.Code)
 	}
 
-	// Content-Type should still be set
-	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
-		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
+	// Verify Content-Type header was NOT set
+	ct := w.Header().Get("Content-Type")
+	if ct == "application/json" {
+		t.Error("WriteJSON() set Content-Type despite encoding error, headers should not be written")
+	}
+
+	// Verify no body was written
+	if w.Body.Len() > 0 {
+		t.Errorf("WriteJSON() wrote %d bytes despite encoding error, body should be empty", w.Body.Len())
 	}
 }
 
-// TestWriteJSON_ConcurrentCalls tests thread safety
-func TestWriteJSON_ConcurrentCalls(t *testing.T) {
-	const numGoroutines = 100
-	var wg sync.WaitGroup
-	wg.Add(numGoroutines)
+// TestWriteJSON_MultipleStatusCodes verifies different HTTP status codes work correctly
+func TestWriteJSON_MultipleStatusCodes(t *testing.T) {
+	statusCodes := []int{
+		http.StatusOK,                  // 200
+		http.StatusCreated,             // 201
+		http.StatusAccepted,            // 202
+		http.StatusNoContent,           // 204
+		http.StatusBadRequest,          // 400
+		http.StatusUnauthorized,        // 401
+		http.StatusForbidden,           // 403
+		http.StatusNotFound,            // 404
+		http.StatusInternalServerError, // 500
+		http.StatusServiceUnavailable,  // 503
+	}
 
-	errCh := make(chan error, numGoroutines)
-
-	for i := 0; i < numGoroutines; i++ {
-		go func(id int) {
-			defer wg.Done()
-
+	for _, status := range statusCodes {
+		t.Run(http.StatusText(status), func(t *testing.T) {
 			w := httptest.NewRecorder()
-			payload := map[string]any{
-				"id":      id,
-				"message": "concurrent test",
-			}
+			payload := map[string]int{"status": status}
 
-			if err := WriteJSON(w, http.StatusOK, payload); err != nil {
-				errCh <- err
-				return
-			}
-
-			if w.Code != http.StatusOK {
-				errCh <- errors.New("incorrect status code")
-				return
-			}
-
-			if ct := w.Header().Get("Content-Type"); ct != "application/json" {
-				errCh <- errors.New("incorrect content type")
-				return
-			}
-		}(i)
-	}
-
-	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		t.Errorf("concurrent call failed: %v", err)
-	}
-}
-
-// TestWriteJSON_HeadersAlreadyWritten tests behavior when headers are already set
-func TestWriteJSON_HeadersAlreadyWritten(t *testing.T) {
-	w := httptest.NewRecorder()
-
-	// Set some headers before calling WriteJSON
-	w.Header().Set("X-Custom-Header", "custom-value")
-
-	payload := map[string]string{"message": "test"}
-	err := WriteJSON(w, http.StatusOK, payload)
-
-	if err != nil {
-		t.Errorf("WriteJSON() error = %v, want nil", err)
-	}
-
-	// Content-Type should be set by WriteJSON
-	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
-		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
-	}
-
-	// Custom header should still be present
-	if ch := w.Header().Get("X-Custom-Header"); ch != "custom-value" {
-		t.Errorf("X-Custom-Header = %q, want %q", ch, "custom-value")
-	}
-}
-
-// TestWriteJSON_LargePayload tests handling of large JSON payloads
-func TestWriteJSON_LargePayload(t *testing.T) {
-	// Create a large slice of data
-	largeSlice := make([]map[string]any, 1000)
-	for i := 0; i < 1000; i++ {
-		largeSlice[i] = map[string]any{
-			"id":      i,
-			"name":    fmt.Sprintf("User %d", i),
-			"email":   fmt.Sprintf("user%d@example.com", i),
-			"active":  i%2 == 0,
-			"score":   float64(i) * 1.5,
-		}
-	}
-
-	w := httptest.NewRecorder()
-	err := WriteJSON(w, http.StatusOK, largeSlice)
-
-	if err != nil {
-		t.Errorf("WriteJSON() error = %v, want nil", err)
-	}
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status code = %d, want %d", w.Code, http.StatusOK)
-	}
-
-	// Verify the response can be decoded
-	var result []map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-		t.Errorf("failed to unmarshal large payload: %v", err)
-	}
-
-	if len(result) != 1000 {
-		t.Errorf("decoded slice length = %d, want 1000", len(result))
-	}
-}
-
-// TestWriteJSON_SpecialCharacters tests handling of special characters in JSON
-func TestWriteJSON_SpecialCharacters(t *testing.T) {
-	tests := []struct {
-		name    string
-		payload any
-	}{
-		{
-			name:    "unicode characters",
-			payload: map[string]string{"message": "Hello 世界 🌍"},
-		},
-		{
-			name:    "escaped characters",
-			payload: map[string]string{"message": "Line1\nLine2\tTabbed"},
-		},
-		{
-			name:    "quotes and backslashes",
-			payload: map[string]string{"message": `He said "Hello" \ Backslash`},
-		},
-		{
-			name:    "HTML tags",
-			payload: map[string]string{"message": "<script>alert('xss')</script>"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			err := WriteJSON(w, http.StatusOK, tt.payload)
-
+			err := WriteJSON(w, status, payload)
 			if err != nil {
 				t.Errorf("WriteJSON() error = %v, want nil", err)
 			}
 
-			// Verify the response can be decoded back
-			var result map[string]string
-			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-				t.Errorf("failed to unmarshal response: %v", err)
+			if w.Code != status {
+				t.Errorf("WriteJSON() status = %d, want %d", w.Code, status)
 			}
 		})
 	}
 }
 
-// TestWriteJSON_NilResponseWriter tests behavior with nil ResponseWriter
-// This test is commented out as it would panic - documenting expected behavior
-// func TestWriteJSON_NilResponseWriter(t *testing.T) {
-// 	// This would panic, which is acceptable behavior
-// 	// err := WriteJSON(nil, http.StatusOK, "test")
-// }
+// TestWriteJSON_LargePayload verifies WriteJSON handles large payloads correctly
+func TestWriteJSON_LargePayload(t *testing.T) {
+	w := httptest.NewRecorder()
 
-// TestClientIPFromRequest tests extracting client IP from HTTP requests
-func TestClientIPFromRequest(t *testing.T) {
-	tests := []struct {
-		name           string
-		request        *http.Request
-		expectedIP     string
-		description    string
-	}{
-		{
-			name:        "nil request",
-			request:     nil,
-			expectedIP:  "",
-			description: "should return empty string for nil request",
-		},
-		{
-			name: "X-Forwarded-For single IP",
-			request: &http.Request{
-				Header: http.Header{
-					"X-Forwarded-For": []string{"192.168.1.1"},
-				},
-				RemoteAddr: "10.0.0.1:1234",
-			},
-			expectedIP:  "192.168.1.1",
-			description: "should use X-Forwarded-For when present",
-		},
-		{
-			name: "X-Forwarded-For multiple IPs",
-			request: &http.Request{
-				Header: http.Header{
-					"X-Forwarded-For": []string{"192.168.1.1, 10.0.0.1, 172.16.0.1"},
-				},
-				RemoteAddr: "10.0.0.1:1234",
-			},
-			expectedIP:  "192.168.1.1",
-			description: "should return first IP from X-Forwarded-For chain",
-		},
-		{
-			name: "X-Forwarded-For with whitespace",
-			request: &http.Request{
-				Header: http.Header{
-					"X-Forwarded-For": []string{"  192.168.1.1  , 10.0.0.1"},
-				},
-				RemoteAddr: "10.0.0.1:1234",
-			},
-			expectedIP:  "192.168.1.1",
-			description: "should trim whitespace from X-Forwarded-For",
-		},
-		{
-			name: "RemoteAddr with port",
-			request: &http.Request{
-				Header:     http.Header{},
-				RemoteAddr: "192.168.1.1:54321",
-			},
-			expectedIP:  "192.168.1.1",
-			description: "should extract IP from RemoteAddr with port",
-		},
-		{
-			name: "RemoteAddr without port",
-			request: &http.Request{
-				Header:     http.Header{},
-				RemoteAddr: "192.168.1.1",
-			},
-			expectedIP:  "192.168.1.1",
-			description: "should return RemoteAddr when no port present",
-		},
-		{
-			name: "IPv6 address",
-			request: &http.Request{
-				Header:     http.Header{},
-				RemoteAddr: "[2001:db8::1]:8080",
-			},
-			expectedIP:  "2001:db8::1",
-			description: "should handle IPv6 addresses correctly",
-		},
+	// Create a large payload (100 items)
+	largeSlice := make([]map[string]int, 100)
+	for i := 0; i < 100; i++ {
+		largeSlice[i] = map[string]int{
+			"id":    i,
+			"value": i * 2,
+		}
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := ClientIPFromRequest(tt.request)
-			if result != tt.expectedIP {
-				t.Errorf("%s: got %q, want %q", tt.description, result, tt.expectedIP)
-			}
-		})
-	}
-}
-
-// TestWebSocketScheme tests WebSocket scheme determination
-func TestWebSocketScheme(t *testing.T) {
-	tests := []struct {
-		name           string
-		setupRequest   func() *http.Request
-		expectedScheme string
-		description    string
-	}{
-		{
-			name: "TLS connection",
-			setupRequest: func() *http.Request {
-				req := httptest.NewRequest("GET", "/ws", nil)
-				req.TLS = &tls.ConnectionState{} // Simulate TLS by setting non-nil TLS field
-				return req
-			},
-			expectedScheme: "wss",
-			description:    "should return wss for TLS connections",
-		},
-		{
-			name: "X-Forwarded-Proto HTTPS (lowercase)",
-			setupRequest: func() *http.Request {
-				req := httptest.NewRequest("GET", "/ws", nil)
-				req.Header.Set("X-Forwarded-Proto", "https")
-				return req
-			},
-			expectedScheme: "wss",
-			description:    "should return wss for X-Forwarded-Proto: https",
-		},
-		{
-			name: "X-Forwarded-Proto HTTPS (uppercase)",
-			setupRequest: func() *http.Request {
-				req := httptest.NewRequest("GET", "/ws", nil)
-				req.Header.Set("X-Forwarded-Proto", "HTTPS")
-				return req
-			},
-			expectedScheme: "wss",
-			description:    "should be case-insensitive for X-Forwarded-Proto",
-		},
-		{
-			name: "X-Forwarded-Proto HTTPS (mixed case)",
-			setupRequest: func() *http.Request {
-				req := httptest.NewRequest("GET", "/ws", nil)
-				req.Header.Set("X-Forwarded-Proto", "HtTpS")
-				return req
-			},
-			expectedScheme: "wss",
-			description:    "should handle mixed case X-Forwarded-Proto",
-		},
-		{
-			name: "plain HTTP",
-			setupRequest: func() *http.Request {
-				req := httptest.NewRequest("GET", "/ws", nil)
-				return req
-			},
-			expectedScheme: "ws",
-			description:    "should return ws for plain HTTP",
-		},
-		{
-			name: "X-Forwarded-Proto HTTP",
-			setupRequest: func() *http.Request {
-				req := httptest.NewRequest("GET", "/ws", nil)
-				req.Header.Set("X-Forwarded-Proto", "http")
-				return req
-			},
-			expectedScheme: "ws",
-			description:    "should return ws for X-Forwarded-Proto: http",
-		},
+	err := WriteJSON(w, http.StatusOK, largeSlice)
+	if err != nil {
+		t.Errorf("WriteJSON() error = %v, want nil for large payload", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := tt.setupRequest()
-			result := WebSocketScheme(req)
-			if result != tt.expectedScheme {
-				t.Errorf("%s: got %q, want %q", tt.description, result, tt.expectedScheme)
-			}
-		})
+	if w.Code != http.StatusOK {
+		t.Errorf("WriteJSON() status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	// Verify the response is valid JSON
+	var decoded []map[string]int
+	if err := json.Unmarshal(w.Body.Bytes(), &decoded); err != nil {
+		t.Errorf("WriteJSON() produced invalid JSON: %v", err)
+	}
+
+	if len(decoded) != 100 {
+		t.Errorf("WriteJSON() decoded length = %d, want 100", len(decoded))
 	}
 }

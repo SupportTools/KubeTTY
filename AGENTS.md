@@ -1,13 +1,14 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`server/` holds the Go PTY backend (`main.go`, `go.mod`) that serves `/` and `/ws`. `web/` contains the React UI with `public/` for the HTML shell and `src/` for terminal components; keep UI tests next to their components and Go tests beside the packages they target. Kubernetes manifests or scripts should live under a dedicated `deploy/` directory once introduced.
+`server/` holds the Go backend with two binaries under `cmd/`: `gateway/main.go` (multi-project tabbed UI) and `project/main.go` (single PTY mode). Shared code lives in `internal/` including handlers, sessions, and shared utilities. `web/` contains the React UI with `public/` for the HTML shell and `src/` for terminal components; keep UI tests next to their components and Go tests beside the packages they target. Kubernetes manifests live under `deploy/helm/` which supports both modes via `KUBETTY_MODE` environment variable.
 
 ## Build, Test, and Development Commands
-- `go run ./server` – starts the backend on `:8080` and serves the latest `web/build`.
+- `go build ./server/cmd/gateway && go build ./server/cmd/project` – builds both binaries.
+- `make build-server-local` – builds both binaries using the Makefile.
 - `npm --prefix web install` – installs React dependencies; rerun on any `package*.json` change.
 - `npm --prefix web run build` – compiles the UI bundle consumed by the Go server.
-- `go test ./...` – runs all backend unit tests; append `-run Handler` to zero in on a suite.
+- `go test ./server/...` – runs all backend unit tests; append `-run Handler` to zero in on a suite.
 - `npm --prefix web test -- --watch=false` – executes the React test suite once in CI.
 
 ## Coding Style & Naming Conventions

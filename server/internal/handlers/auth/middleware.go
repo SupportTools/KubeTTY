@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
-	"github.com/supporttools/KubeTTY/server/internal/config"
 )
 
 // RequireAuth returns a middleware that enforces authentication.
@@ -14,7 +13,7 @@ import (
 //
 // If authentication fails, it responds with an appropriate error and
 // does not call the next handler.
-func RequireAuth(cfg config.Config, authMgr *auth.Manager) func(http.Handler) http.Handler {
+func RequireAuth(cfg AuthConfig, authMgr *auth.Manager) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if next == nil || !AuthEnabled(cfg, authMgr) {
 			return next

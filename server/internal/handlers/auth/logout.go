@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
-	"github.com/supporttools/KubeTTY/server/internal/config"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 )
 
@@ -45,7 +44,7 @@ type LogoutRequest struct {
 // If authentication is disabled, the handler returns 204 immediately.
 // If the refresh token is not found or cannot be parsed, the handler
 // logs a warning but still clears cookies and returns success.
-func NewAuthLogoutHandler(cfg config.Config, authMgr *auth.Manager, authStore auth.Store) http.HandlerFunc {
+func NewAuthLogoutHandler(cfg AuthConfig, authMgr *auth.Manager, authStore auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !AuthEnabled(cfg, authMgr) {
 			w.WriteHeader(http.StatusNoContent)

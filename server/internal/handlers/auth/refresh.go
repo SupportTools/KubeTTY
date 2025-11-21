@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
-	"github.com/supporttools/KubeTTY/server/internal/config"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
@@ -71,7 +70,7 @@ type RefreshResponse struct {
 //
 // The handler validates the refresh token, issues a new token pair,
 // and sets updated HTTP-only cookies.
-func NewAuthRefreshHandler(cfg config.Config, authMgr *auth.Manager) http.HandlerFunc {
+func NewAuthRefreshHandler(cfg AuthConfig, authMgr *auth.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !AuthEnabled(cfg, authMgr) {
 			_ = apierrors.WriteError(w, apierrors.ServiceUnavailable("authentication disabled", ""))

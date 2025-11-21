@@ -290,9 +290,9 @@ func TestPGXStore_DeleteSession(t *testing.T) {
 		require.NoError(t, err)
 
 		// Logs should be gone too
-		logs, err := store.ListLogs(ctx, sessionID, 100)
+		result, err := store.ListLogs(ctx, sessionID, 100, nil)
 		require.NoError(t, err)
-		require.Empty(t, logs)
+		require.Empty(t, result.Logs)
 	})
 }
 
@@ -400,11 +400,11 @@ func TestPGXStore_AppendLog(t *testing.T) {
 		require.NoError(t, err)
 
 		// Retrieve logs
-		logs, err := store.ListLogs(ctx, sessionID, 10)
+		result, err := store.ListLogs(ctx, sessionID, 10, nil)
 		require.NoError(t, err)
-		require.Len(t, logs, 1)
-		require.Equal(t, "in", logs[0].Direction)
-		require.Equal(t, []byte("ls -la"), logs[0].Data)
+		require.Len(t, result.Logs, 1)
+		require.Equal(t, "in", result.Logs[0].Direction)
+		require.Equal(t, []byte("ls -la"), result.Logs[0].Data)
 	})
 
 	t.Run("append multiple logs", func(t *testing.T) {
@@ -420,9 +420,9 @@ func TestPGXStore_AppendLog(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		logs, err := store.ListLogs(ctx, sessionID, 100)
+		result, err := store.ListLogs(ctx, sessionID, 100, nil)
 		require.NoError(t, err)
-		require.Len(t, logs, 5)
+		require.Len(t, result.Logs, 5)
 	})
 }
 
@@ -457,17 +457,17 @@ func TestPGXStore_ListLogs(t *testing.T) {
 		}
 
 		// List with limit of 5
-		logs, err := store.ListLogs(ctx, sessionID, 5)
+		result, err := store.ListLogs(ctx, sessionID, 5, nil)
 		require.NoError(t, err)
-		require.Len(t, logs, 5)
+		require.Len(t, result.Logs, 5)
 	})
 
 	t.Run("list empty", func(t *testing.T) {
 		cleanupLogs(t, ctx, store)
 
-		logs, err := store.ListLogs(ctx, sessionID, 10)
+		result, err := store.ListLogs(ctx, sessionID, 10, nil)
 		require.NoError(t, err)
-		require.Empty(t, logs)
+		require.Empty(t, result.Logs)
 	})
 }
 
@@ -518,10 +518,10 @@ func TestPGXStore_PruneLogs(t *testing.T) {
 		require.Equal(t, int64(1), count)
 
 		// Recent log should remain
-		logs, err := store.ListLogs(ctx, sessionID, 10)
+		result, err := store.ListLogs(ctx, sessionID, 10, nil)
 		require.NoError(t, err)
-		require.Len(t, logs, 1)
-		require.Equal(t, []byte("recent"), logs[0].Data)
+		require.Len(t, result.Logs, 1)
+		require.Equal(t, []byte("recent"), result.Logs[0].Data)
 	})
 }
 
@@ -563,9 +563,9 @@ func TestPGXStore_TrimLogs(t *testing.T) {
 		require.Equal(t, int64(5), count)
 
 		// Verify only 5 logs remain
-		logs, err := store.ListLogs(ctx, sessionID, 100)
+		result, err := store.ListLogs(ctx, sessionID, 100, nil)
 		require.NoError(t, err)
-		require.Len(t, logs, 5)
+		require.Len(t, result.Logs, 5)
 	})
 
 	t.Run("trim with zero max entries", func(t *testing.T) {

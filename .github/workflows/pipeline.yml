@@ -204,6 +204,7 @@ jobs:
     needs: build
     if: github.event_name != 'pull_request'
     permissions:
+      actions: read
       contents: read
       security-events: write
     steps:

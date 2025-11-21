@@ -154,22 +154,30 @@ Store
 ```
 KubeTTY/
 ├── server/              # Go backend
-│   ├── main.go
-│   ├── go.mod
-│   └── internal/
-│       └── sessions/    # CNPG session management
+│   ├── cmd/             # Binary entry points
+│   │   ├── gateway/main.go      # Gateway mode (multi-project tabs)
+│   │   ├── project/main.go      # Project mode (single PTY)
+│   │   └── kubetty-authuser/    # User management CLI
+│   ├── internal/
+│   │   ├── handlers/            # HTTP handlers (auth, session)
+│   │   ├── gateway/             # Gateway logic
+│   │   ├── sessions/            # CNPG session management
+│   │   └── shared/              # Shared utilities
+│   ├── migrations/              # Database migrations
+│   └── go.mod
 ├── web/                 # React frontend
 │   ├── src/
 │   ├── public/
 │   └── package.json
 ├── deploy/
-│   └── helm/           # Helm chart
+│   └── helm/           # Helm chart (supports both modes via KUBETTY_MODE)
 │       ├── Chart.yaml
 │       ├── values.yaml
+│       ├── values.gateway.yaml  # Gateway mode config
 │       └── templates/
 ├── scripts/            # Helper scripts
 │   └── claude_with_log.sh
-├── Dockerfile          # Multi-stage build
+├── Dockerfile          # Multi-stage build (builds both binaries)
 └── .bash_profile       # Shell configuration (no secrets)
 ```
 
@@ -241,13 +249,29 @@ KubeTTY is configured via environment variables injected by Helm:
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` - Token limit for Claude Code
 - `CLAUDE_CONFIG_DIR` - Claude configuration directory
 
-**Authentication (optional):**
-- `AUTH_MODE` - Set to `local` to enable built-in login (default: `disabled`).
-- `AUTH_JWT_SECRET` - Base64 (recommended) or raw secret used to sign JWTs. Generate via `openssl rand -base64 48`.
+**Authentication (required configuration):**
+- `AUTH_MODE` - **Required.** Set to `local` to enable built-in login, or `disabled` to run without authentication. Empty values are rejected to prevent accidental insecure deployments.
+- `AUTH_JWT_SECRET` - Base64 (recommended) or raw secret used to sign JWTs. Generate via `openssl rand -base64 48`. Required when `AUTH_MODE=local`.
 - `AUTH_ACCESS_TTL` / `AUTH_REFRESH_TTL` - Token lifetimes (e.g., `15m`, `720h`).
 - `AUTH_ISSUER` - JWT issuer claim (default: `kubetty`).
 - `AUTH_COOKIE_DOMAIN` - Optional domain for auth cookies.
 - `AUTH_COOKIE_SECURE` - `true` by default; set to `false` only for HTTP/dev environments.
+
+> **Security Warning: AUTH_MODE=disabled**
+>
+> When `AUTH_MODE=disabled`, all API routes are unprotected and accessible without authentication:
+> - All WebSocket endpoints (`/ws`) are open
+> - All tab/project management APIs (`/api/tabs`, `/api/projects`) are accessible
+> - Session logs (`/session/logs`) can be read by anyone
+>
+> The gateway will log a security warning at startup and add an `X-Auth-Warning` header to all responses when authentication is disabled.
+>
+> **Only use `AUTH_MODE=disabled` when:**
+> - Running behind a VPN or private network with strict access controls
+> - Using Kubernetes NetworkPolicies to restrict access
+> - For local development/testing purposes
+>
+> **For production deployments, always use `AUTH_MODE=local` with a strong `AUTH_JWT_SECRET`.**
 
 These knobs are exposed through the Helm chart under the `auth` section (`deploy/helm/values.yaml`). You can point `AUTH_JWT_SECRET` at a Kubernetes Secret via `auth.jwtSecretSecret` to avoid storing raw secrets in values files.
 

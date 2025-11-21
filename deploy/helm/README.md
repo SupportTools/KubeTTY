@@ -144,18 +144,16 @@ helm upgrade --install kubetty-my-project ./deploy/helm \
   -f deploy/helm/values.my-project.yaml
 ```
 
-5. Add the project to the gateway catalog (in `values.gateway.yaml`):
-```yaml
-gateway:
-  catalog:
-    inline: |
-      projects:
-        - id: my-project
-          displayName: "My Project"
-          namespace: kubetty-my-project
-          service: kubetty-my-project-kubetty
-          port: 8080
+5. Add the project to the gateway catalog using `--set` parameters or update the gateway deployment:
+```bash
+# Update the gateway deployment with a new project in the catalog
+helm upgrade kubetty-gateway ./deploy/helm \
+  -n kubetty-shared \
+  --reuse-values \
+  --set-string 'gateway.catalog.inline=projects:\n  - id: my-project\n    displayName: "My Project"\n    namespace: kubetty-my-project\n    service: kubetty-my-project-kubetty\n    port: 8080'
 ```
+
+Or configure the catalog inline in your gateway deployment values.
 
 ### Project Mode Configuration
 

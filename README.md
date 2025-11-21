@@ -172,8 +172,8 @@ KubeTTY/
 ├── deploy/
 │   └── helm/           # Helm chart (supports both modes via KUBETTY_MODE)
 │       ├── Chart.yaml
-│       ├── values.yaml
-│       ├── values.gateway.yaml  # Gateway mode config
+│       ├── values.yaml                    # Base defaults
+│       ├── values.project-template.yaml   # Template for new projects
 │       └── templates/
 ├── scripts/            # Helper scripts
 │   └── claude_with_log.sh

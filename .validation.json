@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "KubeTTY validation configuration for local and CI/CD pipelines",
+  "version": "1.0.0",
+
+  "versions": {
+    "go": {
+      "required": "1.23",
+      "description": "Go version must be 1.23.x"
+    },
+    "node": {
+      "required": "20",
+      "description": "Node.js version must be 20.x LTS"
+    },
+    "helm": {
+      "required": "3.15",
+      "description": "Helm version must be 3.15.x or higher"
+    }
+  },
+
+  "coverage": {
+    "threshold": 60,
+    "description": "Minimum test coverage percentage required"
+  },
+
+  "components": {
+    "server": {
+      "path": "server",
+      "language": "go",
+      "testCommand": "go test -v -race -coverprofile=coverage.out -covermode=atomic ./...",
+      "buildCommand": "go build -o kubetty .",
+      "lintCommands": [
+        "gofmt -l .",
+        "go vet ./..."
+      ],
+      "testTimeout": 300,
+      "buildTimeout": 120
+    },
+    "web": {
+      "path": "web",
+      "language": "typescript",
+      "testCommand": "npm run test",
+      "buildCommand": "npm run build",
+      "lintCommands": [
+        "npm audit --audit-level=high"
+      ],
+      "testTimeout": 180,
+      "buildTimeout": 120
+    },
+    "helm": {
+      "path": "deploy/helm",
+      "language": "yaml",
+      "lintCommands": [
+        "helm lint .",
+        "helm lint . -f values.project-template.yaml"
+      ],
+      "templateCommands": [
+        "helm template kubetty .",
+        "helm template kubetty-project . -f values.project-template.yaml"
+      ]
+    }
+  },
+
+  "forbiddenFiles": {
+    "description": "Files matching these patterns should never be committed",
+    "patterns": [
+      "\\.key$",
+      "\\.pem$",
+      "\\.p12$",
+      "\\.pfx$",
+      "\\.p8$",
+      "\\.jks$",
+      "\\.keystore$",
+      "\\.secrets\\.yaml$",
+      "\\.secrets\\.yml$",
+      "^\\.env$",
+      "\\.env\\.local$",
+      "\\.env\\.production$",
+      "\\.env\\.staging$",
+      "\\.env\\.development$",
+      "credentials\\.json$",
+      "service-account\\.json$",
+      "kubeconfig$",
+      "\\.kube/config$",
+      "id_rsa$",
+      "id_ed25519$",
+      "id_ecdsa$",
+      "id_dsa$",
+      "\\.ssh/.*_key$",
+      "\\.aws/credentials$",
+      "\\.gcp/credentials\\.json$"
+    ]
+  },
+
+  "validationModes": {
+    "quick": {
+      "description": "Fast validation for feature branches",
+      "checks": ["go-version", "node-version", "gofmt", "go-vet", "go-mod-tidy", "forbidden-files"]
+    },
+    "standard": {
+      "description": "Standard validation including tests",
+      "checks": ["go-version", "node-version", "gofmt", "go-vet", "go-mod-tidy", "forbidden-files", "server-tests", "web-tests", "coverage", "helm-lint"]
+    },
+    "full": {
+      "description": "Full validation including Docker build and security scan",
+      "checks": ["go-version", "node-version", "gofmt", "go-vet", "go-mod-tidy", "forbidden-files", "server-tests", "web-tests", "coverage", "helm-lint", "docker-build", "trivy-scan"]
+    }
+  },
+
+  "docker": {
+    "registry": "harbor.support.tools",
+    "imageName": "kubetty/kubetty",
+    "platforms": ["linux/amd64"],
+    "buildArgs": {
+      "GO_VERSION": "1.23.3",
+      "NODE_MAJOR": "20"
+    }
+  },
+
+  "security": {
+    "trivySeverity": "CRITICAL,HIGH",
+    "trivyBlockingSeverity": "CRITICAL",
+    "npmAuditLevel": "high"
+  }
+}

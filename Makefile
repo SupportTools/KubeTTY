@@ -234,9 +234,12 @@ helm-lint:
 ## helm-lint-all: Lint Helm chart with all value files (mirrors CI)
 helm-lint-all:
 	@echo -e "$(BLUE)==> Linting Helm chart with all value files$(NC)"
-	helm lint $(HELM_CHART)
-	helm lint $(HELM_CHART) -f $(HELM_CHART)/values.gateway.yaml
-	helm lint $(HELM_CHART) -f $(HELM_CHART)/values.project-template.yaml
+	helm lint $(HELM_CHART) \
+		--set cnpg.host=test-db.svc.cluster.local \
+		--set cnpg.userSecret=test-secret \
+		--set env.sessionID=00000000-0000-0000-0000-000000000001
+	helm lint $(HELM_CHART) -f $(HELM_CHART)/values.project-template.yaml \
+		--set env.sessionID=00000000-0000-0000-0000-000000000001
 	@echo -e "$(GREEN)==> Helm lint (all configs) passed$(NC)"
 
 ## helm-package: Package Helm chart

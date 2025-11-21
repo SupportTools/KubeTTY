@@ -29,15 +29,15 @@ KubeTTY is deliberately minimalist: a Go backend + a React UI, plus a persistent
    * Tab completion
    * Vim / nano / top
    * Tmux inside the shell
-3. One client per session (single-user internal tool).
-4. Ability to disconnect and reconnect without killing the underlying shell, backed by a long-lived PTY whose metadata lives in CNPG (tmux remains optional for later).
-5. Backend assigns a stable session UUID per deployment (via `--session-id`), persists PTY metadata in CNPG, and supports Claude-style commands (`--continue`, `--resume <id>`, `--fork-session`).
+3. Single client per session enforced (second connection rejected until first disconnects).
+4. Ability to disconnect and reconnect without killing the underlying shell, backed by a long-lived PTY whose metadata lives in CNPG.
+5. Backend assigns a stable session UUID per deployment (via `SESSION_ID` env var) and persists PTY metadata in CNPG. One session per pod is reused for the lifetime of the pod.
 6. Backend serves the React frontend statically.
 7. Access only via:
 
    * Kubernetes port-forward **OR**
    * Internal cluster network (no public exposure).
-8. No user accounts, no auth (security relies on network isolation).
+8. Built-in local-user authentication protects every HTTP/WebSocket endpoint via CNPG-backed credentials and short-lived JWTs; no external IdP dependency.
 9. Session logging helper (`claude_with_log`) records interactive Claude CLI sessions to disk for later review.
 
 ### 2.2 Non-Functional Requirements
@@ -86,30 +86,39 @@ CNPG Session Store   /bin/bash (interactive)
 
   * Shell → WS (stdout)
   * WS → Shell (stdin)
-* Handles resizing (optional future enhancement)
-* Persists session metadata (session UUID, shell PID, resume token, timestamps, log pointers) in CNPG.
-* Enforces single-client-per-session by rejecting a second attachment unless `--fork-session` is provided.
+* Handles terminal resizing via JSON control messages.
+* Persists session metadata (session UUID, shell PID, timestamps, log pointers) in CNPG.
+* Enforces single-client-per-session by rejecting additional connections until the first client disconnects.
 
 #### 2. **React Frontend**
 
 * Displays terminal output using **xterm.js** from the start for full PTY fidelity (colors, cursor control, alternate screen).
 * Captures user keystrokes and sends them to backend.
-* Shows connection status.
+* Shows connection status with automatic reconnection on disconnect.
 * Auto-scrolls output.
-* Implements Claude-style resume flow: on load it calls `/session` to fetch the deployment’s default UUID, supports explicit resume/fork requests, and passes the chosen ID as a query param when opening `/ws`.
+* Connects directly to `/ws` endpoint; the backend manages the single PTY per pod.
+* Gated by an auth-aware bootstrap: call `/api/auth/me`, show login form (username/password) until authenticated, then render the existing terminal UI; include logout action and automatic refresh-token handling when fetches receive 401.
 
 #### 3. **CNPG Session Store**
 
 * Shared CNPG cluster stores a `sessions` table keyed by `session_uuid`.
-* Tracks PTY metadata, resume/fork lineage, and rolling log offsets.
+* Tracks PTY metadata (session UUID, deployment ID, timestamps) and session logs.
 * Credentials are injected via Kubernetes Secrets/env vars managed by the Helm chart.
-* Retains historical sessions to support `--resume <id>` selection UI.
+* One session per deployment is upserted and reused for the pod lifetime.
 
 #### 4. **Pod Deployment**
 
 * Part of the dev container image.
 * Runs on internal port, e.g., `:8080`.
 * Includes CLI tooling (kubectl, helm, docker, go, node/npm, git, jq, yq, curl/httpie, ripgrep, tmux, make, psql, Claude/Codex/Gemini CLIs, etc.) plus `/etc/profile.d/claude.sh` installing the `claude_with_log` helper.
+
+#### 5. **Authentication Layer**
+
+* Stores local-user credentials in CNPG (new `kubetty_users` + `kubetty_refresh_tokens` tables).
+* Hashes passwords with bcrypt (cost 12) and rotates refresh tokens on each login/refresh.
+* Issues short-lived access JWTs (HMAC-SHA256) plus long-lived refresh tokens (Secure, HttpOnly cookies).
+* Adds `/api/auth` endpoints (login, refresh, logout, whoami) and middleware that protects all other routes (HTTP + WS/SSE) by validating JWTs.
+* Ships CLI tooling (`kubetty-authuser`) so operators can create/update users without manual SQL.
 
 ---
 
@@ -119,10 +128,14 @@ CNPG Session Store   /bin/bash (interactive)
 
 #### 4.1.1 Endpoints
 
-| Endpoint | Method        | Purpose                      |
-| -------- | ------------- | ---------------------------- |
-| `/`      | GET           | Serves React static files    |
-| `/ws`    | GET (upgrade) | Main WebSocket shell session |
+| Endpoint          | Method        | Purpose                                    |
+| ----------------- | ------------- | ------------------------------------------ |
+| `/`               | GET           | Serves React static files                  |
+| `/ws`             | GET (upgrade) | Main WebSocket shell session               |
+| `/api/auth/login` | POST          | Username/password auth, issues JWT cookies |
+| `/api/auth/me`    | GET           | Returns current user info (SPA bootstrap)  |
+| `/api/auth/refresh` | POST        | Rotates refresh token + access JWT         |
+| `/api/auth/logout` | POST         | Revokes refresh token + clears cookies     |
 
 #### 4.1.2 PTY Management
 
@@ -142,34 +155,35 @@ Use **direct PTY** for v1 (simplest) but persist the PTY handle + metadata in CN
 
 #### 4.1.3 Session Registry (CNPG)
 
-* Table schema (minimum): `session_uuid UUID PRIMARY KEY`, `deployment_id TEXT`, `shell_pid INT`, `created_at TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`, `state JSONB`, `log_path TEXT`, `forked_from UUID`.
-* On startup, the backend receives `SESSION_ID` (from Helm value). It queries CNPG:
-  * If a live PTY exists for that `session_uuid`, the server reattaches and marks it active.
-  * If not, it spawns a new shell, stores metadata, and begins streaming logs.
-* `--continue` maps to “select most recent session by `updated_at` for this deployment”.
-* `--resume <uuid>` fetches that session row; if active, reattach, otherwise display a warning and offer `--fork-session`.
-* `--fork-session` clones metadata, creates a fresh PTY, and writes a new UUID row linked via `forked_from`.
+* Table schema: `session_uuid UUID PRIMARY KEY`, `deployment_id TEXT`, `created_at TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`.
+* Session logs stored in `session_logs` table with PTY transcript data.
+* On startup, the backend receives `SESSION_ID` (from Helm value/env var). It upserts a session row in CNPG.
+* On first WebSocket connection, the server initializes the PTY and keeps it alive for the pod lifetime.
+* The same PTY is reused for all subsequent connections from that deployment.
+* Output is buffered (64KB) so new clients receive initial output (MOTD) on connect.
 
 #### 4.1.4 Reconnection & WS Handshake
 
-* REST endpoint `GET /session` returns `{ sessionUUID, availableSessions[] }`.
-* Frontend (or CLI) chooses a `sessionUUID` and opens `GET /ws?session=<uuid>&mode=resume|fork|new`.
-* Server verifies single attachment:
-  * If another client is already attached, respond with HTTP 409 instructing the user to fork.
-  * If allowed, mark the row as “attached” (timestamp + client info) until disconnect.
-* When the WebSocket closes unexpectedly, the PTY remains alive; the server clears the attachment flag but keeps the PTY handle in memory for the next resume.
-* Logs are streamed via the same WS channel; CNPG only stores metadata and historical log pointers (not full transcripts).
-* tmux remains an optional enhancement for v2, but v1 must already support resume/fork through the registry above.
+* Frontend connects directly to `GET /ws` (no session parameter needed).
+* Server enforces single client per session:
+  * If another client is already connected, respond with HTTP 409 or WebSocket close with reason.
+  * New connections must wait until the existing client disconnects.
+* On successful connection:
+  * Server sends buffered output (MOTD, recent history) immediately.
+  * Bidirectional PTY streaming begins.
+* When the WebSocket closes unexpectedly, the PTY remains alive and the server accepts reconnection.
+* Session logs (PTY transcripts) are stored in CNPG for auditing and can be retrieved via `GET /session/logs`.
 
 #### 4.1.5 Security & Network
 
-* No external access.
-* Only run behind:
+* Default deployment remains private (port-forward or cluster-internal Service guarded by NetworkPolicy).
+* All browser + CLI traffic is authenticated:
 
-  * k8s port-forward
-  * or cluster internal network + NetworkPolicy
-
-No tokens, no login, no HTTPS (unless behind ingress); ingress basic auth is intentionally omitted to avoid interfering with CLI/WebSocket flows.
+  * `/api/auth/login` verifies bcrypt hashes stored in CNPG and issues JWTs.
+  * Access tokens expire quickly (default 15m) while refresh tokens last longer (30d) and are revocable per record.
+  * Middleware validates JWTs for HTTP/WebSocket/SSE before handing off to business logic.
+* Tokens flow via Secure, HttpOnly cookies; HTTPS (or TLS-terminating port-forward) is required whenever auth is enabled.
+* Prometheus/expvar endpoints can remain unauthenticated (configurable) so monitoring keeps working, but default stance is “auth everywhere”.
 
 #### 4.1.6 CLI Helpers & Logging
 
@@ -177,26 +191,37 @@ No tokens, no login, no HTTPS (unless behind ingress); ingress basic auth is int
 * Function uses `script -q -c "~/.local/bin/claude --dangerously-skip-permissions"` and stores logs under `$HOME/claude_logs/claude_interactive_session_<timestamp>.log`.
 * Helm chart injects env vars such as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` and `ANTHROPIC_BASE_URL`; no defaults baked into the image.
 
+#### 4.1.7 Authentication Workflow
+
+* **Schema**: add CNPG migrations for `kubetty_users` (uuid pk, username citext unique, password_hash bytea, timestamps, is_active) and `kubetty_refresh_tokens` (uuid pk, token_id uuid unique, user_id fk, expires_at, revoked_at, metadata).
+* **Config**: env vars `AUTH_MODE`, `AUTH_JWT_SECRET`, `AUTH_ACCESS_TTL`, `AUTH_REFRESH_TTL`, `AUTH_ISSUER`, `AUTH_COOKIE_DOMAIN`, `AUTH_COOKIE_SECURE`. Server refuses to boot if auth enabled but secret missing.
+* **Login**: `POST /api/auth/login` accepts `{username,password}`, verifies bcrypt hash, creates access/refresh pair, and stores refresh metadata; also records Prometheus counters.
+* **Refresh**: `POST /api/auth/refresh` validates refresh token row + embedded token id, rotates it, and re-issues JWTs.
+* **Logout**: `POST /api/auth/logout` revokes refresh token (delete or set `revoked_at`) and clears cookies.
+* **Session check**: `GET /api/auth/me` returns `{user}` and is used by the SPA to decide whether to show the login form; returns 401 otherwise.
+* **Middleware**: wraps every handler (except `/api/auth/*`, `/metrics`, `/debug/vars`). Extracts bearer token or cookie, validates signature/expiry/issuer, loads user info (cached by ID) for downstream logging, and rejects unauthorized requests with 401.
+* **CLI tooling**: a small Go program (`go run ./server/cmd/kubetty-authuser create --username ... --password ...`) calls the same auth package to create/update users via CNPG. Include docs in README.
+
 ### 4.2 Frontend (React)
 
 #### Key UI components:
 
 * xterm.js terminal with full ANSI handling, resize support, and clipboard integration.
-* Session picker that lists `availableSessions[]` returned by `/session` (includes resume/fork controls).
-* Connection indicator with reconnection countdown + retry button.
+* Connection indicator with reconnection countdown + automatic retry.
+* Login form (when auth enabled) with logout action in header.
 * Minimal dark theme aligned with Claude Code palette.
 
 #### Actions:
 
-* Call `/session` on load to fetch deployment’s default session UUID and the list of historical sessions.
-* On resume/fork selection, open `ws://.../ws?session=<uuid>&mode=<mode>` and wire xterm.js to the socket.
-* Buffer outbound keystrokes while reconnecting to avoid dropping user input.
-* Persist the last-used session UUID in `localStorage` so `--continue` semantics match Claude CLI expectations.
+* On load, call `/api/auth/me` to check authentication status; show login form if needed.
+* Connect directly to `ws://.../ws` and wire xterm.js to the socket.
+* Automatic reconnection with exponential backoff on disconnect.
+* Send terminal resize events to backend when terminal dimensions change.
 
 ### 4.3 Build & Deploy Steps
 
 1. Run `npm --prefix web install && npm --prefix web run build` locally to produce `web/build/`.
-2. Run `go build ./server` (or `make build`) to embed the static assets into the Go binary.
+2. Run `go build ./server/cmd/gateway && go build ./server/cmd/project` (or `make build-server-local`) to build both binaries.
 3. Build the Docker image locally (`docker build -t harbor.support.tools/kubetty/<repo>:<tag> .`) including all CLI tools and `/etc/profile.d/claude.sh`.
 4. Push manually to Harbor (`docker push harbor.support.tools/kubetty/<repo>:<tag>`); no GitHub/remote CI is involved.
 5. Use the Helm chart to deploy, injecting:
@@ -432,9 +457,22 @@ kube-tty/
 │
 ├── server/
 │   ├── go.mod
-│   ├── main.go
+│   ├── cmd/                 # Binary entry points
+│   │   ├── gateway/main.go      # Gateway mode (multi-project tabs)
+│   │   ├── project/main.go      # Project mode (single PTY)
+│   │   └── kubetty-authuser/    # User management CLI
 │   └── internal/
-│       └── sessions/        # CNPG registry + resume logic
+│       ├── handlers/            # HTTP handlers
+│       │   ├── auth/            # Auth handlers (login, logout, refresh)
+│       │   └── session/         # Session log handlers
+│       ├── gateway/             # Gateway-specific logic
+│       ├── sessions/            # CNPG registry + resume logic
+│       └── shared/              # Shared utilities
+│           ├── config/          # Configuration helpers
+│           ├── errors/          # Standardized error handling
+│           ├── health/          # Health check utilities
+│           ├── metrics/         # Prometheus metrics
+│           └── server/          # HTTP server utilities
 │
 └── web/
     ├── package.json
@@ -444,12 +482,14 @@ kube-tty/
         ├── App.tsx
         └── components/
             ├── TerminalView.tsx
-            └── SessionPicker.tsx
+            ├── Login.tsx
+            └── SessionLogsModal.tsx
 
 deploy/
 └── helm/
     ├── Chart.yaml
-    ├── values.yaml          # session UUID, CNPG creds, env vars
+    ├── values.yaml                    # Default values
+    ├── values.project-template.yaml   # Template for new projects
     └── templates/
         ├── deployment.yaml
         ├── secret.yaml
@@ -465,11 +505,21 @@ scripts/
 
 ### Go backend
 
-Already provided; engineer just needs to copy the `main.go` and `go.mod`, then add the `internal/sessions` package for CNPG access plus the `/session` endpoint, resume/fork logic, and env var wiring (`SESSION_ID`, `CNPG_*`, `CLAUDE_*`).
+The server is split into two binaries under `server/cmd/`:
+- **gateway/main.go** - Multi-project gateway with tabbed UI, auth, SSE events
+- **project/main.go** - Single PTY session per pod, WebSocket streaming
+
+Shared code lives in `server/internal/`:
+- `handlers/auth/` - Authentication handlers (login, logout, refresh, middleware)
+- `handlers/session/` - Session log handlers
+- `sessions/` - CNPG session persistence
+- `shared/` - Utilities (config, errors, health, metrics, server)
+
+Build with: `go build ./server/cmd/gateway && go build ./server/cmd/project`
 
 ### React frontend
 
-Already provided; engineer places in `web/` folder, installs deps, and ensures xterm.js + SessionPicker components are enabled by default:
+Already provided; engineer places in `web/` folder, installs deps, and ensures xterm.js + auth components are enabled by default:
 
 ```
 npm install
@@ -518,15 +568,16 @@ An engineer is **finished** when:
 ### Backend
 
 * [ ] `/` serves the React app and `/ws` provides a PTY-backed WebSocket.
-* [ ] `/session` returns the deployment’s default UUID plus resume/fork metadata pulled from CNPG.
-* [ ] PTY metadata (session UUID, PID, timestamps) persists in CNPG and survives pod restarts.
-* [ ] Resume/fork logic enforces single-client-per-session and matches Claude CLI semantics (`--continue`, `--resume <id>`, `--fork-session`, `--session-id`).
-* [ ] Environment variables (`SESSION_ID`, `CNPG_*`, `CLAUDE_*`) are read at startup and validated.
+* [ ] Single PTY per pod is created on first connection and reused for pod lifetime.
+* [ ] PTY metadata (session UUID, timestamps) persists in CNPG and survives pod restarts.
+* [ ] Single-client-per-session enforcement rejects additional connections.
+* [ ] Environment variables (`SESSION_ID`, `CNPG_*`, `CLAUDE_*`, `AUTH_*`) are read at startup and validated.
+* [ ] Session logs are stored in CNPG and accessible via `/session/logs`.
 
 ### Frontend
 
 * [ ] xterm.js renders the PTY output with correct colors, cursor control, and resizing.
-* [ ] SessionPicker lists available sessions, supports resume/fork, and persists the last-used UUID locally.
+* [ ] Login form displayed when auth is enabled and user is not authenticated.
 * [ ] Connection indicator surfaces attach/detach events and auto-retries after transient drops.
 
 ### Deployment
@@ -547,9 +598,9 @@ An engineer is **finished** when:
 
 * Integrate tmux as the PTY backend for richer multi-window workflows.
 * Stream command transcripts into CNPG or object storage for searchable history/auditing.
-* Add multi-session dashboard (even if still single-user) to quickly fork/archive sessions.
+* Add session log viewer/search UI for auditing past sessions.
 * Provide Kubernetes job templates to launch ephemeral helper pods from within the UI.
-* Explore lightweight auth (header token or OAuth) if exposure ever leaves the private network.
+* Add metrics and alerting for auth failures, session usage, and connection patterns.
 
 ---
 
@@ -557,12 +608,12 @@ An engineer is **finished** when:
 
 This doc and:
 
-* Provided Go backend code (`main.go` + `go.mod`) plus `internal/sessions` stub.
-* React frontend (`App.tsx`, `TerminalView.tsx`, `SessionPicker.tsx`) pre-wired with xterm.js.
-* Helm chart (`deploy/helm`) with sample values for `SESSION_ID`, CNPG creds, LLM env vars.
+* Provided Go backend code (`server/cmd/gateway/main.go`, `server/cmd/project/main.go` + `go.mod`) plus `internal/` packages for handlers, sessions, and shared utilities.
+* React frontend (`App.tsx`, `TerminalView.tsx`, `Login.tsx`) pre-wired with xterm.js and auth.
+* Helm chart (`deploy/helm`) with sample values for `SESSION_ID`, CNPG creds, LLM env vars, and auth settings.
 * `scripts/claude_with_log.sh` and documentation on local image build + Harbor push.
-* Instructions for configuring CNPG, namespaces, and `~/.kube/config`.
+* Instructions for configuring CNPG, namespaces, `~/.kube/config`, and user creation.
 
-Everything above remains intentionally minimal and focused on single-user pods.
+Everything above remains intentionally minimal and focused on single-user pods with one session per deployment.
 
 ---

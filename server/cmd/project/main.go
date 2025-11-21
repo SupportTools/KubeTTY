@@ -15,23 +15,15 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/postgres"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/supporttools/KubeTTY/server/internal/config"
-	handlers_session "github.com/supporttools/KubeTTY/server/internal/handlers/session"
-	"github.com/supporttools/KubeTTY/server/internal/sessions"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/health"
 	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
 )
-
-//go:embed migrations/*.sql
-var migrationsFS embed.FS
 
 //go:embed ui/dist ui/dist/*
 var embeddedUI embed.FS
@@ -46,7 +38,6 @@ type ptySession struct {
 	cmd       *exec.Cmd
 	ptmx      *os.File
 	createdAt time.Time
-	logCh     chan sessions.LogEntry
 
 	mu            sync.RWMutex
 	clients       map[*websocket.Conn]bool
@@ -55,8 +46,7 @@ type ptySession struct {
 }
 
 type server struct {
-	cfg   *config.ProjectConfig
-	store sessions.Store
+	cfg *config.ProjectConfig
 
 	// PTY session management
 	mu  sync.RWMutex
@@ -67,7 +57,6 @@ type server struct {
 
 	// Metrics
 	appMetrics *appMetrics
-	metrics    *cleanupMetrics
 }
 
 func main() {
@@ -80,42 +69,19 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	// Run migrations
-	if err := applyMigrations(cfg.ConnString()); err != nil {
-		log.Fatalf("apply migrations: %v", err)
-	}
-
-	// Initialize stores
-	poolConfig, err := cfg.ConnConfig()
-	if err != nil {
-		log.Fatalf("build pool config: %v", err)
-	}
-	store, err := sessions.NewPGXStore(ctx, poolConfig)
-	if err != nil {
-		log.Fatalf("create session store: %v", err)
-	}
 
 	// Initialize metrics
 	appMetrics := newAppMetrics()
-	cleanupMetrics := newCleanupMetrics()
 
 	srv := &server{
-		cfg:   &cfg,
-		store: store,
+		cfg: &cfg,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 		appMetrics: appMetrics,
-		metrics:    cleanupMetrics,
 	}
-
-	// Start log retention goroutine
-	maintCtx, maintCancel := context.WithCancel(ctx)
-	defer maintCancel()
-	go srv.runLogRetention(maintCtx)
 
 	// Setup HTTP routes
 	mux := http.NewServeMux()
@@ -123,21 +89,14 @@ func main() {
 	// Public endpoints
 	mux.Handle("/metrics", promhttp.Handler())
 
-	// Health check with PTY component status
+	// Health check with PTY component status (no database)
 	ptyChecker := health.NewPTYChecker(&srv.mu, func() bool {
 		return srv.pty != nil && srv.pty.isAlive()
 	})
-	var dbPinger health.Pinger
-	if srv.store != nil {
-		if pgxStore, ok := srv.store.(*sessions.PGXStore); ok {
-			dbPinger = pgxStore
-		}
-	}
-	mux.Handle("/api/healthz", health.NewCompatHandler(dbPinger, ptyChecker))
+	mux.Handle("/api/healthz", health.NewCompatHandler(nil, ptyChecker))
 
-	// Project endpoints - PTY WebSocket and session logs (no auth in project mode)
+	// Project endpoints - PTY WebSocket only (no session logs without DB)
 	mux.HandleFunc("/ws", srv.handleWebsocket)
-	mux.Handle("/session/logs", handlers_session.NewSessionLogsHandler(srv.store, srv))
 
 	// Static files
 	mux.HandleFunc("/", srv.staticHandler)
@@ -150,34 +109,13 @@ func main() {
 	// Graceful shutdown with custom cleanup handlers
 	go func() {
 		sharedserver.GracefulShutdown(httpServer, srv)
-		// Cancel contexts after shutdown completes
 		cancel()
-		maintCancel()
 	}()
 
-	log.Infof("Project listening on :%s", cfg.Port)
+	log.Infof("Project listening on :%s (stateless PTY mode - no database)", cfg.Port)
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("HTTP server error: %v", err)
 	}
-}
-
-func applyMigrations(connString string) error {
-	sourceDriver, err := iofs.New(migrationsFS, "migrations")
-	if err != nil {
-		return fmt.Errorf("create source driver: %w", err)
-	}
-
-	m, err := migrate.NewWithSourceInstance("iofs", sourceDriver, connString)
-	if err != nil {
-		return fmt.Errorf("create migrate: %w", err)
-	}
-	defer m.Close()
-
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return fmt.Errorf("migrate up: %w", err)
-	}
-
-	return nil
 }
 
 // PTY WebSocket handler - project-specific (not gateway)
@@ -288,9 +226,6 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		if s.appMetrics != nil {
 			s.appMetrics.observeWSBytes("in", len(data))
 		}
-		if ps.logCh != nil {
-			queueLog(ps.logCh, s.cfg.SessionID, "in", data)
-		}
 		if _, err := ps.ptmx.Write(data); err != nil {
 			log.Printf("pty write error: %v", err)
 			return
@@ -353,33 +288,6 @@ func (s *server) initPTY(ctx context.Context) error {
 		bufferMaxSize: 65536,                  // 64KB max buffer size
 	}
 
-	// Optional: setup logging to database
-	if s.store != nil {
-		s.pty.logCh = make(chan sessions.LogEntry, 256)
-		go func() {
-			for entry := range s.pty.logCh {
-				start := time.Now()
-				err := s.store.AppendLog(context.Background(), entry)
-				s.observeStore("AppendLog", start, err)
-				if err != nil {
-					log.Printf("warn: append log: %v", err)
-				}
-			}
-		}()
-
-		// Persist metadata to DB
-		meta := sessions.Session{
-			SessionID:    s.cfg.SessionID,
-			DeploymentID: s.cfg.DeploymentID,
-			ShellPID:     cmd.Process.Pid,
-			CreatedAt:    s.pty.createdAt,
-			UpdatedAt:    s.pty.createdAt,
-		}
-		if err := s.store.UpsertSession(ctx, meta); err != nil {
-			log.Printf("warn: persist PTY metadata: %v", err)
-		}
-	}
-
 	// Start PTY reader (broadcast to all clients)
 	go func() {
 		buf := make([]byte, 4096)
@@ -408,10 +316,6 @@ func (s *server) initPTY(ctx context.Context) error {
 
 				s.pty.broadcast(data)
 
-				// Optional: log to database
-				if s.store != nil {
-					queueLog(s.pty.logCh, s.cfg.SessionID, "out", data)
-				}
 				if s.appMetrics != nil {
 					s.appMetrics.observeWSBytes("out", n)
 				}
@@ -436,9 +340,6 @@ func (s *server) initPTY(ctx context.Context) error {
 		s.mu.Lock()
 		if s.pty != nil {
 			s.pty.broadcastClose()
-			if s.pty.logCh != nil {
-				close(s.pty.logCh)
-			}
 		}
 		s.pty = nil
 		s.mu.Unlock()
@@ -496,124 +397,7 @@ func (ps *ptySession) broadcastClose() {
 	}
 }
 
-type wsWriter struct {
-	conn *websocket.Conn
-}
-
-func (w wsWriter) Write(p []byte) (int, error) {
-	if err := w.conn.WriteMessage(websocket.BinaryMessage, p); err != nil {
-		return 0, err
-	}
-	return len(p), nil
-}
-
-type metricsWriter struct {
-	metrics   *appMetrics
-	direction string
-}
-
-func (mw metricsWriter) Write(p []byte) (int, error) {
-	if mw.metrics != nil {
-		mw.metrics.observeWSBytes(mw.direction, len(p))
-	}
-	return len(p), nil
-}
-
-type logWriter struct {
-	sessionID string
-	direction string
-	ch        chan<- sessions.LogEntry
-}
-
-func (w logWriter) Write(p []byte) (int, error) {
-	queueLog(w.ch, w.sessionID, w.direction, p)
-	return len(p), nil
-}
-
-func queueLog(ch chan<- sessions.LogEntry, sessionID, direction string, data []byte) {
-	if ch == nil || len(data) == 0 {
-		return
-	}
-	buf := make([]byte, len(data))
-	copy(buf, data)
-	entry := sessions.LogEntry{
-		SessionID: sessionID,
-		Direction: direction,
-		Data:      buf,
-		CreatedAt: time.Now(),
-	}
-	select {
-	case ch <- entry:
-	default:
-	}
-}
-
-func (s *server) runLogRetention(ctx context.Context) {
-	if s.cfg.LogRetentionHours <= 0 && s.cfg.LogMaxPerSession <= 0 {
-		return
-	}
-	ticker := time.NewTicker(30 * time.Minute)
-	defer ticker.Stop()
-	s.enforceLogRetention(ctx)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.enforceLogRetention(ctx)
-		}
-	}
-}
-
-func (s *server) enforceLogRetention(ctx context.Context) {
-	cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	if s.metrics != nil {
-		s.metrics.recordRunStart()
-	}
-
-	if s.cfg.LogRetentionHours > 0 {
-		cutoff := time.Now().Add(-time.Duration(s.cfg.LogRetentionHours) * time.Hour)
-		if deleted, err := s.store.PruneLogs(cleanupCtx, cutoff); err != nil {
-			log.Printf("warn: prune logs: %v", err)
-			if s.metrics != nil {
-				s.metrics.recordError(err)
-			}
-		} else if deleted > 0 {
-			log.Printf("pruned %d session log rows older than %s", deleted, cutoff.Format(time.RFC3339))
-			if s.metrics != nil {
-				s.metrics.addPruned(deleted)
-			}
-		}
-	}
-	if s.cfg.LogMaxPerSession > 0 {
-		if deleted, err := s.store.TrimLogs(cleanupCtx, s.cfg.LogMaxPerSession); err != nil {
-			log.Printf("warn: trim logs: %v", err)
-			if s.metrics != nil {
-				s.metrics.recordError(err)
-			}
-		} else if deleted > 0 {
-			log.Printf("trimmed %d session log rows over per-session cap %d", deleted, s.cfg.LogMaxPerSession)
-			if s.metrics != nil {
-				s.metrics.addTrimmed(deleted)
-			}
-		}
-	}
-}
-
-// ObserveStore implements handlers_session.StoreMetricsObserver interface
-func (s *server) ObserveStore(operation string, start time.Time, err error) {
-	s.observeStore(operation, start, err)
-}
-
 func (s *server) staticHandler(w http.ResponseWriter, r *http.Request) {
 	// Placeholder - will be implemented
 	http.NotFound(w, r)
-}
-
-func (s *server) observeStore(op string, start time.Time, err error) {
-	if s == nil || s.appMetrics == nil {
-		return
-	}
-	s.appMetrics.observeStore(op, time.Since(start), err)
 }

@@ -1,2 +1,0 @@
-DROP TABLE IF EXISTS session_logs;
-DROP TABLE IF EXISTS sessions;

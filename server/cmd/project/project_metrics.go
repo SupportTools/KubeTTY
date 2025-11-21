@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -10,62 +9,7 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/shared/metrics"
 )
 
-// cleanupMetrics tracks log retention cleanup operations
-type cleanupMetrics struct {
-	logsDeleted          *prometheus.CounterVec
-	logRetentionDuration *prometheus.HistogramVec
-}
-
-func newCleanupMetrics() *cleanupMetrics {
-	return &cleanupMetrics{
-		logsDeleted: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "kubetty_logs_deleted_total",
-				Help: "Total number of log entries deleted by retention cleanup",
-			},
-			[]string{"session_id"},
-		),
-		logRetentionDuration: promauto.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name:    "kubetty_log_retention_duration_seconds",
-				Help:    "Duration of log retention cleanup operations",
-				Buckets: prometheus.DefBuckets,
-			},
-			[]string{"operation"},
-		),
-	}
-}
-
-func (m *cleanupMetrics) observeLogsDeleted(sessionID string, count int) {
-	if m == nil || count <= 0 {
-		return
-	}
-	m.logsDeleted.WithLabelValues(sessionID).Add(float64(count))
-}
-
-func (m *cleanupMetrics) recordRunStart() {
-	// Placeholder - can add run start timestamp tracking if needed
-}
-
-func (m *cleanupMetrics) recordError(err error) {
-	// Placeholder - can add error counter if needed
-	// Log the error for now
-	if err != nil {
-		// Could add error counter metric here if needed
-	}
-}
-
-func (m *cleanupMetrics) addPruned(count int64) {
-	// Delegate to observeLogsDeleted with "pruned" session ID
-	m.observeLogsDeleted("pruned", int(count))
-}
-
-func (m *cleanupMetrics) addTrimmed(count int64) {
-	// Delegate to observeLogsDeleted with "trimmed" session ID
-	m.observeLogsDeleted("trimmed", int(count))
-}
-
-// Project-specific appMetrics additions (not in shared package)
+// Project-specific appMetrics (stateless PTY mode - no database metrics)
 type appMetrics struct {
 	*metrics.AppMetrics
 	sessionAttached prometheus.Counter
@@ -119,17 +63,10 @@ func (m *appMetrics) observePtyExit(exitCode int) {
 	m.ptyExit.WithLabelValues(fmt.Sprintf("%d", exitCode)).Inc()
 }
 
-// Delegate methods for shared metrics (with lowercase names for compatibility)
+// Delegate method for shared metrics
 func (m *appMetrics) observeWSBytes(typ string, n int) {
 	if m == nil {
 		return
 	}
 	m.ObserveWSBytes(typ, n)
-}
-
-func (m *appMetrics) observeStore(op string, dur time.Duration, err error) {
-	if m == nil {
-		return
-	}
-	m.ObserveStore(op, dur, err)
 }

@@ -1,11 +1,15 @@
 {{/*
 Validation: Ensure required configuration is provided
+CNPG is only required for gateway mode, not project mode (stateless PTY)
 */}}
+{{- $isProjectMode := eq (default "gateway" .Values.env.kubettyMode) "project" }}
+{{- if not $isProjectMode }}
 {{- if not .Values.cnpg.host }}
-  {{- fail "cnpg.host is required. Please specify the PostgreSQL host (CNPG cluster service name or IP address)." }}
+  {{- fail "cnpg.host is required for gateway mode. Please specify the PostgreSQL host (CNPG cluster service name or IP address)." }}
 {{- end }}
 {{- if not .Values.cnpg.userSecret }}
-  {{- fail "cnpg.userSecret is required. Please create a Kubernetes secret with database credentials and specify its name." }}
+  {{- fail "cnpg.userSecret is required for gateway mode. Please create a Kubernetes secret with database credentials and specify its name." }}
+{{- end }}
 {{- end }}
 {{- if not .Values.env.sessionID }}
   {{- fail "sessionID is required. Please generate a unique stable UUID with 'uuidgen' or 'New-Guid'." }}
@@ -174,6 +178,8 @@ spec:
             - name: PROJECT_CATALOG_PATH
               value: {{ $catalogFullPath | quote }}
 {{- end }}
+{{- /* CNPG configuration only required for gateway mode, not project mode (stateless PTY) */}}
+{{- if not $isProjectMode }}
             - name: CNPG_HOST
               value: {{ .Values.cnpg.host | quote }}
             - name: CNPG_PORT
@@ -190,6 +196,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.cnpg.userSecret }}
                   key: {{ .Values.cnpg.passwordKey }}
+{{- end }}
             - name: AUTH_MODE
               value: {{ default "disabled" .Values.auth.mode | quote }}
 {{- if .Values.auth.jwtSecret }}

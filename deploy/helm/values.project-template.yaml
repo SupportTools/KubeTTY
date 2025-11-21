@@ -76,33 +76,16 @@ auth:
   mode: disabled
 
 # CloudNativePG (CNPG) database configuration
-# REQUIRED: Project pods share PostgreSQL with gateway for session persistence
+# NOT REQUIRED: Project mode is stateless PTY - no database dependency
+# CNPG is only required for gateway mode which handles session persistence
+# Leave these empty for project pods
 cnpg:
-  # PostgreSQL host (CNPG cluster service name recommended)
-  # Examples:
-  #   - Service name: "kubetty-postgres-rw.kubetty-shared.svc.cluster.local"
-  #   - Short name: "kubetty-postgres-rw" (if in same namespace)
-  #   - IP address: "172.28.58.5" (not recommended, use service name)
-  #
-  # CHANGE THIS - Should match gateway database configuration
-  host: kubetty-postgres-rw.kubetty-shared.svc.cluster.local
-
-  # PostgreSQL port
+  host: ""
   port: 5432
-
-  # Database name (must match gateway database)
-  database: kubetty
-
-  # Kubernetes secret containing database credentials
-  # Shared secret for all project pods
-  # CHANGE THIS - Verify this secret exists in your namespace
-  userSecret: kubetty-shared-app
-
-  # Key name for username in the secret
-  usernameKey: username
-
-  # Key name for password in the secret
-  passwordKey: password
+  database: ""
+  userSecret: ""
+  usernameKey: ""
+  passwordKey: ""
 
 # Kubernetes Service configuration
 # ClusterIP only - project pods are accessed via gateway WebSocket proxy

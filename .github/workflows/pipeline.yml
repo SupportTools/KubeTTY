@@ -251,7 +251,7 @@ jobs:
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
           scanners: 'vuln'
-          timeout: '15m'
+          timeout: '30m'
 
       - name: Upload Trivy results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
@@ -267,7 +267,7 @@ jobs:
           exit-code: '1'
           severity: 'CRITICAL'
           scanners: 'vuln'
-          timeout: '15m'
+          timeout: '30m'
 
       - name: Generate SBOM
         uses: aquasecurity/trivy-action@master
@@ -276,7 +276,7 @@ jobs:
           format: 'cyclonedx'
           output: 'sbom.json'
           scanners: 'vuln'
-          timeout: '15m'
+          timeout: '30m'
 
       - name: Upload SBOM as artifact
         uses: actions/upload-artifact@v4

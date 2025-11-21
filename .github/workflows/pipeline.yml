@@ -409,6 +409,14 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Deploying version: ${TAG}"
 
+      - name: Validate CNPG credentials
+        run: |
+          if [ -z "${{ secrets.CNPG_HOST }}" ]; then
+            echo "ERROR: CNPG_HOST secret not configured"
+            echo "Please configure CNPG database secrets in repository settings"
+            exit 1
+          fi
+
       - name: Deploy to production
         id: deploy
         run: |
@@ -423,6 +431,8 @@ jobs:
             --create-namespace \
             --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
             --set image.tag=${{ steps.extract-tag.outputs.tag }} \
+            --set cnpg.host=${{ secrets.CNPG_HOST }} \
+            --set cnpg.userSecret=${{ secrets.CNPG_USER_SECRET }} \
             --wait \
             --timeout=5m \
             --history-max=20 \

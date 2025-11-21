@@ -270,13 +270,39 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 ## Environment Variables
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `KUBETTY_PORT` | Server port | No (default: 8080) |
-| `KUBETTY_CONN_STRING` | PostgreSQL connection | Yes |
-| `KUBETTY_SESSION_ID` | Session UUID | Yes |
-| `KUBETTY_AUTH_MODE` | Auth mode (disabled/local) | No |
-| `KUBETTY_AUTH_JWT_SECRET` | JWT secret | If auth enabled |
+### Common (Both Gateway & Project)
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `PORT` | Server port | No | 8080 |
+| `SESSION_ID` | Session UUID | Yes | - |
+| `DEPLOYMENT_ID` | Deployment identifier | No | SESSION_ID value |
+| `CNPG_HOST` | PostgreSQL host | Yes | - |
+| `CNPG_PORT` | PostgreSQL port | No | 5432 |
+| `CNPG_DATABASE` | PostgreSQL database | Yes | - |
+| `CNPG_USER` | PostgreSQL user | Yes | - |
+| `CNPG_PASSWORD` | PostgreSQL password | Yes | - |
+| `SESSION_LOG_RETENTION_HOURS` | Log retention (hours) | No | 720 (30 days) |
+| `SESSION_LOG_MAX_ENTRIES` | Max log entries per session | No | 5000 |
+
+### Gateway-Specific
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `PROJECT_CATALOG_PATH` | Path to project catalog YAML | No | - |
+| `TAB_IDLE_TIMEOUT` | Tab idle timeout | No | 2h |
+| `AUTH_MODE` | Auth mode (disabled/local) | No | disabled |
+| `AUTH_JWT_SECRET` | JWT secret | If auth=local | - |
+| `AUTH_ACCESS_TTL` | Access token TTL | No | 15m |
+| `AUTH_REFRESH_TTL` | Refresh token TTL | No | 720h (30 days) |
+| `AUTH_ISSUER` | JWT issuer | No | kubetty |
+| `AUTH_COOKIE_DOMAIN` | Cookie domain | No | - |
+| `AUTH_COOKIE_SECURE` | Cookie secure flag | No | true |
+
+### Project-Specific
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `SHELL` | Shell to use | No | /bin/bash |
+| `KUBETTY_USER` | KubeTTY user | No | USER env var |
+| `KUBETTY_PROJECT` | KubeTTY project | No | DEPLOYMENT_ID value |
 
 ## Getting Help
 

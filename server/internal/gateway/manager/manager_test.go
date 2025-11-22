@@ -37,6 +37,7 @@ func (f *fakeStore) CountByClientAndProject(ctx context.Context, clientID, proje
 	key := clientID + ":" + projectID
 	return f.tabCounts[key], nil
 }
+func (f *fakeStore) UpdateClientID(context.Context, string, string) error { return nil }
 
 func TestNewManager(t *testing.T) {
 	cat := gatewayconfig.Catalog{Projects: []gatewayconfig.Project{{ID: "proj", Namespace: "ns", Service: "svc", Port: 8080}}}

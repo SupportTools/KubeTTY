@@ -97,3 +97,33 @@ func ValidateServer(cfg ServerConfig) error {
 	}
 	return nil
 }
+
+// ValidateController validates controller configuration settings.
+// When the controller is disabled, validation passes without checking other fields.
+// When enabled, it ensures that:
+//   - ProjectsNamespace is provided
+//   - ResourcePrefix is not empty
+//   - ReconcileInterval is positive
+//   - HealthCheckInterval is positive
+//
+// Returns an error if validation fails, nil otherwise.
+func ValidateController(cfg ControllerConfig) error {
+	if !cfg.Enabled {
+		// No validation needed when controller is disabled
+		return nil
+	}
+
+	if cfg.ProjectsNamespace == "" {
+		return fmt.Errorf("PROJECTS_NAMESPACE is required when CONTROLLER_ENABLED=true")
+	}
+	if cfg.ResourcePrefix == "" {
+		return fmt.Errorf("RESOURCE_PREFIX cannot be empty when controller is enabled")
+	}
+	if cfg.ReconcileInterval <= 0 {
+		return fmt.Errorf("RECONCILE_INTERVAL must be positive when controller is enabled")
+	}
+	if cfg.HealthCheckInterval <= 0 {
+		return fmt.Errorf("HEALTH_CHECK_INTERVAL must be positive when controller is enabled")
+	}
+	return nil
+}

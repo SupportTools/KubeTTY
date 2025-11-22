@@ -119,3 +119,25 @@ func (c ServerConfig) Addr() string {
 	}
 	return fmt.Sprintf(":%d", c.Port)
 }
+
+// ControllerConfig contains settings for the single-namespace project controller.
+// When enabled, the controller manages project lifecycle within shared namespaces.
+type ControllerConfig struct {
+	// Enabled controls whether the project controller is active (default: false)
+	Enabled bool
+
+	// ProjectsNamespace is the target namespace for project deployments
+	// (e.g., "kubetty-projects-dev", "kubetty-projects-prd")
+	// Required when Enabled is true
+	ProjectsNamespace string
+
+	// ResourcePrefix is the prefix for all created resources (default: "kubetty-project-")
+	// Used to avoid naming collisions in shared namespaces
+	ResourcePrefix string
+
+	// ReconcileInterval is how often the controller reconciles project state (default: 30s)
+	ReconcileInterval time.Duration
+
+	// HealthCheckInterval is how often to check project pod health (default: 60s)
+	HealthCheckInterval time.Duration
+}

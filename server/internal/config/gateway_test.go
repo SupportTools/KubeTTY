@@ -127,59 +127,44 @@ func TestLoadGatewayConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "missing SESSION_ID",
-			envVars: map[string]string{
-				"CNPG_HOST":     "localhost",
-				"CNPG_DATABASE": "kubetty",
-				"CNPG_USER":     "user",
-				"CNPG_PASSWORD": "pass",
-			},
-			wantErr: true,
-			errMsg:  "SESSION_ID is required",
-		},
-		{
 			name: "missing CNPG_HOST",
 			envVars: map[string]string{
-				"SESSION_ID":    "test-session",
 				"CNPG_DATABASE": "kubetty",
 				"CNPG_USER":     "user",
 				"CNPG_PASSWORD": "pass",
 			},
 			wantErr: true,
-			errMsg:  "CNPG_* env vars are required",
+			errMsg:  "CNPG_* env vars are required for gateway mode",
 		},
 		{
 			name: "missing CNPG_DATABASE",
 			envVars: map[string]string{
-				"SESSION_ID":    "test-session",
 				"CNPG_HOST":     "localhost",
 				"CNPG_USER":     "user",
 				"CNPG_PASSWORD": "pass",
 			},
 			wantErr: true,
-			errMsg:  "CNPG_* env vars are required",
+			errMsg:  "CNPG_* env vars are required for gateway mode",
 		},
 		{
 			name: "missing CNPG_USER",
 			envVars: map[string]string{
-				"SESSION_ID":    "test-session",
 				"CNPG_HOST":     "localhost",
 				"CNPG_DATABASE": "kubetty",
 				"CNPG_PASSWORD": "pass",
 			},
 			wantErr: true,
-			errMsg:  "CNPG_* env vars are required",
+			errMsg:  "CNPG_* env vars are required for gateway mode",
 		},
 		{
 			name: "missing CNPG_PASSWORD",
 			envVars: map[string]string{
-				"SESSION_ID":    "test-session",
 				"CNPG_HOST":     "localhost",
 				"CNPG_DATABASE": "kubetty",
 				"CNPG_USER":     "user",
 			},
 			wantErr: true,
-			errMsg:  "CNPG_* env vars are required",
+			errMsg:  "CNPG_* env vars are required for gateway mode",
 		},
 		{
 			name: "auth mode local without JWT secret",
@@ -372,6 +357,190 @@ func TestGatewayConfig_AuthMethods(t *testing.T) {
 			}
 			if got := tt.config.GetAuthCookieSecure(); got != tt.wantSecure {
 				t.Errorf("GetAuthCookieSecure() = %v, want %v", got, tt.wantSecure)
+			}
+		})
+	}
+}
+
+func TestLoadGatewayConfig_ControllerConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		envVars  map[string]string
+		wantErr  bool
+		errMsg   string
+		validate func(*testing.T, GatewayConfig)
+	}{
+		{
+			name: "controller config defaults when disabled",
+			envVars: map[string]string{
+				"SESSION_ID":    "test-session",
+				"CNPG_HOST":     "localhost",
+				"CNPG_DATABASE": "kubetty",
+				"CNPG_USER":     "user",
+				"CNPG_PASSWORD": "pass",
+			},
+			wantErr: false,
+			validate: func(t *testing.T, cfg GatewayConfig) {
+				if cfg.Controller.Enabled {
+					t.Error("Controller.Enabled = true, want false (default)")
+				}
+				if cfg.Controller.ResourcePrefix != "kubetty-project-" {
+					t.Errorf("Controller.ResourcePrefix = %s, want kubetty-project-", cfg.Controller.ResourcePrefix)
+				}
+				if cfg.Controller.ReconcileInterval != 30*time.Second {
+					t.Errorf("Controller.ReconcileInterval = %v, want 30s", cfg.Controller.ReconcileInterval)
+				}
+				if cfg.Controller.HealthCheckInterval != 60*time.Second {
+					t.Errorf("Controller.HealthCheckInterval = %v, want 60s", cfg.Controller.HealthCheckInterval)
+				}
+			},
+		},
+		{
+			name: "controller config with all fields set",
+			envVars: map[string]string{
+				"SESSION_ID":            "test-session",
+				"CNPG_HOST":             "localhost",
+				"CNPG_DATABASE":         "kubetty",
+				"CNPG_USER":             "user",
+				"CNPG_PASSWORD":         "pass",
+				"CONTROLLER_ENABLED":    "true",
+				"PROJECTS_NAMESPACE":    "kubetty-projects-dev",
+				"RESOURCE_PREFIX":       "kt-proj-",
+				"RECONCILE_INTERVAL":    "45s",
+				"HEALTH_CHECK_INTERVAL": "120s",
+			},
+			wantErr: false,
+			validate: func(t *testing.T, cfg GatewayConfig) {
+				if !cfg.Controller.Enabled {
+					t.Error("Controller.Enabled = false, want true")
+				}
+				if cfg.Controller.ProjectsNamespace != "kubetty-projects-dev" {
+					t.Errorf("Controller.ProjectsNamespace = %s, want kubetty-projects-dev", cfg.Controller.ProjectsNamespace)
+				}
+				if cfg.Controller.ResourcePrefix != "kt-proj-" {
+					t.Errorf("Controller.ResourcePrefix = %s, want kt-proj-", cfg.Controller.ResourcePrefix)
+				}
+				if cfg.Controller.ReconcileInterval != 45*time.Second {
+					t.Errorf("Controller.ReconcileInterval = %v, want 45s", cfg.Controller.ReconcileInterval)
+				}
+				if cfg.Controller.HealthCheckInterval != 120*time.Second {
+					t.Errorf("Controller.HealthCheckInterval = %v, want 120s", cfg.Controller.HealthCheckInterval)
+				}
+			},
+		},
+		{
+			name: "controller enabled without namespace fails",
+			envVars: map[string]string{
+				"SESSION_ID":         "test-session",
+				"CNPG_HOST":          "localhost",
+				"CNPG_DATABASE":      "kubetty",
+				"CNPG_USER":          "user",
+				"CNPG_PASSWORD":      "pass",
+				"CONTROLLER_ENABLED": "true",
+			},
+			wantErr: true,
+			errMsg:  "PROJECTS_NAMESPACE is required when CONTROLLER_ENABLED=true",
+		},
+		// Note: Empty resource prefix cannot be tested via env vars because
+		// GetEnv treats empty string as unset and returns the default.
+		// The validation for empty prefix is tested in TestValidateController.
+		{
+			name: "controller disabled allows missing namespace",
+			envVars: map[string]string{
+				"SESSION_ID":         "test-session",
+				"CNPG_HOST":          "localhost",
+				"CNPG_DATABASE":      "kubetty",
+				"CNPG_USER":          "user",
+				"CNPG_PASSWORD":      "pass",
+				"CONTROLLER_ENABLED": "false",
+			},
+			wantErr: false,
+			validate: func(t *testing.T, cfg GatewayConfig) {
+				if cfg.Controller.Enabled {
+					t.Error("Controller.Enabled = true, want false")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Clearenv()
+
+			for key, val := range tt.envVars {
+				os.Setenv(key, val)
+			}
+
+			cfg, err := LoadGatewayConfig()
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("LoadGatewayConfig() expected error, got nil")
+					return
+				}
+				if !strings.Contains(err.Error(), tt.errMsg) {
+					t.Errorf("LoadGatewayConfig() error = %v, want error containing %q", err, tt.errMsg)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("LoadGatewayConfig() unexpected error = %v", err)
+				return
+			}
+
+			if tt.validate != nil {
+				tt.validate(t, cfg)
+			}
+		})
+	}
+}
+
+func TestControllerConfig_ParseEnvironment(t *testing.T) {
+	tests := []struct {
+		name      string
+		namespace string
+		want      string
+	}{
+		{
+			name:      "dev environment",
+			namespace: "kubetty-projects-dev",
+			want:      "dev",
+		},
+		{
+			name:      "prd environment",
+			namespace: "kubetty-projects-prd",
+			want:      "prd",
+		},
+		{
+			name:      "staging environment",
+			namespace: "kubetty-projects-staging",
+			want:      "staging",
+		},
+		{
+			name:      "simple namespace",
+			namespace: "production",
+			want:      "production",
+		},
+		{
+			name:      "empty namespace",
+			namespace: "",
+			want:      "",
+		},
+		{
+			name:      "namespace with multiple dashes",
+			namespace: "my-company-kubetty-projects-test",
+			want:      "test",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ControllerConfig{
+				ProjectsNamespace: tt.namespace,
+			}
+			if got := cfg.ParseEnvironment(); got != tt.want {
+				t.Errorf("ParseEnvironment() = %q, want %q", got, tt.want)
 			}
 		})
 	}

@@ -97,6 +97,19 @@ func (m *mockTabStore) CountByClientAndProject(ctx context.Context, clientID, pr
 	return count, nil
 }
 
+func (m *mockTabStore) UpdateClientID(ctx context.Context, tabID, clientID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tab, ok := m.tabs[tabID]
+	if !ok {
+		return tabs.ErrNotFound
+	}
+	tab.ClientID = clientID
+	tab.UpdatedAt = time.Now()
+	m.tabs[tabID] = tab
+	return nil
+}
+
 func TestManager_IdleTimeout_MinimumValidation(t *testing.T) {
 	catalog := gatewayconfig.Catalog{
 		Projects: []gatewayconfig.Project{

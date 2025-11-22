@@ -364,3 +364,118 @@ func TestValidateServer(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateController(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     ControllerConfig
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "valid enabled controller config",
+			cfg: ControllerConfig{
+				Enabled:             true,
+				ProjectsNamespace:   "kubetty-projects-dev",
+				ResourcePrefix:      "kubetty-project-",
+				ReconcileInterval:   30 * time.Second,
+				HealthCheckInterval: 60 * time.Second,
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid disabled controller - no validation",
+			cfg: ControllerConfig{
+				Enabled: false,
+			},
+			wantErr: false,
+		},
+		{
+			name: "disabled controller with empty namespace passes",
+			cfg: ControllerConfig{
+				Enabled:           false,
+				ProjectsNamespace: "",
+			},
+			wantErr: false,
+		},
+		{
+			name: "enabled controller missing namespace",
+			cfg: ControllerConfig{
+				Enabled:             true,
+				ProjectsNamespace:   "",
+				ResourcePrefix:      "kubetty-project-",
+				ReconcileInterval:   30 * time.Second,
+				HealthCheckInterval: 60 * time.Second,
+			},
+			wantErr: true,
+			errMsg:  "PROJECTS_NAMESPACE is required when CONTROLLER_ENABLED=true",
+		},
+		{
+			name: "enabled controller empty resource prefix",
+			cfg: ControllerConfig{
+				Enabled:             true,
+				ProjectsNamespace:   "kubetty-projects-dev",
+				ResourcePrefix:      "",
+				ReconcileInterval:   30 * time.Second,
+				HealthCheckInterval: 60 * time.Second,
+			},
+			wantErr: true,
+			errMsg:  "RESOURCE_PREFIX cannot be empty when controller is enabled",
+		},
+		{
+			name: "enabled controller zero reconcile interval",
+			cfg: ControllerConfig{
+				Enabled:             true,
+				ProjectsNamespace:   "kubetty-projects-dev",
+				ResourcePrefix:      "kubetty-project-",
+				ReconcileInterval:   0,
+				HealthCheckInterval: 60 * time.Second,
+			},
+			wantErr: true,
+			errMsg:  "RECONCILE_INTERVAL must be positive when controller is enabled",
+		},
+		{
+			name: "enabled controller negative reconcile interval",
+			cfg: ControllerConfig{
+				Enabled:             true,
+				ProjectsNamespace:   "kubetty-projects-dev",
+				ResourcePrefix:      "kubetty-project-",
+				ReconcileInterval:   -1 * time.Second,
+				HealthCheckInterval: 60 * time.Second,
+			},
+			wantErr: true,
+			errMsg:  "RECONCILE_INTERVAL must be positive when controller is enabled",
+		},
+		{
+			name: "enabled controller zero health check interval",
+			cfg: ControllerConfig{
+				Enabled:             true,
+				ProjectsNamespace:   "kubetty-projects-dev",
+				ResourcePrefix:      "kubetty-project-",
+				ReconcileInterval:   30 * time.Second,
+				HealthCheckInterval: 0,
+			},
+			wantErr: true,
+			errMsg:  "HEALTH_CHECK_INTERVAL must be positive when controller is enabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateController(tt.cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ValidateController() expected error, got nil")
+					return
+				}
+				if !strings.Contains(err.Error(), tt.errMsg) {
+					t.Errorf("ValidateController() error = %v, want error containing %q", err, tt.errMsg)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("ValidateController() unexpected error = %v", err)
+				}
+			}
+		})
+	}
+}

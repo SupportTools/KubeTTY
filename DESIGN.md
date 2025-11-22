@@ -448,9 +448,480 @@ Each relay instance owns two goroutines (read/write) with contexts for cancellat
 * The server issues a `kubetty_client` cookie (opaque UUID) to associate tabs with a browser. Tabs are scoped per client; `/api/tabs` returns only rows for the requester.
 * `/api/tabs` responses include the tab metadata; the client computes the WebSocket URL as `wss://<host>/ws?tab=<id>`.
 
+### 5.18 Tab Resource Metrics
+
+The gateway collects and displays real-time resource metrics for each open tab, providing visibility into CPU, memory, disk, and network usage of the underlying project pods.
+
+#### 5.18.1 Data Sources
+
+Metrics are collected from two sources:
+
+1. **Kubernetes Metrics API** (`metrics.k8s.io`) - Provides CPU and memory usage/limits for pods
+2. **Project Pod `/api/metrics` Endpoint** - Provides disk and network metrics from within the container
+
+#### 5.18.2 Metrics Types
+
+```go
+type TabMetrics struct {
+    CPU       ResourceMetric `json:"cpu"`
+    Memory    ResourceMetric `json:"memory"`
+    Disk      ResourceMetric `json:"disk"`
+    Network   NetworkMetric  `json:"network"`
+    UpdatedAt time.Time      `json:"updatedAt"`
+}
+
+type ResourceMetric struct {
+    Usage   int64 `json:"usage"`   // Current usage (millicores for CPU, bytes for memory/disk)
+    Limit   int64 `json:"limit"`   // Limit/capacity in same units
+    Percent int   `json:"percent"` // Usage percentage (0-100)
+}
+
+type NetworkMetric struct {
+    RxBytes int64 `json:"rxBytes"` // Total bytes received
+    TxBytes int64 `json:"txBytes"` // Total bytes transmitted
+    RxRate  int64 `json:"rxRate"`  // Receive rate in bytes/sec
+    TxRate  int64 `json:"txRate"`  // Transmit rate in bytes/sec
+}
+```
+
+#### 5.18.3 Collection Architecture
+
+```
+Gateway Pod
+    │
+    ├── MetricsCollector (background goroutine)
+    │       │
+    │       ├── K8s Metrics API ──► CPU/Memory for each tab's pod
+    │       │
+    │       └── HTTP GET /api/metrics ──► Disk/Network from project pod
+    │
+    └── WebSocket Event Broadcaster
+            │
+            └── { type: "metrics", tabId, metrics } ──► Browser
+```
+
+#### 5.18.4 Project Pod Metrics Endpoint
+
+Each project pod exposes `GET /api/metrics` returning:
+
+```json
+{
+  "disk": { "usage": 1073741824, "limit": 53687091200, "percent": 2 },
+  "network": { "rxBytes": 123456789, "txBytes": 987654321 }
+}
+```
+
+Implementation:
+- Disk: Uses `syscall.Statfs("/")` to get filesystem usage
+- Network: Parses `/proc/net/dev` to sum interface bytes (excluding `lo`)
+
+#### 5.18.5 UI Components
+
+**MetricsIndicator** (in tab header)
+- Four color-coded dots representing CPU, MEM, DISK, NET
+- Colors: green (0-60%), yellow (60-80%), red (80-100%)
+- Hover tooltips show exact percentage
+
+**StatusBar** (below tab bar)
+- Progress bars for CPU, Memory, Disk with percentages
+- Network rates (↓ RX / ↑ TX) in human-readable format
+- Only shown when a tab is active
+
+#### 5.18.6 Configuration
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `METRICS_ENABLED`   | `true`  | Enable/disable metrics collection |
+| `METRICS_INTERVAL`  | `15s`   | How often to collect metrics |
+
+#### 5.18.7 Event Protocol
+
+Metrics updates are broadcast via the existing tab events WebSocket:
+
+```json
+{
+  "type": "metrics",
+  "tabId": "550e8400-e29b-41d4-a716-446655440000",
+  "metrics": {
+    "cpu": { "usage": 250, "limit": 1000, "percent": 25 },
+    "memory": { "usage": 536870912, "limit": 2147483648, "percent": 25 },
+    "disk": { "usage": 1073741824, "limit": 53687091200, "percent": 2 },
+    "network": { "rxBytes": 123456789, "txBytes": 987654321, "rxRate": 1024, "txRate": 512 },
+    "updatedAt": "2025-01-15T10:30:00Z"
+  }
+}
+```
+
+#### 5.18.8 RBAC Requirements
+
+Gateway ServiceAccount needs access to `metrics.k8s.io` API:
+
+```yaml
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+```
+
+#### 5.18.9 Package Layout
+
+```
+server/internal/gateway/
+    metrics/
+        types.go      # TabMetrics, ResourceMetric, NetworkMetric
+        collector.go  # Background collection, K8s client, HTTP fetcher
+```
+
 ---
 
-## 6. File Structure
+## 6. Single-Namespace Project Controller
+
+The gateway controller dynamically creates and manages project pods within a **shared namespace** per environment, rather than creating separate namespaces for each project. This simplifies resource management, monitoring, and RBAC while maintaining environment isolation.
+
+### 6.0 Design Evolution
+
+This section describes the **recommended shared-namespace approach** for controller-managed projects, which supersedes the per-project namespace model referenced in Section 5.
+
+**Relationship to Section 5 (Multi-Project Gateway Mode):**
+
+| Aspect | Section 5 (Gateway Mode) | Section 6 (Controller Model) |
+|--------|--------------------------|------------------------------|
+| Scope | Gateway WebSocket routing | Project lifecycle management |
+| Namespace model | Per-project (legacy) | Shared per environment (recommended) |
+| Project creation | Manual Helm releases | Automated via Admin API |
+| Resource management | External | Controller-managed |
+
+**When to use which model:**
+
+* **Section 6 (Recommended)**: New deployments using the Admin API to dynamically create projects
+* **Section 5 patterns**: Legacy deployments with manually-managed project Helm releases
+
+**Migration path**: Existing per-namespace projects can continue operating. New projects created via the Admin API will use the shared-namespace model. Both models can coexist in the same cluster.
+
+### 6.1 Motivation & Design Goals
+
+* **Simplified namespace management**: Avoid proliferation of namespaces (one per project)
+* **Centralized resource quotas**: Apply limits at the shared namespace level
+* **Easier monitoring**: Single namespace to watch for all project pods
+* **Environment isolation**: Dev and prod projects remain in separate namespaces
+* **Reduced RBAC complexity**: Fewer namespace-scoped roles to manage
+
+### 6.2 Architecture Overview
+
+```
+Admin API Request
+      │
+      │ POST /api/admin/projects { name: "beacon", ... }
+      v
+┌─────────────────────────────────────────────────────────────────┐
+│                    Gateway Pod                                   │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │ Project Controller (reconciliation loop)                  │   │
+│  │                                                           │   │
+│  │  • Watches projects table for pending/creating/deleting  │   │
+│  │  • Creates/updates/deletes K8s resources                 │   │
+│  │  • Polls health endpoints for running projects           │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+      │
+      │ Creates resources
+      v
+┌─────────────────────────────────────────────────────────────────┐
+│              Shared Namespace: kubetty-projects-{env}           │
+│                                                                  │
+│  ┌─────────────────────┐  ┌─────────────────────┐               │
+│  │ kubetty-project-    │  │ kubetty-project-    │               │
+│  │ beacon (Deployment) │  │ alpha (Deployment)  │  ...          │
+│  │                     │  │                     │               │
+│  │ kubetty-project-    │  │ kubetty-project-    │               │
+│  │ beacon (Service)    │  │ alpha (Service)     │               │
+│  └─────────────────────┘  └─────────────────────┘               │
+└─────────────────────────────────────────────────────────────────┘
+      │
+      │ Cluster-scoped RBAC (with env suffix)
+      v
+┌─────────────────────────────────────────────────────────────────┐
+│                    Cluster-Scoped Resources                      │
+│                                                                  │
+│  ClusterRole: kubetty-project-beacon-admin-dev                  │
+│  ClusterRoleBinding: kubetty-project-beacon-admin-dev           │
+│                                                                  │
+│  (Grants cross-namespace access to configured namespaces)       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 6.3 Namespace Model
+
+Projects deploy to environment-specific shared namespaces:
+
+| Environment | Namespace | Usage |
+|-------------|-----------|-------|
+| Development | `kubetty-projects-dev` | Development and testing |
+| Production | `kubetty-projects-prd` | Production workloads |
+
+**Environment Detection**: The controller parses the environment from the namespace suffix:
+```go
+// kubetty-projects-dev → "dev"
+// kubetty-projects-prd → "prd"
+func ParseEnvironment(namespace string) string {
+    parts := strings.Split(namespace, "-")
+    return parts[len(parts)-1]
+}
+```
+
+### 6.4 Resource Naming Convention
+
+All resources use a consistent naming pattern to avoid collisions in the shared namespace:
+
+#### Namespaced Resources (no environment suffix needed)
+
+| Resource | Pattern | Example |
+|----------|---------|---------|
+| Deployment | `kubetty-project-{name}` | `kubetty-project-beacon` |
+| Service | `kubetty-project-{name}` | `kubetty-project-beacon` |
+| PVC | `kubetty-project-{name}-data` | `kubetty-project-beacon-data` |
+| ServiceAccount | `kubetty-project-{name}-sa` | `kubetty-project-beacon-sa` |
+
+#### Cluster-Scoped Resources (include environment suffix)
+
+| Resource | Pattern | Example (dev) | Example (prd) |
+|----------|---------|---------------|---------------|
+| ClusterRole (admin) | `kubetty-project-{name}-admin-{env}` | `kubetty-project-beacon-admin-dev` | `kubetty-project-beacon-admin-prd` |
+| ClusterRole (read) | `kubetty-project-{name}-read-{env}` | `kubetty-project-beacon-read-dev` | `kubetty-project-beacon-read-prd` |
+| ClusterRoleBinding | `kubetty-project-{name}-admin-{env}` | `kubetty-project-beacon-admin-dev` | `kubetty-project-beacon-admin-prd` |
+
+**Why environment suffix for cluster-scoped resources?**
+
+ClusterRoles and ClusterRoleBindings are cluster-wide. Without the environment suffix, dev and prod deployments in the same cluster would have naming collisions.
+
+### 6.5 Resource Types & Lifecycle
+
+The controller creates the following resources for each project:
+
+#### 1. ServiceAccount
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubetty-project-beacon-sa
+  namespace: kubetty-projects-dev
+  labels:
+    app.kubernetes.io/name: kubetty
+    app.kubernetes.io/instance: beacon
+    app.kubernetes.io/managed-by: kubetty-controller
+    kubetty.support.tools/environment: dev
+```
+
+#### 2. PersistentVolumeClaim
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kubetty-project-beacon-data
+  namespace: kubetty-projects-dev
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 50Gi
+```
+
+#### 3. Service
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubetty-project-beacon
+  namespace: kubetty-projects-dev
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    app.kubernetes.io/instance: beacon
+```
+
+#### 4. Deployment
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubetty-project-beacon
+  namespace: kubetty-projects-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: beacon
+  template:
+    spec:
+      serviceAccountName: kubetty-project-beacon-sa
+      containers:
+        - name: kubetty
+          image: harbor.support.tools/kubetty/kubetty:latest
+          env:
+            - name: KUBETTY_MODE
+              value: "project"
+            - name: SESSION_ID
+              value: "{project.SessionID}"
+          # ... resource limits, volume mounts
+```
+
+#### 5. ClusterRole & ClusterRoleBinding
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubetty-project-beacon-admin-dev
+rules:
+  - apiGroups: ["", "apps", "batch"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubetty-project-beacon-admin-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubetty-project-beacon-admin-dev
+subjects:
+  - kind: ServiceAccount
+    name: kubetty-project-beacon-sa
+    namespace: kubetty-projects-dev
+```
+
+### 6.6 RBAC & Cross-Namespace Access
+
+Projects can be granted access to additional namespaces beyond their shared home:
+
+```go
+type Project struct {
+    // ...
+    AdminNamespaces []string  // Full access to these namespaces
+    ReadNamespaces  []string  // Read-only access to these namespaces
+}
+```
+
+**Example**: A project configured with `AdminNamespaces: ["app-staging", "app-production"]` will have ClusterRole rules granting full access to those namespaces.
+
+The ClusterRoleBinding always references the ServiceAccount in the shared namespace:
+```yaml
+subjects:
+  - kind: ServiceAccount
+    name: kubetty-project-beacon-sa
+    namespace: kubetty-projects-dev  # Shared namespace
+```
+
+### 6.7 Configuration Schema
+
+#### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `CONTROLLER_ENABLED` | No | `false` | Enable project controller |
+| `PROJECTS_NAMESPACE` | If enabled | - | Shared namespace for projects |
+| `RESOURCE_PREFIX` | No | `kubetty-project-` | Prefix for all resources |
+| `RECONCILE_INTERVAL` | No | `30s` | How often to reconcile projects |
+| `HEALTH_CHECK_INTERVAL` | No | `60s` | How often to check project health |
+
+#### Helm Values
+
+```yaml
+controller:
+  enabled: true
+  projectsNamespace: "kubetty-projects-dev"
+  resourcePrefix: "kubetty-project-"
+  reconcileInterval: "30s"
+  healthCheckInterval: "60s"
+```
+
+### 6.8 Controller Reconciliation Flow
+
+The controller runs two background loops:
+
+#### Reconciliation Loop (default: 30s)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Reconciliation Loop                       │
+│                                                              │
+│  1. Query projects with status: pending, creating,          │
+│     updating, deleting                                       │
+│                                                              │
+│  2. For each project, call appropriate handler:             │
+│     ┌──────────────┬────────────────────────────────────┐   │
+│     │ Status       │ Handler                             │   │
+│     ├──────────────┼────────────────────────────────────┤   │
+│     │ pending      │ Create all K8s resources           │   │
+│     │ creating     │ Wait for deployment ready          │   │
+│     │ updating     │ Update deployment, wait for ready  │   │
+│     │ deleting     │ Delete resources, hard delete row  │   │
+│     └──────────────┴────────────────────────────────────┘   │
+│                                                              │
+│  3. Update project status and notify gateway                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Health Check Loop (default: 60s)
+
+```
+For each project with status "running":
+  1. GET http://kubetty-project-{name}.{namespace}.svc:8080/api/healthz
+  2. If 200 OK: update LastHealthCheck timestamp
+  3. If error: log warning (don't auto-fail)
+```
+
+### 6.9 Gateway Integration
+
+When a project transitions to `running`, the controller notifies the gateway to register it:
+
+```go
+projCtrl.SetStatusCallback(func(p *projects.Project, status projects.ProjectStatus) {
+    if status == projects.StatusRunning {
+        tabManager.RegisterProject(gatewayconfig.Project{
+            ID:          p.Name,
+            DisplayName: p.DisplayName,
+            Namespace:   cfg.Controller.ProjectsNamespace,
+            Service:     fmt.Sprintf("kubetty-project-%s", p.Name),
+            Port:        8080,
+        })
+    } else if status == projects.StatusDeleting {
+        tabManager.UnregisterProject(p.Name)
+    }
+})
+```
+
+The gateway then routes WebSocket connections to the project service:
+```
+wss://gateway/ws?tab=<tabId>
+    → http://kubetty-project-beacon.kubetty-projects-dev.svc:8080/ws
+```
+
+### 6.10 Environment Separation Strategy
+
+Running both dev and prod in the same cluster:
+
+| Aspect | Dev | Prod |
+|--------|-----|------|
+| Namespace | `kubetty-projects-dev` | `kubetty-projects-prd` |
+| Gateway deployment | Separate Helm release | Separate Helm release |
+| Database | Can share or separate CNPG | Typically separate |
+| ClusterRole suffix | `-dev` | `-prd` |
+| Resource quotas | Lower limits | Higher limits |
+
+**Key isolation points**:
+1. **Namespace isolation**: Pods cannot access each other's namespace without explicit RBAC
+2. **RBAC isolation**: ClusterRoles are environment-specific (no cross-contamination)
+3. **Network isolation**: NetworkPolicies can restrict traffic between environments
+4. **Resource isolation**: Each namespace can have separate ResourceQuotas
+
+---
+
+## 7. File Structure
 
 ```
 kube-tty/
@@ -501,7 +972,7 @@ scripts/
 
 ---
 
-## 7. Code Summary
+## 8. Code Summary
 
 ### Go backend
 
@@ -532,7 +1003,7 @@ Include `scripts/claude_with_log.sh` in the image build to install the logging a
 
 ---
 
-## 8. Kubernetes Integration
+## 9. Kubernetes Integration
 
 * **Image build:** everything (Go binary, React build, CLI tools) is baked into a single image that engineers build locally and push to `harbor.support.tools/kubetty/<repo>:<tag>`.
 * **Helm release:** deployments are managed solely through a private Helm chart kept in this repo; no GitHub Actions or external registry integrations.
@@ -543,7 +1014,7 @@ Include `scripts/claude_with_log.sh` in the image build to install the logging a
 
 ---
 
-## 9. Security Considerations
+## 10. Security Considerations
 
 ### Must have:
 
@@ -561,7 +1032,7 @@ Include `scripts/claude_with_log.sh` in the image build to install the logging a
 
 ---
 
-## 10. Acceptance Criteria
+## 11. Acceptance Criteria
 
 An engineer is **finished** when:
 
@@ -594,7 +1065,7 @@ An engineer is **finished** when:
 
 ---
 
-## 11. Extras for Phase 2 (optional but easy)
+## 12. Extras for Phase 2 (optional but easy)
 
 * Integrate tmux as the PTY backend for richer multi-window workflows.
 * Stream command transcripts into CNPG or object storage for searchable history/auditing.
@@ -604,7 +1075,7 @@ An engineer is **finished** when:
 
 ---
 
-## 12. Deliverables to Engineer
+## 13. Deliverables to Engineer
 
 This doc and:
 

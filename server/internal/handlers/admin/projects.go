@@ -338,10 +338,12 @@ func (h *ProjectHandlers) GetUpgradeInfo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Calculate minutes since last activity
+	// Calculate minutes since last activity (using UTC to avoid time zone issues)
 	var minutesSinceActivity *int
 	if project.LastActivity != nil {
-		minutes := int(time.Since(*project.LastActivity).Minutes())
+		now := time.Now().UTC()
+		lastActivity := project.LastActivity.UTC()
+		minutes := int(now.Sub(lastActivity).Minutes())
 		minutesSinceActivity = &minutes
 	}
 
@@ -439,7 +441,8 @@ func extractProjectID(r *http.Request) (uuid.UUID, error) {
 }
 
 // versionPattern matches semantic versions like v1.2.3, 1.2.3, v0.7.2-rc1, etc.
-var versionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?$`)
+// Stricter pattern prevents command injection: only alphanumeric and hyphens in pre-release
+var versionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[a-zA-Z0-9]+)?$`)
 
 // isValidVersion checks if a string is a valid semantic version.
 func isValidVersion(version string) bool {

@@ -1151,6 +1151,7 @@ button.danger:hover:not(:disabled) {
 }
 
 .admin-table .link-button.danger {
+  background: none;
   color: #ef4444;
 }
 

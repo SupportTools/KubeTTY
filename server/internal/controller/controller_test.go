@@ -156,6 +156,19 @@ func (m *mockStore) UpdateHealthCheck(ctx context.Context, id uuid.UUID, podIP s
 	return projects.ErrProjectNotFound
 }
 
+func (m *mockStore) UpdateLastActivity(ctx context.Context, projectName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range m.projects {
+		if p.Name == projectName {
+			now := time.Now()
+			p.LastActivity = &now
+			return nil
+		}
+	}
+	return projects.ErrProjectNotFound
+}
+
 func (m *mockStore) ListByStatuses(ctx context.Context, statuses []projects.ProjectStatus) ([]projects.Project, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

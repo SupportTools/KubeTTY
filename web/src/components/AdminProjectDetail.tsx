@@ -5,6 +5,7 @@ import {
   AdminProjectStatus,
   ProjectStatusResponse,
   DeploymentStatus,
+  UpgradeInfoResponse,
 } from "../types";
 import { parseErrorResponse } from "../utils/errorParser";
 
@@ -48,6 +49,10 @@ const AdminProjectDetail = ({
   const [deployment, setDeployment] = useState<DeploymentStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [upgradeInfo, setUpgradeInfo] = useState<UpgradeInfoResponse | null>(null);
+  const [newVersion, setNewVersion] = useState("");
+  const [upgrading, setUpgrading] = useState(false);
 
   const loadStatus = useCallback(async () => {
     setLoading(true);
@@ -86,6 +91,61 @@ const AdminProjectDetail = ({
 
   const handleRestart = () => {
     onRestart(project.id);
+  };
+
+  const handleUpgradeClick = async () => {
+    try {
+      const res = await authFetch(`/api/admin/projects/${project.id}/upgrade-info`);
+      if (!res.ok) {
+        throw new Error(await parseErrorResponse(res));
+      }
+      const data = (await res.json()) as UpgradeInfoResponse;
+      setUpgradeInfo(data);
+      setShowUpgradeModal(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load upgrade info");
+    }
+  };
+
+  const handleUpgradeConfirm = async () => {
+    if (!newVersion.trim()) {
+      setError("Please enter a version number");
+      return;
+    }
+
+    setUpgrading(true);
+    setError(null);
+    try {
+      const res = await authFetch(`/api/admin/projects/${project.id}/upgrade`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageTag: newVersion.trim() }),
+      });
+      if (!res.ok) {
+        throw new Error(await parseErrorResponse(res));
+      }
+      setShowUpgradeModal(false);
+      setNewVersion("");
+      await loadStatus();
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to upgrade project");
+    } finally {
+      setUpgrading(false);
+    }
+  };
+
+  const handleUpgradeCancel = () => {
+    setShowUpgradeModal(false);
+    setNewVersion("");
+    setUpgradeInfo(null);
+    setError(null);
+  };
+
+  const formatActivityTime = (dateStr?: string) => {
+    if (!dateStr) return "Never";
+    const date = new Date(dateStr);
+    return date.toLocaleString();
   };
 
   return (
@@ -282,6 +342,10 @@ const AdminProjectDetail = ({
                 <label>Last Health Check</label>
                 <span>{formatDate(project.lastHealthCheck)}</span>
               </div>
+              <div className="detail-item">
+                <label>Last Activity</label>
+                <span>{formatDate(project.lastActivity)}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -296,6 +360,11 @@ const AdminProjectDetail = ({
           >
             Refresh
           </button>
+          {project.status === "running" && (
+            <button className="primary-button" onClick={handleUpgradeClick}>
+              Upgrade
+            </button>
+          )}
           {(project.status === "running" || project.status === "failed") && (
             <button className="warning-button" onClick={handleRestart}>
               Restart
@@ -307,6 +376,78 @@ const AdminProjectDetail = ({
             </button>
           )}
         </div>
+
+        {showUpgradeModal && upgradeInfo && (
+          <div className="modal-backdrop" onClick={handleUpgradeCancel}>
+            <div className="modal upgrade-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <h2>Upgrade Project</h2>
+                <button className="icon-button" onClick={handleUpgradeCancel}>
+                  &times;
+                </button>
+              </div>
+              <div className="modal-body">
+                {error && <p className="error">{error}</p>}
+
+                <div className="upgrade-info">
+                  <div className="info-item">
+                    <label>Current Version:</label>
+                    <span className="mono">{upgradeInfo.currentVersion}</span>
+                  </div>
+                  <div className="info-item">
+                    <label>Last Activity:</label>
+                    <span>{formatActivityTime(upgradeInfo.lastActivity)}</span>
+                  </div>
+                  {upgradeInfo.minutesSinceActivity !== undefined && (
+                    <div className="info-item">
+                      <label>Time Since Activity:</label>
+                      <span>
+                        {upgradeInfo.minutesSinceActivity < 60
+                          ? `${upgradeInfo.minutesSinceActivity} minutes`
+                          : `${Math.floor(upgradeInfo.minutesSinceActivity / 60)} hours`}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {upgradeInfo.minutesSinceActivity !== undefined && upgradeInfo.minutesSinceActivity < 60 && (
+                  <div className="warning-box">
+                    <strong>⚠️ Warning:</strong> This project was active within the last hour.
+                    Upgrading will restart the pod and terminate any running processes.
+                  </div>
+                )}
+
+                <div className="form-group">
+                  <label htmlFor="newVersion">New Version:</label>
+                  <input
+                    id="newVersion"
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g., v1.2.3 or 1.2.3"
+                    value={newVersion}
+                    onChange={(e) => setNewVersion(e.target.value)}
+                    disabled={upgrading}
+                  />
+                  <small className="form-help">
+                    Enter a semantic version (e.g., v1.2.3, 1.2.3, or v0.5.1-rc1)
+                  </small>
+                </div>
+              </div>
+              <div className="modal-actions">
+                <button className="secondary" onClick={handleUpgradeCancel} disabled={upgrading}>
+                  Cancel
+                </button>
+                <button
+                  className="primary-button"
+                  onClick={handleUpgradeConfirm}
+                  disabled={upgrading || !newVersion.trim()}
+                >
+                  {upgrading ? "Upgrading..." : "Upgrade"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

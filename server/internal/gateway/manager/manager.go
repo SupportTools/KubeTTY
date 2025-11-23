@@ -20,10 +20,16 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
 )
 
+// ProjectStore defines methods for updating project activity.
+type ProjectStore interface {
+	UpdateLastActivity(ctx context.Context, projectName string) error
+}
+
 // Manager orchestrates tab creation, relay lifecycle, and persistence.
 type Manager struct {
 	projects          map[string]gatewayconfig.Project
 	store             tabs.Store
+	projectStore      ProjectStore // Store for updating project activity timestamps
 	dialer            *websocket.Dialer
 	mu                sync.Mutex
 	tabs              map[string]*tabEntry
@@ -105,8 +111,14 @@ func NewWithConfig(cat gatewayconfig.Catalog, store tabs.Store, cfg ManagerConfi
 // This is used by the controller to register projects that are created via the API.
 func (m *Manager) RegisterProject(project gatewayconfig.Project) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.projects[project.ID] = project
+	m.mu.Unlock()
+
+	// Add to health checker for monitoring
+	if m.healthChecker != nil {
+		m.healthChecker.AddProject(project)
+	}
+
 	log.Printf("gateway: registered project %q (%s:%d)", project.ID, project.Namespace, project.Port)
 }
 
@@ -114,8 +126,14 @@ func (m *Manager) RegisterProject(project gatewayconfig.Project) {
 // Existing tabs for this project are not affected until they're closed.
 func (m *Manager) UnregisterProject(projectID string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.projects, projectID)
+	m.mu.Unlock()
+
+	// Remove from health checker
+	if m.healthChecker != nil {
+		m.healthChecker.RemoveProject(projectID)
+	}
+
 	log.Printf("gateway: unregistered project %q", projectID)
 }
 
@@ -357,14 +375,25 @@ func (m *Manager) watchActivity(ctx context.Context, tabID string, entry *tabEnt
 // Safe to call even if tab has been deleted - will simply be a no-op.
 func (m *Manager) recordActivity(tabID string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	entry, ok := m.tabs[tabID]
 	if !ok {
 		// Tab was deleted, activity signal is stale - ignore safely
+		m.mu.Unlock()
 		return
 	}
 	entry.lastActivity = time.Now()
 	entry.warned = false // Clear warning state on activity
+	projectID := entry.project.ID
+	m.mu.Unlock()
+
+	// Update project activity in database (async, don't block on errors)
+	if m.projectStore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := m.projectStore.UpdateLastActivity(ctx, projectID); err != nil {
+			log.Printf("gateway/manager: failed to update project activity for %s: %v", projectID, err)
+		}
+	}
 }
 
 func (m *Manager) watchStatus(ctx context.Context, tabID string, entry *tabEntry, ch <-chan relay.StatusEvent) {
@@ -412,6 +441,11 @@ func (m *Manager) SetMetricsCallback(cb func(string, metrics.TabMetrics)) {
 	m.metricsCb = cb
 }
 
+// SetProjectStore sets the project store for updating project activity timestamps.
+func (m *Manager) SetProjectStore(store ProjectStore) {
+	m.projectStore = store
+}
+
 // StartMetricsCollector begins the background metrics collection goroutine.
 func (m *Manager) StartMetricsCollector() {
 	if !m.metricsEnabled {
@@ -447,6 +481,7 @@ func (m *Manager) handleMetricsUpdate(tabID string, tabMetrics metrics.TabMetric
 // registerTabForMetrics registers a tab with the metrics collector.
 func (m *Manager) registerTabForMetrics(tabID string, entry *tabEntry) {
 	if m.metricsCollector == nil {
+		log.Printf("DEBUG: metricsCollector is nil, skipping registration for tab %s", tabID)
 		return
 	}
 
@@ -457,15 +492,22 @@ func (m *Manager) registerTabForMetrics(tabID string, entry *tabEntry) {
 		entry.project.Port,
 	)
 
+	log.Printf("DEBUG: registerTabForMetrics - project=%s limits: cpuMillicores=%d memoryBytes=%d maxTabsPerClient=%d",
+		entry.project.ID, entry.project.Limits.CPUMillicores, entry.project.Limits.MemoryBytes, entry.project.Limits.MaxTabsPerClient)
+
 	info := metrics.TabInfo{
 		TabID:         tabID,
 		ProjectID:     entry.project.ID,
-		PodName:       entry.project.Service, // TODO: Get actual pod name from K8s
+		ProjectName:   entry.project.ID, // Used for label selector: kubetty.io/project=<name>
 		Namespace:     entry.project.Namespace,
 		DownstreamURI: downstreamBase,
 		CPULimit:      entry.project.Limits.CPUMillicores,
 		MemoryLimit:   entry.project.Limits.MemoryBytes,
 	}
+
+	log.Printf("DEBUG: registering TabInfo - tabId=%s projectName=%s namespace=%s cpuLimit=%d memLimit=%d downstreamURI=%s",
+		info.TabID, info.ProjectName, info.Namespace, info.CPULimit, info.MemoryLimit, info.DownstreamURI)
+
 	m.metricsCollector.RegisterTab(info)
 }
 

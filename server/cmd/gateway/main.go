@@ -26,6 +26,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	"github.com/supporttools/KubeTTY/server/internal/config"
 	"github.com/supporttools/KubeTTY/server/internal/controller"
@@ -133,16 +135,35 @@ func main() {
 			log.Fatalf("project store pool: %v", err)
 		}
 		return pool
-	}())
+	}(), cfg.Controller.ProjectsNamespace)
 
-	// Start project controller (manages K8s resources)
-	projCtrl, err = controller.New(controller.DefaultConfig(), projectStore)
-	if err != nil {
-		log.Printf("warn: project controller disabled: %v", err)
+	// Start project controller (manages K8s resources) if enabled
+	if cfg.Controller.Enabled && cfg.Controller.ProjectsNamespace != "" {
+		ctrlCfg := controller.Config{
+			ReconcileInterval:   cfg.Controller.ReconcileInterval,
+			HealthCheckInterval: cfg.Controller.HealthCheckInterval,
+			EnvSecretName:       cfg.Controller.EnvSecretName,
+			ResourceConfig: controller.ResourceConfig{
+				Namespace:        cfg.Controller.ProjectsNamespace,
+				Prefix:           cfg.Controller.ResourcePrefix,
+				Env:              cfg.Controller.ParseEnvironment(),
+				ImagePullSecrets: cfg.Controller.ImagePullSecrets,
+			},
+		}
+		projCtrl, err = controller.New(ctrlCfg, projectStore)
+		if err != nil {
+			log.Printf("warn: project controller disabled: %v", err)
+		} else {
+			projCtrl.Start(ctx)
+			defer projCtrl.Stop()
+			log.Printf("Project controller started (namespace=%s, prefix=%s, env=%s)",
+				ctrlCfg.ResourceConfig.Namespace,
+				ctrlCfg.ResourceConfig.Prefix,
+				ctrlCfg.ResourceConfig.Env)
+		}
 	} else {
-		projCtrl.Start(ctx)
-		defer projCtrl.Stop()
-		log.Println("Project controller started")
+		log.Printf("Project controller disabled (enabled=%v, namespace=%q)",
+			cfg.Controller.Enabled, cfg.Controller.ProjectsNamespace)
 	}
 
 	// Always initialize tabManager to support both static catalog and dynamic projects
@@ -164,6 +185,11 @@ func main() {
 	})
 	defer tabManager.Stop()
 
+	// Set project store for activity tracking
+	if projectStore != nil {
+		tabManager.SetProjectStore(projectStore)
+	}
+
 	// Register running projects from the database
 	if projectStore != nil {
 		runningProjects, err := projectStore.List(ctx, projects.ListFilter{Status: "running"})
@@ -177,6 +203,24 @@ func main() {
 					serviceName = projects.ComputeServiceName(p.Name)
 					log.Printf("warn: project %q missing ServiceName, using computed: %s", p.Name, serviceName)
 				}
+
+				// Parse CPU and memory limits for metrics percentage calculation
+				var cpuMillicores, memoryBytes int64
+				if p.CPULimit != "" {
+					if qty, err := resource.ParseQuantity(p.CPULimit); err == nil {
+						cpuMillicores = qty.MilliValue()
+					} else {
+						log.Printf("warn: project %q has invalid CPULimit %q: %v", p.Name, p.CPULimit, err)
+					}
+				}
+				if p.MemoryLimit != "" {
+					if qty, err := resource.ParseQuantity(p.MemoryLimit); err == nil {
+						memoryBytes = qty.Value()
+					} else {
+						log.Printf("warn: project %q has invalid MemoryLimit %q: %v", p.Name, p.MemoryLimit, err)
+					}
+				}
+
 				tabManager.RegisterProject(gatewayconfig.Project{
 					ID:          p.Name,
 					DisplayName: p.DisplayName,
@@ -188,6 +232,8 @@ func main() {
 					Limits: gatewayconfig.ProjectLimits{
 						MaxTabsPerClient: p.MaxTabsPerClient,
 						MaxTabsTotal:     p.MaxTabsTotal,
+						CPUMillicores:    cpuMillicores,
+						MemoryBytes:      memoryBytes,
 					},
 				})
 			}
@@ -213,6 +259,24 @@ func main() {
 					serviceName = projects.ComputeServiceName(p.Name)
 					log.Printf("warn: project %q missing ServiceName, using computed: %s", p.Name, serviceName)
 				}
+
+				// Parse CPU and memory limits for metrics percentage calculation
+				var cpuMillicores, memoryBytes int64
+				if p.CPULimit != "" {
+					if qty, err := resource.ParseQuantity(p.CPULimit); err == nil {
+						cpuMillicores = qty.MilliValue()
+					} else {
+						log.Printf("warn: project %q has invalid CPULimit %q: %v", p.Name, p.CPULimit, err)
+					}
+				}
+				if p.MemoryLimit != "" {
+					if qty, err := resource.ParseQuantity(p.MemoryLimit); err == nil {
+						memoryBytes = qty.Value()
+					} else {
+						log.Printf("warn: project %q has invalid MemoryLimit %q: %v", p.Name, p.MemoryLimit, err)
+					}
+				}
+
 				tabManager.RegisterProject(gatewayconfig.Project{
 					ID:          p.Name,
 					DisplayName: p.DisplayName,
@@ -224,6 +288,8 @@ func main() {
 					Limits: gatewayconfig.ProjectLimits{
 						MaxTabsPerClient: p.MaxTabsPerClient,
 						MaxTabsTotal:     p.MaxTabsTotal,
+						CPUMillicores:    cpuMillicores,
+						MemoryBytes:      memoryBytes,
 					},
 				})
 			} else if status == projects.StatusDeleting || status == projects.StatusDeleted {
@@ -287,6 +353,10 @@ func main() {
 	// Admin API handlers for project management (requires auth when enabled)
 	if srv.projectStore != nil && srv.projCtrl != nil {
 		adminHandlers := handlers_admin.NewProjectHandlers(srv.projectStore, srv.projCtrl)
+		// Set callback to unregister project from tabManager when deleted
+		adminHandlers.SetDeleteCallback(func(projectName string) {
+			tabManager.UnregisterProject(projectName)
+		})
 		if srv.authEnabled() {
 			mux.Handle("GET /api/admin/projects", requireAuth(http.HandlerFunc(adminHandlers.ListProjects)))
 			mux.Handle("POST /api/admin/projects", requireAuth(http.HandlerFunc(adminHandlers.CreateProject)))

@@ -1,0 +1,17 @@
+{{- if and .Values.dataPVC.enabled .Values.dataPVC.create }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ default (printf "%s-data" (include "kubetty-project.fullname" .)) .Values.dataPVC.name }}
+  labels:
+    {{- include "kubetty-project.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.dataPVC.accessModes | nindent 4 }}
+  {{- if .Values.dataPVC.storageClass }}
+  storageClassName: {{ .Values.dataPVC.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.dataPVC.size }}
+{{- end }}

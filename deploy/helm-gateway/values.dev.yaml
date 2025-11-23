@@ -1,0 +1,105 @@
+# KubeTTY Gateway - Development Environment
+# Deploy to kubetty-gateway-dev namespace (mirrors kubetty-shared in prod)
+
+image:
+  repository: harbor.support.tools/kubetty/kubetty
+  tag: "dev"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - harbor-supporttools
+
+deploymentId: kubetty-gateway-dev
+
+# Debug logging for development
+env:
+  LOG_LEVEL: debug
+
+# Authentication - disabled for easier dev testing
+auth:
+  mode: disabled
+  jwtSecretSecret:
+    name: "kubetty-gateway-dev-auth"
+    key: jwt-secret
+  issuer: kubetty-dev
+  accessTTL: 1h
+  refreshTTL: 720h
+  cookieDomain: ""
+  cookieSecure: false
+
+# Dev project catalog - points to dev project in kubetty-project-dev namespace
+catalog:
+  inline: |
+    projects:
+      - id: dev-project
+        displayName: "Dev Project"
+        namespace: kubetty-project-dev
+        service: project
+        port: 8080
+
+# Database - uses existing prod CNPG cluster (kubetty-shared)
+cnpg:
+  host: kubetty-shared-rw.kubetty-shared.svc.a1-ops-prd.local
+  port: 5432
+  database: kubetty
+  userSecret: kubetty-postgres-user
+  usernameKey: username
+  passwordKey: password
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# Dev ingress with separate hostname
+ingress:
+  enabled: true
+  className: nginx
+  tlsSecret: star-support-tools-tls
+  hosts:
+    - host: kubetty-dev.support.tools
+      path: /
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+
+serviceAccount:
+  create: true
+  name: ""
+
+rbac:
+  create: true
+  projectNamespaces:
+    - kubetty-project-dev
+  # Suffix for cluster-scoped resources to avoid conflicts with prod
+  clusterResourceSuffix: "-dev"
+
+# Project controller for dev
+controller:
+  enabled: true
+  # Target namespace for dynamically managed projects (single-namespace mode)
+  projectsNamespace: "kubetty-projects-dev"
+  # Prefix for all Kubernetes resources created by controller
+  resourcePrefix: "kubetty-project-"
+  reconcileInterval: 30s
+  healthCheckInterval: 60s
+  envSecretName: env-secrets
+
+# Lower resources for dev
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "50m"
+  limits:
+    memory: "256Mi"
+    cpu: "250m"
+
+podAnnotations: {}
+
+prometheus:
+  scrape:
+    enabled: true
+    path: /metrics
+    port: 8080
+  podMonitor:
+    enabled: false

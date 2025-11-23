@@ -1,0 +1,14 @@
+apiVersion: v2
+name: kubetty-gateway
+version: 0.7.2
+appVersion: "0.7.2"
+description: KubeTTY Gateway - Multi-project tabbed terminal interface with authentication
+keywords:
+  - kubetty
+  - gateway
+  - terminal
+  - kubernetes
+home: https://github.com/supporttools/KubeTTY
+maintainers:
+  - name: SupportTools
+    url: https://github.com/supporttools

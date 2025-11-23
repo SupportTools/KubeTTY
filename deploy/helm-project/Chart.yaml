@@ -1,0 +1,15 @@
+apiVersion: v2
+name: kubetty-project
+version: 0.7.2
+appVersion: "0.7.2"
+description: KubeTTY Project Pod - Single-user terminal environment accessed via gateway
+keywords:
+  - kubetty
+  - project
+  - terminal
+  - kubernetes
+  - pty
+home: https://github.com/supporttools/KubeTTY
+maintainers:
+  - name: SupportTools
+    url: https://github.com/supporttools

@@ -1,0 +1,112 @@
+{{- if .Values.rbac.create }}
+{{- $fullName := include "kubetty-gateway.fullname" . }}
+{{- $suffix := .Values.rbac.clusterResourceSuffix | default "" }}
+{{- $saName := include "kubetty-gateway.serviceAccountName" . }}
+{{- $labels := include "kubetty-gateway.labels" . }}
+
+{{/* ClusterRole for gateway to access project pods across namespaces */}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullName }}{{ $suffix }}
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  # Gateway: read pods/services for WebSocket proxy
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create"]
+  # Gateway: read pod metrics from metrics-server
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+{{- if .Values.controller.enabled }}
+---
+{{/* ClusterRole for project controller to manage namespaces and resources */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullName }}-controller{{ $suffix }}
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  # Controller: manage namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Controller: manage core resources in any namespace
+  - apiGroups: [""]
+    resources: ["services", "persistentvolumeclaims", "serviceaccounts"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Controller: manage deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Controller: manage namespace-scoped RBAC
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Controller: manage cluster-scoped RBAC for project service accounts
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["create", "get", "list", "update", "delete"]
+  # Controller: read pods for health checks
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullName }}-controller{{ $suffix }}
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullName }}-controller{{ $suffix }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullName }}{{ $suffix }}
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullName }}{{ $suffix }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ .Release.Namespace }}
+
+{{/* Per-namespace RoleBindings for project namespaces */}}
+{{- range .Values.rbac.projectNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullName }}-access
+  namespace: {{ . }}
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullName }}{{ $suffix }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

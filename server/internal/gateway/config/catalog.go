@@ -39,10 +39,12 @@ type HealthCheck struct {
 	TimeoutSeconds int    `yaml:"timeoutSeconds" json:"timeoutSeconds"`
 }
 
-// ProjectLimits allows overriding per-project concurrency controls.
+// ProjectLimits allows overriding per-project concurrency controls and resource limits.
 type ProjectLimits struct {
-	MaxTabsPerClient int `yaml:"maxTabsPerClient" json:"maxTabsPerClient"`
-	MaxTabsTotal     int `yaml:"maxTabsTotal" json:"maxTabsTotal"`
+	MaxTabsPerClient int   `yaml:"maxTabsPerClient" json:"maxTabsPerClient"`
+	MaxTabsTotal     int   `yaml:"maxTabsTotal" json:"maxTabsTotal"`
+	CPUMillicores    int64 `yaml:"cpuMillicores" json:"cpuMillicores"` // CPU limit in millicores (e.g., 1000 = 1 CPU)
+	MemoryBytes      int64 `yaml:"memoryBytes" json:"memoryBytes"`     // Memory limit in bytes
 }
 
 // LoadCatalog reads a YAML/JSON file from disk and validates it.

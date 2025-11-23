@@ -7,7 +7,7 @@ SHELL := /bin/bash
 IMAGE ?= harbor.support.tools/kubetty/kubetty
 TAG ?= dev
 REGISTRY_IMAGE := $(IMAGE):$(TAG)
-GO_VERSION ?= 1.23.2
+GO_VERSION ?= 1.24.3
 NODE_MAJOR ?= 20
 COVERAGE_THRESHOLD ?= 60
 
@@ -291,6 +291,123 @@ deploy-prod: check-docker helm-lint
 	@echo -e "$(GREEN)==> Production deployment complete$(NC)"
 
 # =============================================================================
+# Development Environment Targets (Kubernetes Cluster)
+# Mirrors production architecture:
+#   - Gateway in kubetty-gateway-dev (mirrors kubetty-shared)
+#   - Project in kubetty-project-dev (mirrors kubetty-beacon-support)
+# =============================================================================
+DEV_GATEWAY_NAMESPACE ?= kubetty-gateway-dev
+DEV_PROJECT_NAMESPACE ?= kubetty-project-dev
+DEV_IMAGE_TAG ?= dev
+
+.PHONY: dev-build dev-push dev-deploy dev-deploy-gateway dev-deploy-project dev-status dev-logs dev-shell dev-web
+
+## dev-build: Build Docker image with dev tag
+dev-build:
+	@echo -e "$(BLUE)==> Building dev image$(NC)"
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg NODE_MAJOR=$(NODE_MAJOR) -t $(IMAGE):$(DEV_IMAGE_TAG) .
+	@echo -e "$(GREEN)==> Dev image built: $(IMAGE):$(DEV_IMAGE_TAG)$(NC)"
+
+## dev-push: Push dev image to registry
+dev-push: dev-build
+	@echo -e "$(BLUE)==> Pushing dev image$(NC)"
+	docker push $(IMAGE):$(DEV_IMAGE_TAG)
+	@echo -e "$(GREEN)==> Dev image pushed: $(IMAGE):$(DEV_IMAGE_TAG)$(NC)"
+
+## dev-deploy: Build, push, and deploy both gateway and project to dev namespaces
+dev-deploy: dev-push dev-deploy-gateway dev-deploy-project
+	@echo -e "$(GREEN)==> Dev deployment complete$(NC)"
+	@echo -e "Gateway: https://kubetty-dev.support.tools"
+
+## dev-deploy-gateway: Deploy gateway to kubetty-gateway-dev namespace
+dev-deploy-gateway:
+	@echo -e "$(BLUE)==> Creating dev namespaces if needed$(NC)"
+	kubectl create namespace $(DEV_GATEWAY_NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
+	kubectl create namespace $(DEV_PROJECT_NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
+	@echo -e "$(BLUE)==> Copying secrets from kubetty-shared$(NC)"
+	kubectl get secret kubetty-postgres-user -n kubetty-shared -o yaml | \
+		sed 's/namespace: kubetty-shared/namespace: $(DEV_GATEWAY_NAMESPACE)/' | \
+		kubectl apply -n $(DEV_GATEWAY_NAMESPACE) --force -f -
+	kubectl get secret harbor-supporttools -n kubetty-shared -o yaml | \
+		sed 's/namespace: kubetty-shared/namespace: $(DEV_GATEWAY_NAMESPACE)/' | \
+		kubectl apply -n $(DEV_GATEWAY_NAMESPACE) --force -f -
+	@echo -e "$(BLUE)==> Creating dev auth secret (dummy, auth disabled)$(NC)"
+	kubectl create secret generic kubetty-gateway-dev-auth -n $(DEV_GATEWAY_NAMESPACE) \
+		--from-literal=jwt-secret=dev-dummy-secret-not-used --dry-run=client -o yaml | \
+		kubectl apply -n $(DEV_GATEWAY_NAMESPACE) -f -
+	@echo -e "$(BLUE)==> Deploying gateway to $(DEV_GATEWAY_NAMESPACE)$(NC)"
+	helm upgrade --install gateway deploy/helm-gateway \
+		-n $(DEV_GATEWAY_NAMESPACE) \
+		-f deploy/helm-gateway/values.dev.yaml \
+		--set image.tag=$(DEV_IMAGE_TAG)
+	@echo -e "$(GREEN)==> Gateway deployed to $(DEV_GATEWAY_NAMESPACE)$(NC)"
+
+## dev-deploy-project: Deploy project pod to kubetty-project-dev namespace
+dev-deploy-project:
+	@echo -e "$(BLUE)==> Creating project dev namespace if needed$(NC)"
+	kubectl create namespace $(DEV_PROJECT_NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
+	@echo -e "$(BLUE)==> Copying image pull secret$(NC)"
+	kubectl get secret harbor-supporttools -n kubetty-shared -o yaml | \
+		sed 's/namespace: kubetty-shared/namespace: $(DEV_PROJECT_NAMESPACE)/' | \
+		kubectl apply -n $(DEV_PROJECT_NAMESPACE) --force -f -
+	@echo -e "$(BLUE)==> Deploying project to $(DEV_PROJECT_NAMESPACE)$(NC)"
+	helm upgrade --install project deploy/helm-project \
+		-n $(DEV_PROJECT_NAMESPACE) \
+		-f deploy/helm-project/values.dev.yaml \
+		--set image.tag=$(DEV_IMAGE_TAG)
+	@echo -e "$(GREEN)==> Project deployed to $(DEV_PROJECT_NAMESPACE)$(NC)"
+
+## dev-status: Show status of dev deployments
+dev-status:
+	@echo -e "$(BLUE)==> Gateway namespace ($(DEV_GATEWAY_NAMESPACE))$(NC)"
+	@kubectl get pods -n $(DEV_GATEWAY_NAMESPACE) -o wide
+	@echo ""
+	@kubectl get svc -n $(DEV_GATEWAY_NAMESPACE)
+	@echo ""
+	@kubectl get ingress -n $(DEV_GATEWAY_NAMESPACE)
+	@echo ""
+	@echo -e "$(BLUE)==> Project namespace ($(DEV_PROJECT_NAMESPACE))$(NC)"
+	@kubectl get pods -n $(DEV_PROJECT_NAMESPACE) -o wide
+	@echo ""
+	@kubectl get svc -n $(DEV_PROJECT_NAMESPACE)
+
+## dev-logs: Show logs from dev gateway
+dev-logs:
+	kubectl logs -n $(DEV_GATEWAY_NAMESPACE) -l app.kubernetes.io/name=kubetty-gateway -f
+
+## dev-logs-project: Show logs from dev project
+dev-logs-project:
+	kubectl logs -n $(DEV_PROJECT_NAMESPACE) -l app.kubernetes.io/name=kubetty-project -f
+
+## dev-shell: Shell into dev gateway pod
+dev-shell:
+	kubectl exec -it -n $(DEV_GATEWAY_NAMESPACE) deploy/gateway -- /bin/sh
+
+## dev-restart: Restart dev deployments to pick up new image
+dev-restart:
+	@echo -e "$(BLUE)==> Restarting dev deployments$(NC)"
+	kubectl rollout restart deployment -n $(DEV_GATEWAY_NAMESPACE) gateway
+	kubectl rollout restart deployment -n $(DEV_PROJECT_NAMESPACE) project
+	@echo -e "$(GREEN)==> Restart initiated$(NC)"
+
+## dev-web: Run web dev server with hot reload (for local frontend dev)
+dev-web:
+	@echo -e "$(BLUE)==> Starting Vite dev server$(NC)"
+	cd web && npm install && npm run dev
+
+## dev-destroy: Remove dev deployment (destructive!)
+dev-destroy:
+	@echo -e "$(YELLOW)==> WARNING: Removing dev deployment$(NC)"
+	@read -p "Are you sure? [y/N] " confirm; \
+	if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
+		helm uninstall gateway -n $(DEV_GATEWAY_NAMESPACE) || true; \
+		helm uninstall project -n $(DEV_PROJECT_NAMESPACE) || true; \
+		echo -e "$(GREEN)==> Dev deployment removed$(NC)"; \
+	else \
+		echo "Cancelled"; \
+	fi
+
+# =============================================================================
 # Utility Targets
 # =============================================================================
 .PHONY: clean clean-docker bump info help
@@ -364,6 +481,9 @@ help:
 	@echo ""
 	@echo -e "$(GREEN)Deployment:$(NC)"
 	@grep -E '^## deploy-' $(MAKEFILE_LIST) | sed 's/## /  /' | sed 's/: /\t- /'
+	@echo ""
+	@echo -e "$(GREEN)Development (Kubernetes):$(NC)"
+	@grep -E '^## dev-' $(MAKEFILE_LIST) | sed 's/## /  /' | sed 's/: /\t- /'
 	@echo ""
 	@echo -e "$(GREEN)Utility:$(NC)"
 	@grep -E '^## (clean|bump|info|help)' $(MAKEFILE_LIST) | sed 's/## /  /' | sed 's/: /\t- /'

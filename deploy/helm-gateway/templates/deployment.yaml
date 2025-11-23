@@ -1,0 +1,134 @@
+{{/*
+Validation: Ensure required configuration is provided
+*/}}
+{{- if not .Values.cnpg.host }}
+  {{- fail "cnpg.host is required. Please specify the PostgreSQL host." }}
+{{- end }}
+{{- if not .Values.cnpg.userSecret }}
+  {{- fail "cnpg.userSecret is required. Please create a Kubernetes secret with database credentials." }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels:
+    {{- include "kubetty-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kubetty-gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubetty-gateway.selectorLabels" . | nindent 8 }}
+      {{- if or .Values.podAnnotations .Values.prometheus.scrape.enabled }}
+      annotations:
+        {{- range $k, $v := .Values.podAnnotations }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+        {{- if .Values.prometheus.scrape.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: {{ .Values.prometheus.scrape.path | quote }}
+        prometheus.io/port: {{ .Values.prometheus.scrape.port | quote }}
+        {{- end }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kubetty-gateway.serviceAccountName" . }}
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: KUBETTY_MODE
+              value: "gateway"
+            - name: DEPLOYMENT_ID
+              value: {{ .Values.deploymentId | quote }}
+            # Database configuration
+            - name: CNPG_HOST
+              value: {{ .Values.cnpg.host | quote }}
+            - name: CNPG_PORT
+              value: {{ .Values.cnpg.port | quote }}
+            - name: CNPG_DATABASE
+              value: {{ .Values.cnpg.database | quote }}
+            - name: CNPG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cnpg.userSecret }}
+                  key: {{ .Values.cnpg.usernameKey }}
+            - name: CNPG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cnpg.userSecret }}
+                  key: {{ .Values.cnpg.passwordKey }}
+            # Authentication
+            - name: AUTH_MODE
+              value: {{ .Values.auth.mode | quote }}
+            {{- if .Values.auth.jwtSecret }}
+            - name: AUTH_JWT_SECRET
+              value: {{ .Values.auth.jwtSecret | quote }}
+            {{- else if .Values.auth.jwtSecretSecret.name }}
+            - name: AUTH_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.jwtSecretSecret.name }}
+                  key: {{ .Values.auth.jwtSecretSecret.key }}
+            {{- end }}
+            - name: AUTH_ISSUER
+              value: {{ .Values.auth.issuer | quote }}
+            - name: AUTH_ACCESS_TTL
+              value: {{ .Values.auth.accessTTL | quote }}
+            - name: AUTH_REFRESH_TTL
+              value: {{ .Values.auth.refreshTTL | quote }}
+            - name: AUTH_COOKIE_DOMAIN
+              value: {{ .Values.auth.cookieDomain | quote }}
+            - name: AUTH_COOKIE_SECURE
+              value: {{ ternary "true" "false" .Values.auth.cookieSecure | quote }}
+            {{- if or .Values.catalog.inline .Values.catalog.existingConfigMap }}
+            - name: PROJECT_CATALOG_PATH
+              value: "{{ .Values.catalog.mountPath }}/{{ .Values.catalog.fileName }}"
+            {{- end }}
+            # Project controller configuration
+            {{- if .Values.controller.enabled }}
+            - name: CONTROLLER_ENABLED
+              value: {{ .Values.controller.enabled | quote }}
+            - name: PROJECTS_NAMESPACE
+              value: {{ .Values.controller.projectsNamespace | quote }}
+            - name: RESOURCE_PREFIX
+              value: {{ .Values.controller.resourcePrefix | quote }}
+            - name: RECONCILE_INTERVAL
+              value: {{ .Values.controller.reconcileInterval | quote }}
+            - name: HEALTH_CHECK_INTERVAL
+              value: {{ .Values.controller.healthCheckInterval | quote }}
+            - name: ENV_SECRET_NAME
+              value: {{ .Values.controller.envSecretName | quote }}
+            {{- end }}
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          {{- if or .Values.catalog.inline .Values.catalog.existingConfigMap }}
+          volumeMounts:
+            - name: catalog
+              mountPath: {{ .Values.catalog.mountPath }}
+              readOnly: true
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if or .Values.catalog.inline .Values.catalog.existingConfigMap }}
+      volumes:
+        - name: catalog
+          configMap:
+            name: {{ if .Values.catalog.existingConfigMap }}{{ .Values.catalog.existingConfigMap }}{{ else }}gateway-catalog{{ end }}
+      {{- end }}

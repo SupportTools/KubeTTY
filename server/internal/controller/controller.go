@@ -56,7 +56,7 @@ type ProjectStatusCallback func(project *projects.Project, newStatus projects.Pr
 type Controller struct {
 	cfg       Config
 	store     projects.Store
-	clientset *kubernetes.Clientset
+	clientset kubernetes.Interface
 
 	statusCallback ProjectStatusCallback
 	stopCh         chan struct{}
@@ -85,7 +85,7 @@ func New(cfg Config, store projects.Store) (*Controller, error) {
 }
 
 // NewWithClient creates a Controller with an existing Kubernetes client (useful for testing).
-func NewWithClient(cfg Config, store projects.Store, clientset *kubernetes.Clientset) *Controller {
+func NewWithClient(cfg Config, store projects.Store, clientset kubernetes.Interface) *Controller {
 	return &Controller{
 		cfg:       cfg,
 		store:     store,

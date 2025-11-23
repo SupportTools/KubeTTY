@@ -1,0 +1,98 @@
+# KubeTTY Project Pod Helm Chart Values
+# Single-user terminal environment accessed via gateway
+
+# Container image configuration
+image:
+  repository: harbor.support.tools/kubetty/kubetty
+  tag: "0.7.2"
+  pullPolicy: IfNotPresent
+
+# Image pull secrets for private registries
+imagePullSecrets: []
+
+# Project identifier - MUST be unique per project
+# This should match the gateway catalog entry
+projectId: ""
+
+# Environment variables
+env:
+  # Session UUID for this project
+  # IMPORTANT: Generate once during project creation and keep stable
+  # DO NOT change after initial deployment - breaks session continuity
+  # Generate with: uuidgen (Linux/Mac) or New-Guid (PowerShell)
+  sessionID: ""
+
+  # User identity for this deployment
+  kubettyUser: "mmattox"
+
+  # Claude Code configuration
+  claudeMaxTokens: "64000"
+  anthropicBaseURL: ""
+  nodeOptions: "--max-old-space-size=32768"
+  claudeConfigDir: "/home/mmattox/.claude"
+
+  # Additional environment variables
+  extra: {}
+
+# Kubernetes Service
+# ClusterIP only - accessed via gateway WebSocket proxy
+service:
+  type: ClusterIP
+  port: 8080
+
+# Persistent Volume Claim for data storage
+dataPVC:
+  enabled: true
+  create: true
+  existingClaim: ""
+  name: ""
+  storageClass: longhorn
+  accessModes:
+    - ReadWriteOnce
+  size: 50Gi
+  subPaths:
+    - path: /opt
+      subPath: opt
+    - path: /home
+      subPath: home
+    - path: /usr/local/go
+      subPath: usr-local-go
+    - path: /var/lib/docker
+      subPath: var-lib-docker
+
+# ServiceAccount
+serviceAccount:
+  create: true
+  name: ""
+
+# RBAC - namespace-scoped access
+rbac:
+  create: true
+  # Namespaces where this project has admin access
+  adminNamespaces: []
+  # Namespaces where this project has read-only access
+  readNamespaces: []
+
+# Resource limits
+resources:
+  requests:
+    memory: "2Gi"
+    cpu: "500m"
+  limits:
+    memory: "8Gi"
+    cpu: "4000m"
+
+# Docker-in-Docker support
+pipelines:
+  dind:
+    enabled: false
+
+# Pod annotations
+podAnnotations: {}
+
+# Prometheus monitoring
+prometheus:
+  scrape:
+    enabled: true
+    path: /metrics
+    port: 8080

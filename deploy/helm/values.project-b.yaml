@@ -4,7 +4,7 @@
 # Container image configuration
 image:
   repository: harbor.support.tools/kubetty/kubetty
-  tag: v0.6.0
+  tag: "0.6.1"
   pullPolicy: IfNotPresent
 
 # Image pull secrets for private registries
@@ -19,7 +19,7 @@ deploymentId: project-b
 # Environment variables
 env:
   # Stable session UUID for this project (DO NOT CHANGE)
-  sessionID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  sessionID: "9b31d3f2-db1f-4e05-a300-0b04ffe2e589"
 
   # Operating mode: project (accessed via gateway)
   kubettyMode: "project"
@@ -41,15 +41,20 @@ env:
   extra:
     CLAUDE_EXTRA_FLAG: "1"
 
+# Authentication configuration
+# Project pods are accessed via gateway - auth is handled there
+auth:
+  mode: disabled
+
 # CloudNativePG database configuration
+# NOT REQUIRED: Project mode is stateless PTY - no database dependency
 cnpg:
-  # PostgreSQL host (CNPG cluster service name)
-  host: kubetty-postgres-rw.kubetty-shared.svc.cluster.local
+  host: ""
   port: 5432
-  database: kubetty
-  userSecret: kubetty-shared-app
-  usernameKey: username
-  passwordKey: password
+  database: ""
+  userSecret: ""
+  usernameKey: ""
+  passwordKey: ""
 
 # Kubernetes Service
 service:

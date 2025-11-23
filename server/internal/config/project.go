@@ -16,6 +16,10 @@ type ProjectConfig struct {
 	Shell          string
 	KubettyUser    string
 	KubettyProject string
+
+	// PTY logging configuration for Loki capture
+	PTYLogEnabled    bool
+	PTYLogMaxLineLen int
 }
 
 // LoadProjectConfig reads environment variables and builds a ProjectConfig.
@@ -36,6 +40,10 @@ func LoadProjectConfig() (ProjectConfig, error) {
 		Shell:          sharedconfig.GetEnv("SHELL", "/bin/bash"),
 		KubettyUser:    sharedconfig.GetEnv("KUBETTY_USER", os.Getenv("USER")),
 		KubettyProject: sharedconfig.GetEnv("KUBETTY_PROJECT", deploymentID),
+
+		// PTY logging for Loki capture (default: disabled)
+		PTYLogEnabled:    sharedconfig.GetEnvBool("PTY_LOG_ENABLED", false),
+		PTYLogMaxLineLen: sharedconfig.GetEnvInt("PTY_LOG_MAX_LINE", 4096),
 	}
 
 	return cfg, nil

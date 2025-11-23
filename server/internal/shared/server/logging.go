@@ -1,6 +1,9 @@
 package server
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -31,6 +34,16 @@ func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
 		lrw.written = true
 	}
 	return lrw.ResponseWriter.Write(b)
+}
+
+// Hijack implements http.Hijacker interface to support WebSocket upgrades.
+// This delegates to the underlying ResponseWriter if it supports hijacking.
+func (lrw *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := lrw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response does not implement http.Hijacker")
+	}
+	return hijacker.Hijack()
 }
 
 // LoggingMiddleware wraps an HTTP handler with request logging.

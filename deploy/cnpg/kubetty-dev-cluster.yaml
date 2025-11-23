@@ -1,0 +1,147 @@
+---
+# CNPG PostgreSQL Cluster for KubeTTY Dev Environment
+# Deploy to kubetty-dev namespace
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubetty-postgres-user
+  namespace: kubetty-dev
+  labels:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/name: kubetty-dev
+type: kubernetes.io/basic-auth
+stringData:
+  username: kubetty
+  password: kubetty-dev-password
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kubetty-dev
+  namespace: kubetty-dev
+  labels:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/name: kubetty-dev
+spec:
+  # Single instance for dev (no HA needed)
+  instances: 1
+
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.5
+
+  bootstrap:
+    initdb:
+      database: kubetty
+      encoding: UTF8
+      localeCType: C
+      localeCollate: C
+      owner: kubetty
+      secret:
+        name: kubetty-postgres-user
+
+  # Smaller resources for dev
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Smaller storage for dev
+  storage:
+    size: 2Gi
+    storageClass: longhorn
+    resizeInUseVolumes: true
+
+  # PostgreSQL configuration (simplified from prod)
+  postgresql:
+    parameters:
+      # Connection settings
+      max_connections: "100"
+
+      # Memory settings (smaller for dev)
+      shared_buffers: 64MB
+      effective_cache_size: 256MB
+      work_mem: 1MB
+      maintenance_work_mem: 32MB
+
+      # WAL settings
+      wal_level: logical
+      wal_buffers: 4MB
+      min_wal_size: 256MB
+      max_wal_size: 1GB
+      wal_keep_size: 128MB
+
+      # Archiving
+      archive_mode: "on"
+      archive_timeout: 5min
+
+      # Logging
+      log_destination: csvlog
+      log_directory: /controller/log
+      log_filename: postgres
+      logging_collector: "on"
+      log_rotation_age: "0"
+      log_rotation_size: "0"
+      log_truncate_on_rotation: "false"
+
+      # SSL
+      ssl_min_protocol_version: TLSv1.3
+      ssl_max_protocol_version: TLSv1.3
+
+      # Other
+      dynamic_shared_memory_type: posix
+      shared_memory_type: mmap
+      full_page_writes: "on"
+      wal_log_hints: "on"
+      checkpoint_completion_target: "0.9"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+      default_statistics_target: "100"
+
+    syncReplicaElectionConstraint:
+      enabled: false
+
+  # No superuser access
+  enableSuperuserAccess: false
+
+  # Update strategy
+  primaryUpdateMethod: restart
+  primaryUpdateStrategy: unsupervised
+
+  # Timeouts
+  startDelay: 300
+  stopDelay: 300
+  smartShutdownTimeout: 60
+  switchoverDelay: 600
+  failoverDelay: 0
+
+  # Monitoring (optional for dev)
+  monitoring:
+    enablePodMonitor: false
+    disableDefaultQueries: false
+
+  # Liveness probe
+  probes:
+    liveness:
+      isolationCheck:
+        enabled: true
+        connectionTimeout: 1000
+        requestTimeout: 1000
+
+  # No PDB for single instance
+  enablePDB: false
+
+  # Replication slots (not really needed for single instance but kept for compatibility)
+  replicationSlots:
+    highAvailability:
+      enabled: false
+    synchronizeReplicas:
+      enabled: false
+
+  # Logging
+  logLevel: info
+
+  # Affinity (none needed for dev)
+  affinity:
+    podAntiAffinityType: preferred

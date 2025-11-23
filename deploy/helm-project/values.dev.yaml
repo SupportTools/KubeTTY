@@ -1,0 +1,83 @@
+# KubeTTY Project - Development Environment
+# Deploy to kubetty-project-dev namespace (mirrors kubetty-beacon-support in prod)
+
+image:
+  repository: harbor.support.tools/kubetty/kubetty
+  tag: "dev"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - harbor-supporttools
+
+# Project identifier - matches gateway catalog
+projectId: "dev-project"
+
+env:
+  # Generate a stable session ID for dev
+  sessionID: "dev-00000000-0000-0000-0000-000000000001"
+
+  # Dev user
+  kubettyUser: "developer"
+
+  # Claude Code configuration
+  claudeMaxTokens: "64000"
+  anthropicBaseURL: ""
+  nodeOptions: "--max-old-space-size=16384"
+  claudeConfigDir: "/home/developer/.claude"
+
+  extra:
+    LOG_LEVEL: debug
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# Smaller PVC for dev
+dataPVC:
+  enabled: true
+  create: true
+  existingClaim: ""
+  name: ""
+  storageClass: longhorn
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+  subPaths:
+    - path: /opt
+      subPath: opt
+    - path: /home
+      subPath: home
+    - path: /usr/local/go
+      subPath: usr-local-go
+
+serviceAccount:
+  create: true
+  name: ""
+
+rbac:
+  create: true
+  adminNamespaces:
+    - kubetty-project-dev
+  readNamespaces: []
+
+# Lower resources for dev
+resources:
+  requests:
+    memory: "1Gi"
+    cpu: "250m"
+  limits:
+    memory: "4Gi"
+    cpu: "2000m"
+
+# No DinD for dev by default
+pipelines:
+  dind:
+    enabled: false
+
+podAnnotations: {}
+
+prometheus:
+  scrape:
+    enabled: true
+    path: /metrics
+    port: 8080

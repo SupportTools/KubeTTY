@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
     plugins: [react()],
     build: {
-        outDir: '../server/ui/dist',
+        outDir: '../server/cmd/gateway/ui/dist',
         emptyOutDir: true
     }
 });

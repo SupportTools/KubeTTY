@@ -1,0 +1,188 @@
+{{/*
+Validation: Ensure required configuration is provided
+*/}}
+{{- if not .Values.env.sessionID }}
+  {{- fail "env.sessionID is required. Please generate a unique stable UUID with 'uuidgen'." }}
+{{- end }}
+{{- if eq .Values.env.sessionID "00000000-0000-0000-0000-000000000000" }}
+  {{- fail "env.sessionID cannot be the placeholder UUID. Please generate a unique stable UUID." }}
+{{- end }}
+{{- if not .Values.projectId }}
+  {{- fail "projectId is required. This should match the gateway catalog entry." }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kubetty-project.fullname" . }}
+  labels:
+    {{- include "kubetty-project.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kubetty-project.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kubetty-project.selectorLabels" . | nindent 8 }}
+      {{- if or .Values.podAnnotations .Values.prometheus.scrape.enabled }}
+      annotations:
+        {{- range $k, $v := .Values.podAnnotations }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+        {{- if .Values.prometheus.scrape.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: {{ .Values.prometheus.scrape.path | quote }}
+        prometheus.io/port: {{ .Values.prometheus.scrape.port | quote }}
+        {{- end }}
+      {{- end }}
+    spec:
+      hostname: {{ .Values.projectId }}
+      serviceAccountName: {{ include "kubetty-project.serviceAccountName" . }}
+      securityContext:
+        supplementalGroups:
+          - 0
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      {{- if .Values.dataPVC.enabled }}
+      initContainers:
+        - name: init-permissions
+          image: ubuntu:22.04
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              if ! getent group mmattox >/dev/null; then
+                groupadd -g 1000 mmattox
+              fi
+              if ! id -u mmattox >/dev/null 2>&1; then
+                useradd -u 1000 -g mmattox -M -s /usr/sbin/nologin mmattox
+              fi
+              {{- range $mount := .Values.dataPVC.subPaths }}
+              {{- $subPathName := default (regexReplaceAll "[^A-Za-z0-9-]+" (default "root" (trimPrefix "/" $mount.path)) "-") $mount.subPath }}
+              mkdir -p /data/{{ $subPathName }}
+              {{- if hasPrefix "/home" $mount.path }}
+              mkdir -p /data/{{ $subPathName }}/mmattox
+              {{- end }}
+              chown -R mmattox:mmattox /data/{{ $subPathName }}
+              {{- end }}
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: init-home
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              if [ ! -f /pvc-home/mmattox/.bash_profile ]; then
+                echo "Copying home directory files from image to PVC..."
+                cp -a /home/mmattox/. /pvc-home/mmattox/
+                echo "Home directory files copied successfully"
+              else
+                echo "Home directory already initialized, skipping copy"
+              fi
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          volumeMounts:
+            - name: data
+              mountPath: /pvc-home
+              subPath: home
+      {{- end }}
+      containers:
+        {{- if .Values.pipelines.dind.enabled }}
+        - name: docker
+          image: docker:24.0.5-dind
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          args:
+            - --host=unix:///var/run/docker/docker.sock
+            - --host=tcp://0.0.0.0:2375
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/docker
+              subPath: var-lib-docker
+            - name: dind-sock
+              mountPath: /var/run/docker
+        {{- end }}
+        - name: kubetty
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: KUBETTY_MODE
+              value: "project"
+            - name: DEPLOYMENT_ID
+              value: {{ .Values.projectId | quote }}
+            - name: SESSION_ID
+              value: {{ .Values.env.sessionID | quote }}
+            - name: KUBETTY_USER
+              value: {{ .Values.env.kubettyUser | quote }}
+            - name: KUBETTY_PROJECT
+              value: {{ .Values.projectId | quote }}
+            - name: CLAUDE_CODE_MAX_OUTPUT_TOKENS
+              value: {{ .Values.env.claudeMaxTokens | quote }}
+            - name: ANTHROPIC_BASE_URL
+              value: {{ .Values.env.anthropicBaseURL | quote }}
+            - name: NODE_OPTIONS
+              value: {{ .Values.env.nodeOptions | quote }}
+            - name: CLAUDE_CONFIG_DIR
+              value: {{ .Values.env.claudeConfigDir | quote }}
+            {{- if .Values.pipelines.dind.enabled }}
+            - name: DOCKER_HOST
+              value: unix:///var/run/docker/docker.sock
+            {{- end }}
+            {{- range $key, $value := .Values.env.extra }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: env-secrets
+                optional: true
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          volumeMounts:
+            {{- if .Values.pipelines.dind.enabled }}
+            - name: dind-sock
+              mountPath: /var/run/docker
+            {{- end }}
+            {{- if and .Values.dataPVC.enabled .Values.dataPVC.subPaths }}
+            {{- range $mount := .Values.dataPVC.subPaths }}
+            {{- $subPathName := default (regexReplaceAll "[^A-Za-z0-9-]+" (default "root" (trimPrefix "/" $mount.path)) "-") $mount.subPath }}
+            - name: data
+              mountPath: {{ $mount.path }}
+              subPath: {{ $subPathName }}
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- if .Values.dataPVC.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ if .Values.dataPVC.create }}{{ default (printf "%s-data" (include "kubetty-project.fullname" .)) .Values.dataPVC.name }}{{ else }}{{ .Values.dataPVC.existingClaim }}{{ end }}
+        {{- end }}
+        {{- if .Values.pipelines.dind.enabled }}
+        - name: dind-sock
+          emptyDir: {}
+        {{- end }}

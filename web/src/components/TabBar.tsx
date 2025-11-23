@@ -1,7 +1,8 @@
-import { ProjectInfo } from '../types';
+import { ProjectInfo, TabMetrics } from '../types';
+import MetricsIndicator from './MetricsIndicator';
 
 type TabBarProps = {
-  tabs: Array<{ tabId: string; label: string; status: string }>;
+  tabs: Array<{ tabId: string; label: string; status: string; metrics?: TabMetrics }>;
   activeTabId: string | null;
   onSelect: (tabId: string) => void;
   onClose: (tabId: string) => void;
@@ -19,17 +20,22 @@ const TabBar = ({ tabs, activeTabId, onSelect, onClose, onNew, projects }: TabBa
             className={`tab-button ${tab.tabId === activeTabId ? 'active' : ''}`}
             onClick={() => onSelect(tab.tabId)}
           >
-            <span className="tab-label">{tab.label}</span>
-            <span className={`tab-status tab-status-${tab.status}`}></span>
-            <span
-              className="tab-close"
-              onClick={(event) => {
-                event.stopPropagation();
-                onClose(tab.tabId);
-              }}
-            >
-              ×
-            </span>
+            <div className="tab-content">
+              <div className="tab-header">
+                <span className="tab-label">{tab.label}</span>
+                <span className={`tab-status tab-status-${tab.status}`}></span>
+                <span
+                  className="tab-close"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onClose(tab.tabId);
+                  }}
+                >
+                  ×
+                </span>
+              </div>
+              <MetricsIndicator metrics={tab.metrics} />
+            </div>
           </button>
         ))}
         <button className="tab-button add" onClick={onNew} disabled={projects.length === 0}>

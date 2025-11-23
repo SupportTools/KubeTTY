@@ -15,6 +15,7 @@ import (
 
 	gatewayconfig "github.com/supporttools/KubeTTY/server/internal/gateway/config"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/health"
+	"github.com/supporttools/KubeTTY/server/internal/gateway/metrics"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/relay"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
 )
@@ -27,10 +28,14 @@ type Manager struct {
 	mu                sync.Mutex
 	tabs              map[string]*tabEntry
 	statusCb          func(tabs.Tab)
-	idleTimeout       time.Duration // Tab idle timeout duration
-	idleWarningBefore time.Duration // Warning time before idle timeout
-	stopIdleChecker   chan struct{} // Signal to stop idle checker goroutine
+	metricsCb         func(string, metrics.TabMetrics) // Callback for metrics updates (tabID, metrics)
+	idleTimeout       time.Duration                    // Tab idle timeout duration
+	idleWarningBefore time.Duration                    // Warning time before idle timeout
+	stopIdleChecker   chan struct{}                    // Signal to stop idle checker goroutine
 	healthChecker     *health.Checker
+	metricsCollector  *metrics.Collector // Resource metrics collector
+	metricsEnabled    bool               // Whether metrics collection is enabled
+	metricsInterval   time.Duration      // Metrics collection interval
 }
 
 type tabEntry struct {
@@ -44,17 +49,42 @@ type tabEntry struct {
 	cancel        context.CancelFunc
 }
 
+// ManagerConfig holds configuration for the Manager.
+type ManagerConfig struct {
+	IdleTimeout     time.Duration
+	MetricsEnabled  bool
+	MetricsInterval time.Duration
+}
+
+// DefaultManagerConfig returns default manager configuration.
+func DefaultManagerConfig() ManagerConfig {
+	return ManagerConfig{
+		IdleTimeout:     2 * time.Hour,
+		MetricsEnabled:  true,
+		MetricsInterval: 15 * time.Second,
+	}
+}
+
 // New creates a manager with the given idle timeout configuration.
 func New(cat gatewayconfig.Catalog, store tabs.Store, idleTimeout time.Duration) *Manager {
+	return NewWithConfig(cat, store, ManagerConfig{
+		IdleTimeout:     idleTimeout,
+		MetricsEnabled:  true,
+		MetricsInterval: 15 * time.Second,
+	})
+}
+
+// NewWithConfig creates a manager with full configuration.
+func NewWithConfig(cat gatewayconfig.Catalog, store tabs.Store, cfg ManagerConfig) *Manager {
 	projects := make(map[string]gatewayconfig.Project, len(cat.Projects))
 	for _, p := range cat.Projects {
 		projects[p.ID] = p
 	}
 
 	// Validate minimum idle timeout (10 minutes)
-	if idleTimeout < 10*time.Minute {
-		log.Printf("gateway: idle timeout %v is below minimum 10m, enforcing minimum", idleTimeout)
-		idleTimeout = 10 * time.Minute
+	if cfg.IdleTimeout < 10*time.Minute {
+		log.Printf("gateway: idle timeout %v is below minimum 10m, enforcing minimum", cfg.IdleTimeout)
+		cfg.IdleTimeout = 10 * time.Minute
 	}
 
 	return &Manager{
@@ -62,11 +92,39 @@ func New(cat gatewayconfig.Catalog, store tabs.Store, idleTimeout time.Duration)
 		store:             store,
 		dialer:            websocket.DefaultDialer,
 		tabs:              make(map[string]*tabEntry),
-		idleTimeout:       idleTimeout,
+		idleTimeout:       cfg.IdleTimeout,
 		idleWarningBefore: 5 * time.Minute, // Fixed: warn 5 minutes before timeout
 		stopIdleChecker:   make(chan struct{}),
 		healthChecker:     health.NewChecker(cat.Projects),
+		metricsEnabled:    cfg.MetricsEnabled,
+		metricsInterval:   cfg.MetricsInterval,
 	}
+}
+
+// RegisterProject adds a project to the manager dynamically.
+// This is used by the controller to register projects that are created via the API.
+func (m *Manager) RegisterProject(project gatewayconfig.Project) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.projects[project.ID] = project
+	log.Printf("gateway: registered project %q (%s:%d)", project.ID, project.Namespace, project.Port)
+}
+
+// UnregisterProject removes a project from the manager.
+// Existing tabs for this project are not affected until they're closed.
+func (m *Manager) UnregisterProject(projectID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.projects, projectID)
+	log.Printf("gateway: unregistered project %q", projectID)
+}
+
+// HasProject returns whether a project is registered.
+func (m *Manager) HasProject(projectID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.projects[projectID]
+	return ok
 }
 
 // CreateTab allocates metadata and starts a relay (if not already running).
@@ -122,15 +180,34 @@ func (m *Manager) CreateTab(ctx context.Context, projectID, clientID string) (ta
 
 // Attach proxies between the caller WebSocket and the downstream relay.
 func (m *Manager) Attach(ctx context.Context, tabID, clientID string, upstream *websocket.Conn) error {
+	return m.AttachWithOptions(ctx, tabID, clientID, upstream, false)
+}
+
+// AttachWithOptions proxies between the caller WebSocket and the downstream relay.
+// If forceTakeover is true, allows a different client to take over the tab.
+func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string, upstream *websocket.Conn, forceTakeover bool) error {
 	m.mu.Lock()
 	e, ok := m.tabs[tabID]
-	m.mu.Unlock()
 	if !ok {
+		m.mu.Unlock()
 		return tabs.ErrNotFound
 	}
 	if e.clientID != clientID {
-		return fmt.Errorf("tab %s owned by another client", tabID)
+		if !forceTakeover {
+			m.mu.Unlock()
+			return fmt.Errorf("tab %s owned by another client", tabID)
+		}
+		// Force takeover: update clientID
+		log.Printf("gateway: force takeover of tab %s from client %s to %s", tabID, e.clientID, clientID)
+		e.clientID = clientID
+		// Update in database
+		go func() {
+			if err := m.store.UpdateClientID(context.Background(), tabID, clientID); err != nil {
+				log.Printf("gateway: update client ID for tab %s: %v", tabID, err)
+			}
+		}()
 	}
+	m.mu.Unlock()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	return e.relay.Proxy(ctx, upstream)
@@ -149,6 +226,8 @@ func (m *Manager) CloseTab(ctx context.Context, tabID string) error {
 			e.cancel()
 		}
 		_ = e.relay.Close()
+		// Unregister from metrics collection
+		m.unregisterTabForMetrics(tabID)
 	}
 	if err := m.store.Delete(ctx, tabID); err != nil {
 		return err
@@ -209,6 +288,7 @@ func (m *Manager) ListProjectsWithStatus() []ProjectWithStatus {
 }
 
 // RestoreTabs loads persisted rows at startup so clients can reconnect.
+// Tabs for unknown projects are deleted to prevent stale tab loops.
 func (m *Manager) RestoreTabs(ctx context.Context) error {
 	rows, err := m.store.ListAll(ctx)
 	if err != nil {
@@ -217,7 +297,10 @@ func (m *Manager) RestoreTabs(ctx context.Context) error {
 	for _, row := range rows {
 		project, ok := m.projects[row.ProjectID]
 		if !ok {
-			log.Printf("gateway: skipping tab %s for unknown project %s", row.TabID, row.ProjectID)
+			log.Printf("gateway: deleting orphaned tab %s for unknown project %s", row.TabID, row.ProjectID)
+			if err := m.store.Delete(ctx, row.TabID); err != nil {
+				log.Printf("gateway: failed to delete orphaned tab %s: %v", row.TabID, err)
+			}
 			continue
 		}
 		entry := m.newEntry(project, row.ClientID, row.CreatedAt)
@@ -253,6 +336,9 @@ func (m *Manager) startTracking(tabID string, entry *tabEntry) {
 	entry.cancel = cancel
 	go m.watchStatus(ctx, tabID, entry, entry.relay.Subscribe())
 	go m.watchActivity(ctx, tabID, entry, entry.relay.ActivityChan())
+
+	// Register tab for metrics collection
+	m.registerTabForMetrics(tabID, entry)
 }
 
 // watchActivity monitors relay activity and updates the lastActivity timestamp.
@@ -321,6 +407,75 @@ func (m *Manager) SetStatusCallback(cb func(tabs.Tab)) {
 	m.statusCb = cb
 }
 
+// SetMetricsCallback registers a callback invoked when tab metrics are updated.
+func (m *Manager) SetMetricsCallback(cb func(string, metrics.TabMetrics)) {
+	m.metricsCb = cb
+}
+
+// StartMetricsCollector begins the background metrics collection goroutine.
+func (m *Manager) StartMetricsCollector() {
+	if !m.metricsEnabled {
+		log.Println("gateway: metrics collection disabled")
+		return
+	}
+
+	collector, err := metrics.NewCollector(m.metricsInterval, m.handleMetricsUpdate)
+	if err != nil {
+		log.Printf("gateway: failed to create metrics collector: %v", err)
+		return
+	}
+
+	m.metricsCollector = collector
+	m.metricsCollector.Start()
+	log.Printf("gateway: metrics collector started (interval=%v)", m.metricsInterval)
+
+	// Register all existing tabs
+	m.mu.Lock()
+	for tabID, entry := range m.tabs {
+		m.registerTabForMetrics(tabID, entry)
+	}
+	m.mu.Unlock()
+}
+
+// handleMetricsUpdate is called when metrics are collected for a tab.
+func (m *Manager) handleMetricsUpdate(tabID string, tabMetrics metrics.TabMetrics) {
+	if m.metricsCb != nil {
+		m.metricsCb(tabID, tabMetrics)
+	}
+}
+
+// registerTabForMetrics registers a tab with the metrics collector.
+func (m *Manager) registerTabForMetrics(tabID string, entry *tabEntry) {
+	if m.metricsCollector == nil {
+		return
+	}
+
+	// Build downstream URI for metrics endpoint
+	downstreamBase := fmt.Sprintf("http://%s.%s.svc:%d",
+		entry.project.Service,
+		entry.project.Namespace,
+		entry.project.Port,
+	)
+
+	info := metrics.TabInfo{
+		TabID:         tabID,
+		ProjectID:     entry.project.ID,
+		PodName:       entry.project.Service, // TODO: Get actual pod name from K8s
+		Namespace:     entry.project.Namespace,
+		DownstreamURI: downstreamBase,
+		CPULimit:      entry.project.Limits.CPUMillicores,
+		MemoryLimit:   entry.project.Limits.MemoryBytes,
+	}
+	m.metricsCollector.RegisterTab(info)
+}
+
+// unregisterTabForMetrics removes a tab from the metrics collector.
+func (m *Manager) unregisterTabForMetrics(tabID string) {
+	if m.metricsCollector != nil {
+		m.metricsCollector.UnregisterTab(tabID)
+	}
+}
+
 // StartIdleChecker begins monitoring tabs for idle timeout.
 // Should be called after RestoreTabs() during gateway startup.
 func (m *Manager) StartIdleChecker(ctx context.Context) {
@@ -343,11 +498,14 @@ func (m *Manager) StartIdleChecker(ctx context.Context) {
 	}
 }
 
-// Stop gracefully shuts down the manager, idle checker, and health checker.
+// Stop gracefully shuts down the manager, idle checker, health checker, and metrics collector.
 func (m *Manager) Stop() {
 	close(m.stopIdleChecker)
 	if m.healthChecker != nil {
 		m.healthChecker.Stop()
+	}
+	if m.metricsCollector != nil {
+		m.metricsCollector.Stop()
 	}
 }
 

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.6
 
-ARG GO_VERSION=1.23.3
+ARG GO_VERSION=1.24.3
 ARG NODE_MAJOR=20
 ARG KUBECTL_VERSION=v1.30.3
 ARG HELM_VERSION=v3.15.2
@@ -127,6 +127,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
 RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Docker Compose V2 plugin and V1 compatibility symlink
+RUN mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-x86_64 \
+       -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+    && ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+
 # Symlink fd command.
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
 
@@ -204,15 +211,15 @@ RUN { \
     echo '# bash autocompletion'; \
     echo 'if [ -f /usr/local/share/bash-completion/bash_completion ]; then . /usr/local/share/bash-completion/bash_completion; fi'; \
     echo ''; \
-    echo 'alias reload="source \$HOME/.bash_profile"'; \
+    echo 'alias reload="source $HOME/.bash_profile"'; \
     echo 'alias grep="grep --color=auto"'; \
     echo 'alias ls="ls --color=auto"'; \
     echo 'alias ll="ls -la"'; \
     echo ''; \
     echo 'export KUBE_EDITOR="nano"'; \
     echo 'export GOROOT=/usr/local/go'; \
-    echo 'export GOPATH=\$HOME/go'; \
-    echo 'export PATH=\$GOPATH/bin:\$GOROOT/bin:\$PATH'; \
+    echo 'export GOPATH=$HOME/go'; \
+    echo 'export PATH=$GOPATH/bin:$GOROOT/bin:$PATH'; \
     } > /home/mmattox/.bash_profile && \
     chown mmattox:mmattox /home/mmattox/.bash_profile
 

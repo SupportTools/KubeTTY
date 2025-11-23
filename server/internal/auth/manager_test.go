@@ -555,12 +555,13 @@ func TestRefresh(t *testing.T) {
 				require.NotNil(t, pair)
 				require.NotEmpty(t, pair.AccessToken)
 				require.NotEmpty(t, pair.RefreshToken)
-				// Old token should be revoked
+				// With no-rotation, same refresh token is returned and NOT revoked
+				require.Equal(t, token, pair.RefreshToken)
 				tokenID, _, err := ParseRefreshToken(token)
 				require.NoError(t, err)
 				oldToken, err := store.GetRefreshToken(ctx, tokenID)
 				require.NoError(t, err)
-				require.NotNil(t, oldToken.RevokedAt)
+				require.Nil(t, oldToken.RevokedAt) // Token should NOT be revoked
 			}
 		})
 	}

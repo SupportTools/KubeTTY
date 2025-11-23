@@ -38,6 +38,7 @@ type Store interface {
 	// Status updates
 	SetStatus(ctx context.Context, id uuid.UUID, status ProjectStatus, message string) error
 	UpdateHealthCheck(ctx context.Context, id uuid.UUID, podIP string) error
+	UpdateLastActivity(ctx context.Context, projectName string) error
 
 	// List projects by status for controller reconciliation
 	ListByStatuses(ctx context.Context, statuses []ProjectStatus) ([]Project, error)
@@ -45,16 +46,17 @@ type Store interface {
 
 // PGStore is a pgx-backed Store implementation.
 type PGStore struct {
-	pool *pgxpool.Pool
+	pool            *pgxpool.Pool
+	targetNamespace string // Target namespace for all projects (from controller config)
 }
 
 // NewStore creates a new store using its own connection pool.
-func NewStore(ctx context.Context, config *pgxpool.Config) (*PGStore, error) {
+func NewStore(ctx context.Context, config *pgxpool.Config, targetNamespace string) (*PGStore, error) {
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("project store connect: %w", err)
 	}
-	return &PGStore{pool: pool}, nil
+	return &PGStore{pool: pool, targetNamespace: targetNamespace}, nil
 }
 
 // Close releases the connection pool.
@@ -65,8 +67,8 @@ func (s *PGStore) Close() {
 }
 
 // NewStoreFromPool reuses an existing pool.
-func NewStoreFromPool(pool *pgxpool.Pool) *PGStore {
-	return &PGStore{pool: pool}
+func NewStoreFromPool(pool *pgxpool.Pool, targetNamespace string) *PGStore {
+	return &PGStore{pool: pool, targetNamespace: targetNamespace}
 }
 
 func (s *PGStore) Create(ctx context.Context, req CreateProjectRequest) (*Project, error) {
@@ -81,7 +83,11 @@ func (s *PGStore) Create(ctx context.Context, req CreateProjectRequest) (*Projec
 	// Generate IDs and derived values
 	id := uuid.New()
 	sessionID := uuid.New()
-	targetNamespace := fmt.Sprintf("kubetty-%s", req.Name)
+	targetNamespace := s.targetNamespace
+	if targetNamespace == "" {
+		// Fallback for legacy behavior if no namespace configured
+		targetNamespace = fmt.Sprintf("kubetty-%s", req.Name)
+	}
 	serviceName := ComputeServiceName(req.Name)
 
 	// Serialize JSON fields
@@ -120,7 +126,7 @@ RETURNING id, name, display_name, description, icon,
     max_tabs_per_client, max_tabs_total,
     dind_enabled, env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip,
     created_at, updated_at, deleted_at`
 
 	row := s.pool.QueryRow(ctx, stmt,
@@ -147,7 +153,7 @@ SELECT id, name, display_name, description, icon,
     max_tabs_per_client, max_tabs_total,
     dind_enabled, env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
 WHERE id = $1 AND deleted_at IS NULL`
@@ -166,7 +172,7 @@ SELECT id, name, display_name, description, icon,
     max_tabs_per_client, max_tabs_total,
     dind_enabled, env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
 WHERE name = $1 AND deleted_at IS NULL`
@@ -185,7 +191,7 @@ SELECT id, name, display_name, description, icon,
     max_tabs_per_client, max_tabs_total,
     dind_enabled, env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
 WHERE service_name = $1 AND deleted_at IS NULL`
@@ -204,7 +210,7 @@ SELECT id, name, display_name, description, icon,
     max_tabs_per_client, max_tabs_total,
     dind_enabled, env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
 WHERE 1=1`
@@ -272,7 +278,7 @@ SELECT id, name, display_name, description, icon,
     max_tabs_per_client, max_tabs_total,
     dind_enabled, env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
 WHERE deleted_at IS NULL AND status = ANY($1)
@@ -386,7 +392,7 @@ RETURNING id, name, display_name, description, icon,
     max_tabs_per_client, max_tabs_total,
     dind_enabled, env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip,
     created_at, updated_at, deleted_at`,
 		joinStrings(setClauses, ", "))
 
@@ -455,6 +461,22 @@ WHERE id = $1 AND deleted_at IS NULL`
 	return nil
 }
 
+func (s *PGStore) UpdateLastActivity(ctx context.Context, projectName string) error {
+	const stmt = `
+UPDATE kubetty_projects
+SET last_activity = NOW()
+WHERE name = $1 AND deleted_at IS NULL`
+
+	tag, err := s.pool.Exec(ctx, stmt, projectName)
+	if err != nil {
+		return fmt.Errorf("update last activity: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProjectNotFound
+	}
+	return nil
+}
+
 func scanProject(row pgx.Row) (*Project, error) {
 	var p Project
 	var description, icon, statusMessage, podIP, serviceName *string
@@ -469,7 +491,7 @@ func scanProject(row pgx.Row) (*Project, error) {
 		&p.MaxTabsPerClient, &p.MaxTabsTotal,
 		&p.DinDEnabled, &envVars,
 		&p.ImageRepository, &p.ImageTag,
-		&p.Status, &statusMessage, &p.LastHealthCheck, &podIP,
+		&p.Status, &statusMessage, &p.LastHealthCheck, &p.LastActivity, &podIP,
 		&p.CreatedAt, &p.UpdatedAt, &p.DeletedAt,
 	)
 	if err != nil {
@@ -524,7 +546,7 @@ func scanProjectRows(rows pgx.Rows) (*Project, error) {
 		&p.MaxTabsPerClient, &p.MaxTabsTotal,
 		&p.DinDEnabled, &envVars,
 		&p.ImageRepository, &p.ImageTag,
-		&p.Status, &statusMessage, &p.LastHealthCheck, &podIP,
+		&p.Status, &statusMessage, &p.LastHealthCheck, &p.LastActivity, &podIP,
 		&p.CreatedAt, &p.UpdatedAt, &p.DeletedAt,
 	)
 	if err != nil {

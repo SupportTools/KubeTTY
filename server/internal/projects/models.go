@@ -79,6 +79,7 @@ type Project struct {
 	Status          ProjectStatus `json:"status"`
 	StatusMessage   string        `json:"statusMessage,omitempty"`
 	LastHealthCheck *time.Time    `json:"lastHealthCheck,omitempty"`
+	LastActivity    *time.Time    `json:"lastActivity,omitempty"`
 	PodIP           string        `json:"podIP,omitempty"`
 
 	// Timestamps

@@ -143,6 +143,7 @@ export interface AdminProject {
   status: AdminProjectStatus;
   statusMessage?: string;
   lastHealthCheck?: string;
+  lastActivity?: string;
   podIP?: string;
   createdAt: string;
   updatedAt: string;
@@ -213,4 +214,14 @@ export interface PodStatus {
 export interface ProjectStatusResponse {
   project: AdminProject;
   deployment: DeploymentStatus;
+}
+
+export interface UpgradeInfoResponse {
+  currentVersion: string;
+  lastActivity?: string;
+  minutesSinceActivity?: number;
+}
+
+export interface UpgradeProjectRequest {
+  imageTag: string;
 }

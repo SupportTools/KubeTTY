@@ -15,9 +15,9 @@ deploymentId: kubetty-gateway-dev
 env:
   LOG_LEVEL: debug
 
-# Authentication - disabled for easier dev testing
+# Authentication - enabled for dev testing
 auth:
-  mode: disabled
+  mode: local
   jwtSecretSecret:
     name: "kubetty-gateway-dev-auth"
     key: jwt-secret

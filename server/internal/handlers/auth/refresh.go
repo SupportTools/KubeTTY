@@ -11,6 +11,8 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // RefreshRequest represents the refresh token request body.
@@ -86,13 +88,35 @@ func NewAuthRefreshHandler(cfg AuthConfig, authMgr *auth.Manager) http.HandlerFu
 
 		token := RefreshTokenFromRequest(r, strings.TrimSpace(req.RefreshToken))
 		if token == "" {
+			log.WithFields(log.Fields{
+				"has_cookie": r.Header.Get("Cookie") != "",
+				"client_ip":  r.RemoteAddr,
+			}).Warn("auth/refresh: no refresh token provided")
 			_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token required", ""))
 			return
 		}
 
+		// Parse token to get ID for logging (without exposing secret)
+		tokenID, _, parseErr := auth.ParseRefreshToken(token)
+		tokenIDStr := "parse_failed"
+		if parseErr == nil {
+			tokenIDStr = tokenID.String()
+		}
+
+		log.WithFields(log.Fields{
+			"token_id":  tokenIDStr,
+			"client_ip": r.RemoteAddr,
+		}).Debug("auth/refresh: attempting refresh")
+
 		meta := TokenMetadataFromRequest(r)
 		pair, err := authMgr.Refresh(r.Context(), token, meta)
 		if err != nil {
+			log.WithFields(log.Fields{
+				"token_id":  tokenIDStr,
+				"error":     err.Error(),
+				"client_ip": r.RemoteAddr,
+			}).Warn("auth/refresh: refresh failed")
+
 			switch {
 			case errors.Is(err, auth.ErrTokenExpired):
 				_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token expired", ""))
@@ -105,6 +129,11 @@ func NewAuthRefreshHandler(cfg AuthConfig, authMgr *auth.Manager) http.HandlerFu
 			}
 			return
 		}
+
+		log.WithFields(log.Fields{
+			"token_id":  tokenIDStr,
+			"client_ip": r.RemoteAddr,
+		}).Info("auth/refresh: refresh successful")
 
 		SetAuthCookies(w, pair, cfg)
 

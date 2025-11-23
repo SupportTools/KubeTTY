@@ -28,10 +28,15 @@ import (
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	"github.com/supporttools/KubeTTY/server/internal/config"
+	"github.com/supporttools/KubeTTY/server/internal/controller"
+	gatewayconfig "github.com/supporttools/KubeTTY/server/internal/gateway/config"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/manager"
+	gatewaymetrics "github.com/supporttools/KubeTTY/server/internal/gateway/metrics"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
+	handlers_admin "github.com/supporttools/KubeTTY/server/internal/handlers/admin"
 	handlers_auth "github.com/supporttools/KubeTTY/server/internal/handlers/auth"
 	handlers_session "github.com/supporttools/KubeTTY/server/internal/handlers/session"
+	"github.com/supporttools/KubeTTY/server/internal/projects"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/health"
@@ -113,35 +118,118 @@ func main() {
 		defer authStore.Close()
 	}
 
+	// Initialize project store and controller for project lifecycle management
 	var (
-		tabStore   tabs.Store
-		tabManager *manager.Manager
-		tabPool    *pgxpool.Pool
+		projectStore *projects.PGStore
+		projCtrl     *controller.Controller
 	)
-	if len(cfg.ProjectCatalog.Projects) > 0 {
-		tabPoolConfig, err := cfg.ConnConfig()
-		if err != nil {
-			log.Fatalf("build tab pool config: %v", err)
-		}
-		tabPool, err = pgxpool.NewWithConfig(ctx, tabPoolConfig)
-		if err != nil {
-			log.Fatalf("gateway pool: %v", err)
-		}
-		tabStore = tabs.NewPGXStore(tabPool)
-		tabManager = manager.New(cfg.ProjectCatalog, tabStore, cfg.TabIdleTimeout)
-		if err := tabManager.RestoreTabs(ctx); err != nil {
-			log.Printf("warn: restore tabs: %v", err)
-		}
-		// Start idle checker goroutine for tab timeout monitoring
-		go tabManager.StartIdleChecker(ctx)
-		// Start background health checking for projects
-		tabManager.StartHealthChecker()
+	projectPoolConfig, err := cfg.ConnConfig()
+	if err != nil {
+		log.Fatalf("build project pool config: %v", err)
 	}
-	if tabPool != nil {
-		defer tabPool.Close()
+	projectStore = projects.NewStoreFromPool(func() *pgxpool.Pool {
+		pool, err := pgxpool.NewWithConfig(ctx, projectPoolConfig)
+		if err != nil {
+			log.Fatalf("project store pool: %v", err)
+		}
+		return pool
+	}())
+
+	// Start project controller (manages K8s resources)
+	projCtrl, err = controller.New(controller.DefaultConfig(), projectStore)
+	if err != nil {
+		log.Printf("warn: project controller disabled: %v", err)
+	} else {
+		projCtrl.Start(ctx)
+		defer projCtrl.Stop()
+		log.Println("Project controller started")
 	}
-	if tabManager != nil {
-		defer tabManager.Stop()
+
+	// Always initialize tabManager to support both static catalog and dynamic projects
+	tabPoolConfig, err := cfg.ConnConfig()
+	if err != nil {
+		log.Fatalf("build tab pool config: %v", err)
+	}
+	tabPool, err := pgxpool.NewWithConfig(ctx, tabPoolConfig)
+	if err != nil {
+		log.Fatalf("gateway pool: %v", err)
+	}
+	defer tabPool.Close()
+
+	tabStore := tabs.NewPGXStore(tabPool)
+	tabManager := manager.NewWithConfig(cfg.ProjectCatalog, tabStore, manager.ManagerConfig{
+		IdleTimeout:     cfg.TabIdleTimeout,
+		MetricsEnabled:  cfg.MetricsEnabled,
+		MetricsInterval: cfg.MetricsInterval,
+	})
+	defer tabManager.Stop()
+
+	// Register running projects from the database
+	if projectStore != nil {
+		runningProjects, err := projectStore.List(ctx, projects.ListFilter{Status: "running"})
+		if err != nil {
+			log.Printf("warn: load running projects: %v", err)
+		} else {
+			for _, p := range runningProjects {
+				// Use ServiceName from database, fallback to computed name for backwards compatibility
+				serviceName := p.ServiceName
+				if serviceName == "" {
+					serviceName = projects.ComputeServiceName(p.Name)
+					log.Printf("warn: project %q missing ServiceName, using computed: %s", p.Name, serviceName)
+				}
+				tabManager.RegisterProject(gatewayconfig.Project{
+					ID:          p.Name,
+					DisplayName: p.DisplayName,
+					Namespace:   p.TargetNamespace,
+					Service:     serviceName,
+					Port:        8080,
+					Description: p.Description,
+					Icon:        p.Icon,
+					Limits: gatewayconfig.ProjectLimits{
+						MaxTabsPerClient: p.MaxTabsPerClient,
+						MaxTabsTotal:     p.MaxTabsTotal,
+					},
+				})
+			}
+			log.Printf("Registered %d running projects from database", len(runningProjects))
+		}
+	}
+
+	if err := tabManager.RestoreTabs(ctx); err != nil {
+		log.Printf("warn: restore tabs: %v", err)
+	}
+	// Start idle checker goroutine for tab timeout monitoring
+	go tabManager.StartIdleChecker(ctx)
+	// Start background health checking for projects
+	tabManager.StartHealthChecker()
+
+	// Set up controller callback to register projects when they become running
+	if projCtrl != nil {
+		projCtrl.SetStatusCallback(func(p *projects.Project, status projects.ProjectStatus) {
+			if status == projects.StatusRunning {
+				// Use ServiceName from database, fallback to computed name for backwards compatibility
+				serviceName := p.ServiceName
+				if serviceName == "" {
+					serviceName = projects.ComputeServiceName(p.Name)
+					log.Printf("warn: project %q missing ServiceName, using computed: %s", p.Name, serviceName)
+				}
+				tabManager.RegisterProject(gatewayconfig.Project{
+					ID:          p.Name,
+					DisplayName: p.DisplayName,
+					Namespace:   p.TargetNamespace,
+					Service:     serviceName,
+					Port:        8080,
+					Description: p.Description,
+					Icon:        p.Icon,
+					Limits: gatewayconfig.ProjectLimits{
+						MaxTabsPerClient: p.MaxTabsPerClient,
+						MaxTabsTotal:     p.MaxTabsTotal,
+					},
+				})
+			} else if status == projects.StatusDeleting || status == projects.StatusDeleted {
+				tabManager.UnregisterProject(p.Name)
+			}
+		})
 	}
 
 	uiFS, err := fs.Sub(embeddedUI, "ui/dist")
@@ -152,10 +240,12 @@ func main() {
 	appMetrics := metrics.NewAppMetrics()
 
 	srv := &server{
-		cfg:       cfg,
-		store:     store,
-		authStore: authStore,
-		authMgr:   authManager,
+		cfg:          cfg,
+		store:        store,
+		authStore:    authStore,
+		authMgr:      authManager,
+		projectStore: projectStore,
+		projCtrl:     projCtrl,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -167,6 +257,9 @@ func main() {
 	}
 	if srv.tabManager != nil {
 		srv.tabManager.SetStatusCallback(srv.handleTabStatusUpdate)
+		srv.tabManager.SetMetricsCallback(srv.handleTabMetricsUpdate)
+		// Start metrics collector for tab resource monitoring
+		srv.tabManager.StartMetricsCollector()
 	}
 
 	mux := http.NewServeMux()
@@ -190,6 +283,28 @@ func main() {
 
 	// Auth middleware
 	requireAuth := handlers_auth.RequireAuth(srv.cfg, srv.authMgr)
+
+	// Admin API handlers for project management (requires auth when enabled)
+	if srv.projectStore != nil && srv.projCtrl != nil {
+		adminHandlers := handlers_admin.NewProjectHandlers(srv.projectStore, srv.projCtrl)
+		if srv.authEnabled() {
+			mux.Handle("GET /api/admin/projects", requireAuth(http.HandlerFunc(adminHandlers.ListProjects)))
+			mux.Handle("POST /api/admin/projects", requireAuth(http.HandlerFunc(adminHandlers.CreateProject)))
+			mux.Handle("GET /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.GetProject)))
+			mux.Handle("PUT /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.UpdateProject)))
+			mux.Handle("DELETE /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.DeleteProject)))
+			mux.Handle("POST /api/admin/projects/{id}/restart", requireAuth(http.HandlerFunc(adminHandlers.RestartProject)))
+			mux.Handle("GET /api/admin/projects/{id}/status", requireAuth(http.HandlerFunc(adminHandlers.GetProjectStatus)))
+		} else {
+			mux.HandleFunc("GET /api/admin/projects", adminHandlers.ListProjects)
+			mux.HandleFunc("POST /api/admin/projects", adminHandlers.CreateProject)
+			mux.HandleFunc("GET /api/admin/projects/{id}", adminHandlers.GetProject)
+			mux.HandleFunc("PUT /api/admin/projects/{id}", adminHandlers.UpdateProject)
+			mux.HandleFunc("DELETE /api/admin/projects/{id}", adminHandlers.DeleteProject)
+			mux.HandleFunc("POST /api/admin/projects/{id}/restart", adminHandlers.RestartProject)
+			mux.HandleFunc("GET /api/admin/projects/{id}/status", adminHandlers.GetProjectStatus)
+		}
+	}
 
 	if srv.authEnabled() {
 		// Auth handlers (extracted)
@@ -253,17 +368,19 @@ func main() {
 }
 
 type server struct {
-	cfg        config.GatewayConfig
-	store      sessions.Store
-	authStore  auth.Store
-	authMgr    *auth.Manager
-	upgrader   websocket.Upgrader
-	uiFS       fs.FS
-	appMetrics *metrics.AppMetrics
-	tabManager *manager.Manager
-	tabStore   tabs.Store
-	tabSubsMu  sync.Mutex
-	tabSubs    map[string]map[chan []byte]struct{}
+	cfg          config.GatewayConfig
+	store        sessions.Store
+	authStore    auth.Store
+	authMgr      *auth.Manager
+	projectStore *projects.PGStore
+	projCtrl     *controller.Controller
+	upgrader     websocket.Upgrader
+	uiFS         fs.FS
+	appMetrics   *metrics.AppMetrics
+	tabManager   *manager.Manager
+	tabStore     tabs.Store
+	tabSubsMu    sync.Mutex
+	tabSubs      map[string]map[chan []byte]struct{}
 }
 
 type contextKey string
@@ -320,10 +437,11 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 		apierrors.WriteError(w, apierrors.BadRequest("missing tab parameter", ""))
 		return
 	}
+	forceTakeover := r.URL.Query().Get("force") == "true"
 	clientID := s.ensureClientID(w, r)
 	remoteAddr := r.RemoteAddr
 
-	log.Printf("[GW %s] Tab connection attempt from %s (client=%s)", tabID, remoteAddr, clientID)
+	log.Printf("[GW %s] Tab connection attempt from %s (client=%s, force=%v)", tabID, remoteAddr, clientID, forceTakeover)
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -338,7 +456,9 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 
 	log.Printf("[GW %s] Connection established (client=%s)", tabID, clientID)
 
-	if err := s.tabManager.Attach(r.Context(), tabID, clientID, conn); err != nil {
+	// Use background context after WebSocket upgrade - the original request context
+	// is no longer valid after hijacking and can cause "invalid Body.Read" panics
+	if err := s.tabManager.AttachWithOptions(context.Background(), tabID, clientID, conn, forceTakeover); err != nil {
 		log.Printf("[GW %s] Attach failed: %v", tabID, err)
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()), time.Now().Add(time.Second))
 		return
@@ -482,11 +602,22 @@ func (s *server) handleTabEventsWS(w http.ResponseWriter, r *http.Request) {
 	ch := s.subscribeTabEvents(clientID)
 	defer s.unsubscribeTabEvents(clientID, ch)
 	s.broadcastTabSnapshot(clientID)
-	ctx := r.Context()
+	// Use a done channel tied to connection close instead of r.Context()
+	// because the original request context is invalid after WebSocket hijack
+	done := make(chan struct{})
+	go func() {
+		// This goroutine waits for the connection to close (ReadMessage will fail)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				close(done)
+				return
+			}
+		}
+	}()
 	for {
 		select {
-		case <-ctx.Done():
-			log.Printf("[TabEvents %s] Context cancelled", clientID)
+		case <-done:
+			log.Printf("[TabEvents %s] Connection closed by client", clientID)
 			return
 		case msg, ok := <-ch:
 			if !ok {
@@ -539,6 +670,10 @@ func (s *server) handleTabEventsSSE(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleTabStatusUpdate(tab tabs.Tab) {
 	s.broadcastTabUpdate(tab)
+}
+
+func (s *server) handleTabMetricsUpdate(tabID string, metrics gatewaymetrics.TabMetrics) {
+	s.broadcastMetricsUpdate(tabID, metrics)
 }
 
 func (s *server) ensureClientID(w http.ResponseWriter, r *http.Request) string {
@@ -602,6 +737,22 @@ func (s *server) broadcastTabUpdate(tab tabs.Tab) {
 
 func (s *server) broadcastTabDelete(clientID, tabID string) {
 	s.sendTabEvent(clientID, map[string]any{"type": "delete", "tabId": tabID})
+}
+
+func (s *server) broadcastMetricsUpdate(tabID string, metrics gatewaymetrics.TabMetrics) {
+	// Get tab to find the client ID
+	if s.tabStore == nil {
+		return
+	}
+	tab, err := s.tabStore.Get(context.Background(), tabID)
+	if err != nil {
+		return
+	}
+	s.sendTabEvent(tab.ClientID, map[string]any{
+		"type":    "metrics",
+		"tabId":   tabID,
+		"metrics": metrics,
+	})
 }
 
 func (s *server) sendTabEvent(clientID string, payload any) {

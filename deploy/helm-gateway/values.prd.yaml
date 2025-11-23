@@ -1,0 +1,67 @@
+# KubeTTY Gateway - Production Environment
+# Deploy to kubetty-gateway namespace
+# This file contains production-specific overrides to values.yaml
+
+# Use stable tag for production
+image:
+  tag: "0.7.2"
+  pullPolicy: IfNotPresent
+
+deploymentId: kubetty-gateway
+
+# Authentication - enabled for production
+auth:
+  mode: local
+  cookieSecure: true
+
+# Database - production CNPG cluster
+cnpg:
+  host: kubetty-shared-rw
+  port: 5432
+  database: kubetty
+  userSecret: kubetty-postgres-user
+  usernameKey: username
+  passwordKey: password
+
+# Production ingress
+ingress:
+  enabled: true
+  className: nginx
+  tlsSecret: star-support-tools-tls
+  hosts:
+    - host: kubetty.support.tools
+      path: /
+
+rbac:
+  create: true
+  projectNamespaces: []
+  # No suffix for production (owns the cluster-scoped resources)
+  clusterResourceSuffix: ""
+
+# Project controller for production
+controller:
+  enabled: true
+  # Target namespace for dynamically managed projects (single-namespace mode)
+  projectsNamespace: "kubetty-projects-prd"
+  # Prefix for all Kubernetes resources created by controller
+  resourcePrefix: "kubetty-project-"
+  reconcileInterval: 30s
+  healthCheckInterval: 60s
+  envSecretName: env-secrets
+
+# Production resources
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+prometheus:
+  scrape:
+    enabled: true
+    path: /metrics
+    port: 8080
+  podMonitor:
+    enabled: false

@@ -1,11 +1,13 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import TerminalView from "./components/TerminalView";
 import TabBar from "./components/TabBar";
+import StatusBar from "./components/StatusBar";
 import ProjectPicker from "./components/ProjectPicker";
 import Login from "./components/Login";
 import ProfileModal from "./components/ProfileModal";
 import PasswordChangeModal from "./components/PasswordChangeModal";
 import LogoutConfirmDialog from "./components/LogoutConfirmDialog";
+import AdminProjectList from "./components/AdminProjectList";
 import { useAuth } from "./contexts/AuthContext";
 import { GatewayTab, ProjectInfo, ProjectsResponse, TabEvent } from "./types";
 import { parseErrorResponse } from "./utils/errorParser";
@@ -27,6 +29,7 @@ const App = () => {
   const [profileOpen, setProfileOpen] = useState(false);
   const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
   const [logoutDialogOpen, setLogoutDialogOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
   const [eventRetry, setEventRetry] = useState(0);
   const authenticated = authState === "authenticated";
 
@@ -127,6 +130,12 @@ const App = () => {
             });
             return next;
           });
+        } else if (payload.type === "metrics") {
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.tabId === payload.tabId ? { ...t, metrics: payload.metrics } : t
+            )
+          );
         }
       } catch {
         // Ignore parse errors
@@ -214,9 +223,23 @@ const App = () => {
       tabs.map((tab) => ({
         tabId: tab.tabId,
         label: projectLabels.get(tab.projectId) || tab.projectId,
-        status: tab.status
+        status: tab.status,
+        metrics: tab.metrics
       })),
     [tabs, projectLabels]
+  );
+
+  const activeTab = useMemo(
+    () => (activeTabId ? tabs.find((t) => t.tabId === activeTabId) : null),
+    [tabs, activeTabId]
+  );
+
+  const activeTabLabel = useMemo(
+    () =>
+      activeTab
+        ? projectLabels.get(activeTab.projectId) || activeTab.projectId
+        : "",
+    [activeTab, projectLabels]
   );
 
   const renderHeader = () => (
@@ -227,6 +250,11 @@ const App = () => {
       </div>
       {authenticated && (
         <div className="session-info">
+          {showGatewayUI && (
+            <button className="admin-link" onClick={() => setAdminOpen(true)}>
+              Admin
+            </button>
+          )}
           {authUser && (
             <button
               className="username-button"
@@ -272,6 +300,9 @@ const App = () => {
             onNew={() => setPickerOpen(true)}
             projects={projects}
           />
+          {activeTab && (
+            <StatusBar tabLabel={activeTabLabel} metrics={activeTab.metrics} />
+          )}
           <section className="main full-width tabbed">
             {tabs.length === 0 ? (
               <div className="tab-empty">
@@ -330,6 +361,9 @@ const App = () => {
       )}
       {logoutDialogOpen && (
         <LogoutConfirmDialog onClose={() => setLogoutDialogOpen(false)} />
+      )}
+      {adminOpen && (
+        <AdminProjectList onClose={() => setAdminOpen(false)} />
       )}
     </div>
   );

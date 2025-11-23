@@ -1,0 +1,149 @@
+# KubeTTY Gateway Helm Chart Values
+# Multi-project gateway with authentication and tabbed interface
+
+# Container image configuration
+image:
+  repository: harbor.support.tools/kubetty/kubetty
+  tag: "0.7.2"
+  pullPolicy: Always
+
+# Image pull secrets for private registries
+imagePullSecrets:
+  - harbor-supporttools
+
+# Unique deployment identifier
+deploymentId: kubetty-gateway
+
+# Additional environment variables (optional)
+# Example:
+#   env:
+#     LOG_LEVEL: debug
+env: {}
+
+# Authentication configuration
+auth:
+  # Authentication mode: "disabled" or "local"
+  mode: local
+
+  # JWT secret (inline - not recommended for production)
+  jwtSecret: ""
+
+  # JWT secret from Kubernetes secret (recommended)
+  jwtSecretSecret:
+    name: "kubetty-gateway-auth"
+    key: jwt-secret
+
+  # JWT configuration
+  issuer: kubetty
+  accessTTL: 15m
+  refreshTTL: 720h
+
+  # Cookie configuration
+  cookieDomain: ""
+  cookieSecure: true
+
+# Project catalog configuration
+catalog:
+  # Inline YAML content for projects catalog
+  # These are externally managed projects (not controlled by the project controller)
+  inline: |
+    projects:
+      - id: beacon-support
+        displayName: "Beacon Support"
+        namespace: kubetty-beacon-support
+        service: beacon-support-kubetty-project
+        port: 8080
+      - id: project-b
+        displayName: "Project B"
+        namespace: kubetty-project-b
+        service: project-b-kubetty-project
+        port: 8080
+
+  # Use existing ConfigMap instead of inline
+  existingConfigMap: ""
+
+  # Mount configuration
+  mountPath: /etc/kubetty
+  fileName: projects.yaml
+
+# CloudNativePG database configuration
+# REQUIRED for gateway mode
+cnpg:
+  host: kubetty-shared-rw
+  port: 5432
+  database: kubetty
+  userSecret: kubetty-postgres-user
+  usernameKey: username
+  passwordKey: password
+
+# Kubernetes Service
+service:
+  type: ClusterIP
+  port: 8080
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: nginx
+  tlsSecret: star-support-tools-tls
+  hosts:
+    - host: kubetty.support.tools
+      path: /
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+
+# ServiceAccount
+serviceAccount:
+  create: true
+  name: ""
+
+# RBAC for cross-namespace access to project pods
+rbac:
+  create: true
+  # Namespaces where gateway can proxy to project pods
+  projectNamespaces: []
+  # Suffix for cluster-scoped resources (ClusterRole, ClusterRoleBinding)
+  # Use "-dev" for dev deployments to avoid conflicts with prod
+  clusterResourceSuffix: ""
+
+# Project controller configuration
+# Enables dynamic project lifecycle management via the API
+controller:
+  # Enable the project controller (requires cluster-wide RBAC)
+  enabled: true
+  # Target namespace for dynamically managed projects (single-namespace mode)
+  projectsNamespace: "kubetty-projects"
+  # Prefix for all Kubernetes resources created by controller
+  resourcePrefix: "kubetty-project-"
+  # Reconciliation interval (how often to check project status)
+  reconcileInterval: 30s
+  # Health check interval for running projects
+  healthCheckInterval: 60s
+  # Name of the secret containing project environment variables
+  envSecretName: env-secrets
+
+# Resource limits
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+# Pod annotations
+podAnnotations: {}
+
+# Prometheus monitoring
+prometheus:
+  scrape:
+    enabled: true
+    path: /metrics
+    port: 8080
+  podMonitor:
+    enabled: false
+    interval: 30s
+  rules:
+    enabled: false

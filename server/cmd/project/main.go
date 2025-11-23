@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/config"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/health"
+	"github.com/supporttools/KubeTTY/server/internal/shared/ptylogger"
 	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
 )
 
@@ -57,6 +59,9 @@ type server struct {
 
 	// Metrics
 	appMetrics *appMetrics
+
+	// PTY I/O logger for Loki capture
+	ptyLogger *ptylogger.Logger
 }
 
 func main() {
@@ -75,13 +80,42 @@ func main() {
 	// Initialize metrics
 	appMetrics := newAppMetrics()
 
+	// Initialize PTY logger for Loki capture
+	ptyLog := ptylogger.New(cfg.SessionID, ptylogger.Options{
+		Enabled:    cfg.PTYLogEnabled,
+		MaxLineLen: cfg.PTYLogMaxLineLen,
+	})
+	if cfg.PTYLogEnabled {
+		log.WithField("session_id", cfg.SessionID).Info("PTY logging enabled for Loki capture")
+	}
+
 	srv := &server{
 		cfg: &cfg,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 		appMetrics: appMetrics,
+		ptyLogger:  ptyLog,
 	}
+
+	// Reap zombie children (critical when running as PID 1 in containers)
+	// When kubetty-project runs as PID 1, it inherits responsibility for
+	// reaping ALL orphaned child processes spawned by the bash PTY.
+	sigchldChan := make(chan os.Signal, 1)
+	signal.Notify(sigchldChan, syscall.SIGCHLD)
+	go func() {
+		for range sigchldChan {
+			// Reap all exited children in a loop (multiple may have exited)
+			for {
+				var wstatus syscall.WaitStatus
+				wpid, err := syscall.Wait4(-1, &wstatus, syscall.WNOHANG, nil)
+				if wpid <= 0 || err != nil {
+					break
+				}
+				log.WithField("pid", wpid).Debug("Reaped zombie child process")
+			}
+		}
+	}()
 
 	// Setup HTTP routes
 	mux := http.NewServeMux()
@@ -97,6 +131,9 @@ func main() {
 
 	// Project endpoints - PTY WebSocket only (no session logs without DB)
 	mux.HandleFunc("/ws", srv.handleWebsocket)
+
+	// Resource metrics endpoint for gateway polling
+	mux.HandleFunc("/api/metrics", srv.handleMetrics)
 
 	// Static files
 	mux.HandleFunc("/", srv.staticHandler)
@@ -226,6 +263,12 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		if s.appMetrics != nil {
 			s.appMetrics.observeWSBytes("in", len(data))
 		}
+
+		// Log user input for Loki capture
+		if s.ptyLogger != nil {
+			s.ptyLogger.Write(ptylogger.DirectionIn, data)
+		}
+
 		if _, err := ps.ptmx.Write(data); err != nil {
 			log.Printf("pty write error: %v", err)
 			return
@@ -316,10 +359,20 @@ func (s *server) initPTY(ctx context.Context) error {
 
 				s.pty.broadcast(data)
 
+				// Log PTY output for Loki capture
+				if s.ptyLogger != nil {
+					s.ptyLogger.Write(ptylogger.DirectionOut, data)
+				}
+
 				if s.appMetrics != nil {
 					s.appMetrics.observeWSBytes("out", n)
 				}
 			}
+		}
+
+		// Flush remaining buffered log data when PTY closes
+		if s.ptyLogger != nil {
+			s.ptyLogger.Flush()
 		}
 	}()
 
@@ -400,4 +453,180 @@ func (ps *ptySession) broadcastClose() {
 func (s *server) staticHandler(w http.ResponseWriter, r *http.Request) {
 	// Placeholder - will be implemented
 	http.NotFound(w, r)
+}
+
+// handleMetrics returns resource metrics (disk, network) for the project pod.
+// CPU and memory metrics are collected by the gateway via Kubernetes metrics-server.
+func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	response := struct {
+		Disk    resourceMetric `json:"disk"`
+		Network networkMetric  `json:"network"`
+	}{
+		Disk:    getDiskMetrics(),
+		Network: getNetworkMetrics(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.WithError(err).Error("Failed to encode metrics response")
+	}
+}
+
+type resourceMetric struct {
+	Usage   int64 `json:"usage"`
+	Limit   int64 `json:"limit"`
+	Percent int   `json:"percent"`
+}
+
+type networkMetric struct {
+	RxBytes int64 `json:"rxBytes"`
+	TxBytes int64 `json:"txBytes"`
+	RxRate  int64 `json:"rxRate"` // Calculated by gateway
+	TxRate  int64 `json:"txRate"` // Calculated by gateway
+}
+
+// getDiskMetrics returns disk usage for the root filesystem.
+func getDiskMetrics() resourceMetric {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs("/", &stat); err != nil {
+		log.WithError(err).Debug("Failed to get disk stats")
+		return resourceMetric{}
+	}
+
+	total := int64(stat.Blocks) * int64(stat.Bsize)
+	free := int64(stat.Bfree) * int64(stat.Bsize)
+	used := total - free
+
+	var percent int
+	if total > 0 {
+		percent = int((used * 100) / total)
+	}
+
+	return resourceMetric{
+		Usage:   used,
+		Limit:   total,
+		Percent: percent,
+	}
+}
+
+// getNetworkMetrics reads network statistics from /proc/net/dev.
+func getNetworkMetrics() networkMetric {
+	file, err := os.Open("/proc/net/dev")
+	if err != nil {
+		log.WithError(err).Debug("Failed to open /proc/net/dev")
+		return networkMetric{}
+	}
+	defer file.Close()
+
+	var totalRx, totalTx int64
+	buf := make([]byte, 4096)
+	n, err := file.Read(buf)
+	if err != nil {
+		log.WithError(err).Debug("Failed to read /proc/net/dev")
+		return networkMetric{}
+	}
+
+	// Parse /proc/net/dev format:
+	// Inter-|   Receive                                                |  Transmit
+	//  face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+	//    lo: 1234...
+	//  eth0: 5678...
+	lines := string(buf[:n])
+	for _, line := range splitLines(lines) {
+		// Skip header lines (contain "|")
+		if len(line) == 0 || containsChar(line, '|') {
+			continue
+		}
+
+		// Parse interface line
+		fields := splitFields(line)
+		if len(fields) < 10 {
+			continue
+		}
+
+		// Skip loopback interface
+		iface := trimColon(fields[0])
+		if iface == "lo" {
+			continue
+		}
+
+		// fields[1] = rx bytes, fields[9] = tx bytes
+		rx := parseIntSafe(fields[1])
+		tx := parseIntSafe(fields[9])
+		totalRx += rx
+		totalTx += tx
+	}
+
+	return networkMetric{
+		RxBytes: totalRx,
+		TxBytes: totalTx,
+	}
+}
+
+// Helper functions for parsing /proc/net/dev without importing strings package
+func splitLines(s string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			lines = append(lines, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	return lines
+}
+
+func splitFields(s string) []string {
+	var fields []string
+	start := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' || s[i] == '\t' {
+			if start >= 0 {
+				fields = append(fields, s[start:i])
+				start = -1
+			}
+		} else {
+			if start < 0 {
+				start = i
+			}
+		}
+	}
+	if start >= 0 {
+		fields = append(fields, s[start:])
+	}
+	return fields
+}
+
+func containsChar(s string, c byte) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return true
+		}
+	}
+	return false
+}
+
+func trimColon(s string) string {
+	if len(s) > 0 && s[len(s)-1] == ':' {
+		return s[:len(s)-1]
+	}
+	return s
+}
+
+func parseIntSafe(s string) int64 {
+	var n int64
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			n = n*10 + int64(s[i]-'0')
+		}
+	}
+	return n
 }

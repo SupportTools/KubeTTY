@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -37,13 +36,8 @@ func loadCommonConfig() (CommonConfig, error) {
 	}
 	cfg.DeploymentID = sharedconfig.GetEnv("DEPLOYMENT_ID", cfg.SessionID)
 
-	// Validate required fields
-	if cfg.SessionID == "" {
-		return cfg, fmt.Errorf("SESSION_ID is required")
-	}
-	if cfg.CNPGHost == "" || cfg.CNPGDatabase == "" || cfg.CNPGUser == "" || cfg.CNPGPassword == "" {
-		return cfg, fmt.Errorf("CNPG_* env vars are required")
-	}
+	// Note: SESSION_ID validation moved to project config (not required for gateway mode)
+	// CNPG validation moved to gateway config (not required for project mode)
 
 	return cfg, nil
 }

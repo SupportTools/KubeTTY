@@ -65,6 +65,23 @@ WHERE tab_id=$1`
 	return nil
 }
 
+// UpdateClientID updates the client ID for a tab (used for force takeover).
+func (s *PGXStore) UpdateClientID(ctx context.Context, tabID, clientID string) error {
+	const stmt = `
+UPDATE gateway_tabs
+SET client_id=$2,
+    updated_at=NOW()
+WHERE tab_id=$1`
+	cmd, err := s.pool.Exec(ctx, stmt, tabID, clientID)
+	if err != nil {
+		return fmt.Errorf("update tab client_id: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Delete removes a tab row permanently.
 func (s *PGXStore) Delete(ctx context.Context, tabID string) error {
 	const stmt = `DELETE FROM gateway_tabs WHERE tab_id=$1`

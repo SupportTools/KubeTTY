@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import HealthIndicator from './HealthIndicator';
 
 type Props = {
   onReconnect?: () => void;
@@ -17,6 +18,8 @@ const MAX_PTY_ROWS = 200;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+const FORCE_RECONNECT_THRESHOLD = 3; // Show force button after this many failed attempts
+
 const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: Props) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -30,6 +33,26 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
   const pingTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const connectedOnceRef = useRef(false);
   const reconnectAttempts = useRef(0);
+  const [showForceButton, setShowForceButton] = useState(false);
+  const forceReconnectRef = useRef(false);
+
+  // Handler for when HTTP health check fails - trigger WebSocket reconnect
+  const handleHealthUnhealthy = useCallback(() => {
+    // Only trigger reconnect if WebSocket is currently open
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      // Close the WebSocket to trigger reconnection logic
+      socketRef.current.close();
+    }
+  }, []);
+
+  // Handler for force reconnect button - takes over session from another client
+  const handleForceReconnect = useCallback(() => {
+    forceReconnectRef.current = true;
+    setShowForceButton(false);
+    reconnectAttempts.current = 0;
+    // Trigger reconnect
+    setRetrySignal((prev) => prev + 1);
+  }, []);
 
   useEffect(() => {
     const term = new Terminal({
@@ -69,10 +92,17 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
       return;
     }
 
-    const targetUrl = wsUrl || (() => {
+    let targetUrl = wsUrl || (() => {
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
       return `${protocol}://${window.location.host}/ws`;
     })();
+
+    // Append force=true parameter if force reconnect was triggered
+    if (forceReconnectRef.current) {
+      const separator = targetUrl.includes('?') ? '&' : '?';
+      targetUrl = `${targetUrl}${separator}force=true`;
+      forceReconnectRef.current = false; // Reset after use
+    }
 
     socketRef.current?.close();
     const socket = new WebSocket(targetUrl);
@@ -85,6 +115,7 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
       const wasReconnecting = connectedOnceRef.current;
       connectedOnceRef.current = true;
       reconnectAttempts.current = 0; // Reset on successful connection
+      setShowForceButton(false); // Hide force button on successful connection
       setStatus(wasReconnecting ? 'Reconnected' : 'Connected');
       if (wasReconnecting && onReconnect) {
         onReconnect();
@@ -100,6 +131,10 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
         // Exponential backoff: 1s, 2s, 4s, 8s, max 16s
         const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 16000);
         reconnectAttempts.current++;
+        // Show force reconnect button after threshold attempts
+        if (reconnectAttempts.current >= FORCE_RECONNECT_THRESHOLD) {
+          setShowForceButton(true);
+        }
         reconnectTimer.current = setTimeout(() => {
           setRetrySignal((prev) => prev + 1);
         }, delay);
@@ -178,6 +213,15 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
         <div className="connection-overlay">
           <div className="spinner"></div>
           <div className="connection-message">{extOverlay && externalLabel ? externalLabel : status}</div>
+          {showForceButton && (
+            <button
+              className="force-reconnect-button"
+              onClick={handleForceReconnect}
+              title="Force takeover of session from another client"
+            >
+              Force Reconnect
+            </button>
+          )}
         </div>
       )}
       <div
@@ -185,15 +229,29 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
           position: 'absolute',
           top: 8,
           right: 12,
-          background: '#0f1115',
-          padding: '2px 8px',
-          borderRadius: 4,
-          fontSize: 12,
-          color: '#b3b6c2',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
           zIndex: 1
         }}
       >
-        {externalLabel || status}
+        <HealthIndicator
+          wsUrl={wsUrl}
+          onUnhealthy={handleHealthUnhealthy}
+          checkInterval={5000}
+          failureThreshold={3}
+        />
+        <div
+          style={{
+            background: '#0f1115',
+            padding: '2px 8px',
+            borderRadius: 4,
+            fontSize: 12,
+            color: '#b3b6c2'
+          }}
+        >
+          {externalLabel || status}
+        </div>
       </div>
     </div>
   );

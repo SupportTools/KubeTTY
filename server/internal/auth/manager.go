@@ -160,7 +160,9 @@ func (m *Manager) IssueTokenPair(ctx context.Context, user *User, meta TokenMeta
 	}, nil
 }
 
-// Refresh exchanges an existing refresh token for a new pair (rotation).
+// Refresh validates the refresh token and issues a new access token.
+// The refresh token is reused (no rotation) to avoid race conditions
+// when multiple refresh requests occur close together.
 func (m *Manager) Refresh(ctx context.Context, token string, meta TokenMetadata) (*TokenPair, error) {
 	tokenID, secret, err := ParseRefreshToken(token)
 	if err != nil {
@@ -187,10 +189,23 @@ func (m *Manager) Refresh(ctx context.Context, token string, meta TokenMetadata)
 	if !user.IsActive {
 		return nil, ErrInvalidCredentials
 	}
-	if err := m.store.RevokeRefreshToken(ctx, tokenID, now); err != nil {
+
+	// Issue new access token only (no rotation - reuse existing refresh token)
+	accessExp := now.Add(m.accessTTL)
+	accessToken, err := m.signAccessToken(user, now, accessExp)
+	if err != nil {
 		return nil, err
 	}
-	return m.IssueTokenPair(ctx, user, meta)
+
+	return &TokenPair{
+		AccessToken:      accessToken,
+		AccessExpiresAt:  accessExp,
+		AccessIssuedAt:   now,
+		RefreshToken:     token, // Return the same refresh token
+		RefreshTokenID:   tokenID,
+		RefreshExpiresAt: record.ExpiresAt, // Original expiry
+		RefreshIssuedAt:  record.IssuedAt,  // Original issue time
+	}, nil
 }
 
 // ValidateAccessToken parses and verifies a JWT access token.

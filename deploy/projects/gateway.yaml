@@ -1,0 +1,88 @@
+# KubeTTY Gateway Values
+# Deploy with: helm upgrade --install gateway ../helm-gateway -n kubetty-shared -f gateway.yaml
+
+image:
+  repository: harbor.support.tools/kubetty/kubetty
+  tag: "0.6.9"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - harbor-supporttools
+
+deploymentId: kubetty-gateway
+
+auth:
+  mode: local
+  jwtSecretSecret:
+    name: kubetty-gateway-auth
+    key: jwt-secret
+  issuer: kubetty
+  accessTTL: 15m
+  refreshTTL: 720h
+  cookieDomain: ""
+  cookieSecure: true
+
+# Project catalog - defines available projects
+catalog:
+  inline: |
+    projects:
+      - id: beacon-support
+        displayName: "Beacon Support"
+        namespace: kubetty-beacon-support
+        service: project
+        port: 8080
+
+cnpg:
+  host: kubetty-shared-rw
+  port: 5432
+  database: kubetty
+  userSecret: kubetty-postgres-user
+  usernameKey: username
+  passwordKey: password
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: nginx
+  tlsSecret: star-support-tools-tls
+  hosts:
+    - host: kubetty.support.tools
+      path: /
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$request_uri"
+
+serviceAccount:
+  create: true
+  name: ""
+
+rbac:
+  create: true
+  projectNamespaces:
+    - kubetty-beacon-support
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+podAnnotations: {}
+
+prometheus:
+  scrape:
+    enabled: true
+    path: /metrics
+    port: 8080
+  podMonitor:
+    enabled: false
+  rules:
+    enabled: false

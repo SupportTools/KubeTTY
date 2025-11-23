@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +11,8 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // LoginRequest represents the login request body.
@@ -121,9 +122,17 @@ func NewAuthLoginHandler(cfg AuthConfig, authMgr *auth.Manager, authStore auth.S
 
 		if authStore != nil {
 			if err := authStore.UpdateLastLogin(r.Context(), user.ID, time.Now()); err != nil {
-				log.Printf("warn: update last login: %v", err)
+				log.WithError(err).Warn("auth/login: failed to update last login")
 			}
 		}
+
+		log.WithFields(log.Fields{
+			"user_id":          user.ID.String(),
+			"username":         user.Username,
+			"refresh_token_id": tokens.RefreshTokenID.String(),
+			"refresh_expires":  tokens.RefreshExpiresAt.Format(time.RFC3339),
+			"client_ip":        r.RemoteAddr,
+		}).Info("auth/login: login successful")
 
 		SetAuthCookies(w, tokens, cfg)
 		_ = util.WriteJSON(w, http.StatusOK, LoginResponse{

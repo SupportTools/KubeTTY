@@ -365,6 +365,8 @@ func main() {
 			mux.Handle("DELETE /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.DeleteProject)))
 			mux.Handle("POST /api/admin/projects/{id}/restart", requireAuth(http.HandlerFunc(adminHandlers.RestartProject)))
 			mux.Handle("GET /api/admin/projects/{id}/status", requireAuth(http.HandlerFunc(adminHandlers.GetProjectStatus)))
+			mux.Handle("GET /api/admin/projects/{id}/upgrade-info", requireAuth(http.HandlerFunc(adminHandlers.GetUpgradeInfo)))
+			mux.Handle("POST /api/admin/projects/{id}/upgrade", requireAuth(http.HandlerFunc(adminHandlers.UpgradeProject)))
 		} else {
 			mux.HandleFunc("GET /api/admin/projects", adminHandlers.ListProjects)
 			mux.HandleFunc("POST /api/admin/projects", adminHandlers.CreateProject)
@@ -373,6 +375,8 @@ func main() {
 			mux.HandleFunc("DELETE /api/admin/projects/{id}", adminHandlers.DeleteProject)
 			mux.HandleFunc("POST /api/admin/projects/{id}/restart", adminHandlers.RestartProject)
 			mux.HandleFunc("GET /api/admin/projects/{id}/status", adminHandlers.GetProjectStatus)
+			mux.HandleFunc("GET /api/admin/projects/{id}/upgrade-info", adminHandlers.GetUpgradeInfo)
+			mux.HandleFunc("POST /api/admin/projects/{id}/upgrade", adminHandlers.UpgradeProject)
 		}
 	}
 

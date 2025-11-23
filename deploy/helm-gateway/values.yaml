@@ -123,6 +123,8 @@ controller:
   healthCheckInterval: 60s
   # Name of the secret containing project environment variables
   envSecretName: env-secrets
+  # Image pull secrets for project pods (comma-separated list)
+  imagePullSecrets: "harbor-supporttools"
 
 # Resource limits
 resources:

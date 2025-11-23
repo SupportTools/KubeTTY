@@ -28,6 +28,8 @@ type GatewayConfig struct {
 	MetricsInterval time.Duration // Metrics collection interval (default: 15s)
 	// Controller configuration for single-namespace project management
 	Controller ControllerConfig
+	// Recommended image tag for project upgrades (default: "latest")
+	RecommendedImageTag string
 }
 
 // ControllerConfig holds configuration for the single-namespace project controller.
@@ -37,6 +39,8 @@ type ControllerConfig struct {
 	ResourcePrefix      string        // Prefix for all resources (default: "kubetty-project-")
 	ReconcileInterval   time.Duration // Reconciliation interval (default: 30s)
 	HealthCheckInterval time.Duration // Health check interval (default: 60s)
+	EnvSecretName       string        // Name of secret containing project env vars (default: "env-secrets")
+	ImagePullSecrets    []string      // List of image pull secret names (default: ["harbor-supporttools"])
 }
 
 // ParseEnvironment extracts the environment suffix from ProjectsNamespace.
@@ -86,7 +90,10 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 			ResourcePrefix:      sharedconfig.GetEnv("RESOURCE_PREFIX", "kubetty-project-"),
 			ReconcileInterval:   sharedconfig.GetEnvDuration("RECONCILE_INTERVAL", 30*time.Second),
 			HealthCheckInterval: sharedconfig.GetEnvDuration("HEALTH_CHECK_INTERVAL", 60*time.Second),
+			EnvSecretName:       sharedconfig.GetEnv("ENV_SECRET_NAME", "env-secrets"),
+			ImagePullSecrets:    parseImagePullSecrets(sharedconfig.GetEnv("IMAGE_PULL_SECRETS", "harbor-supporttools")),
 		},
+		RecommendedImageTag: sharedconfig.GetEnv("RECOMMENDED_IMAGE_TAG", "latest"),
 	}
 
 	// Load project catalog if path is provided
@@ -139,4 +146,20 @@ func (c GatewayConfig) GetAuthCookieDomain() string {
 // GetAuthCookieSecure returns the cookie secure flag for AuthConfig interface.
 func (c GatewayConfig) GetAuthCookieSecure() bool {
 	return c.AuthCookieSecure
+}
+
+// parseImagePullSecrets parses a comma-separated list of image pull secret names.
+func parseImagePullSecrets(s string) []string {
+	if s == "" {
+		return nil
+	}
+	secrets := strings.Split(s, ",")
+	result := make([]string, 0, len(secrets))
+	for _, sec := range secrets {
+		sec = strings.TrimSpace(sec)
+		if sec != "" {
+			result = append(result, sec)
+		}
+	}
+	return result
 }

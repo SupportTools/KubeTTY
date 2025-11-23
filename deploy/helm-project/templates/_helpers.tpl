@@ -25,4 +25,5 @@ app.kubernetes.io/component: project
 {{- define "kubetty-project.selectorLabels" -}}
 app.kubernetes.io/name: project
 app.kubernetes.io/instance: {{ .Release.Name }}
+kubetty.io/project: {{ .Values.projectId | quote }}
 {{- end -}}

@@ -11,6 +11,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	metricsv1beta1 "k8s.io/metrics/pkg/client/clientset/versioned"
 )
@@ -19,7 +20,7 @@ import (
 type TabInfo struct {
 	TabID         string
 	ProjectID     string
-	PodName       string
+	ProjectName   string // Project name for label selector (kubetty.io/project=<name>)
 	Namespace     string
 	DownstreamURI string // Base URL for project pod (e.g., http://pod-ip:8080)
 	CPULimit      int64  // CPU limit in millicores
@@ -31,6 +32,7 @@ type Callback func(tabID string, metrics TabMetrics)
 
 // Collector collects resource metrics for tabs from Kubernetes and project pods.
 type Collector struct {
+	k8sClient     *kubernetes.Clientset
 	metricsClient *metricsv1beta1.Clientset
 	httpClient    *http.Client
 	interval      time.Duration
@@ -63,11 +65,18 @@ func NewCollector(interval time.Duration, callback Callback) (*Collector, error)
 		}, nil
 	}
 
+	// Create Kubernetes core client
+	k8sClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.WithError(err).Warn("Failed to create K8s client, pod metadata disabled")
+	}
+
 	// Create metrics client
 	metricsClient, err := metricsv1beta1.NewForConfig(config)
 	if err != nil {
 		log.WithError(err).Warn("Failed to create metrics client, K8s metrics disabled")
 		return &Collector{
+			k8sClient:     k8sClient,
 			httpClient:    &http.Client{Timeout: 5 * time.Second},
 			interval:      interval,
 			callback:      callback,
@@ -78,6 +87,7 @@ func NewCollector(interval time.Duration, callback Callback) (*Collector, error)
 	}
 
 	return &Collector{
+		k8sClient:     k8sClient,
 		metricsClient: metricsClient,
 		httpClient:    &http.Client{Timeout: 5 * time.Second},
 		interval:      interval,
@@ -112,7 +122,15 @@ func (c *Collector) RegisterTab(info TabInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tabs[info.TabID] = info
-	log.WithField("tabId", info.TabID).Debug("Registered tab for metrics collection")
+	log.WithFields(log.Fields{
+		"tabId":         info.TabID,
+		"projectId":     info.ProjectID,
+		"projectName":   info.ProjectName,
+		"namespace":     info.Namespace,
+		"downstreamURI": info.DownstreamURI,
+		"cpuLimit":      info.CPULimit,
+		"memoryLimit":   info.MemoryLimit,
+	}).Info("DEBUG: Registered tab for metrics collection with limits")
 }
 
 // UnregisterTab removes a tab from metrics collection.
@@ -168,11 +186,35 @@ func (c *Collector) collectTabMetrics(ctx context.Context, tab TabInfo) TabMetri
 		UpdatedAt: time.Now(),
 	}
 
+	log.WithFields(log.Fields{
+		"tabId":           tab.TabID,
+		"projectName":     tab.ProjectName,
+		"namespace":       tab.Namespace,
+		"downstreamURI":   tab.DownstreamURI,
+		"hasMetricClient": c.metricsClient != nil,
+	}).Info("DEBUG: collectTabMetrics starting")
+
 	// Collect CPU/Memory from Kubernetes metrics-server
-	if c.metricsClient != nil && tab.PodName != "" && tab.Namespace != "" {
+	if c.metricsClient != nil && tab.ProjectName != "" && tab.Namespace != "" {
+		log.WithField("tabId", tab.TabID).Info("DEBUG: Calling collectK8sMetrics")
 		k8sMetrics := c.collectK8sMetrics(ctx, tab)
 		metrics.CPU = k8sMetrics.CPU
 		metrics.Memory = k8sMetrics.Memory
+		metrics.Metadata = k8sMetrics.Metadata
+		log.WithFields(log.Fields{
+			"tabId":      tab.TabID,
+			"cpuUsage":   metrics.CPU.Usage,
+			"cpuPercent": metrics.CPU.Percent,
+			"memUsage":   metrics.Memory.Usage,
+			"memPercent": metrics.Memory.Percent,
+		}).Info("DEBUG: K8s metrics collected")
+	} else {
+		log.WithFields(log.Fields{
+			"tabId":            tab.TabID,
+			"metricsClientNil": c.metricsClient == nil,
+			"projectNameEmpty": tab.ProjectName == "",
+			"namespaceEmpty":   tab.Namespace == "",
+		}).Warn("DEBUG: Skipping K8s metrics collection - missing requirements")
 	}
 
 	// Collect Disk/Network from project pod endpoint
@@ -189,22 +231,75 @@ func (c *Collector) collectTabMetrics(ctx context.Context, tab TabInfo) TabMetri
 func (c *Collector) collectK8sMetrics(ctx context.Context, tab TabInfo) K8sMetrics {
 	result := K8sMetrics{}
 
-	podMetrics, err := c.metricsClient.MetricsV1beta1().PodMetricses(tab.Namespace).Get(ctx, tab.PodName, metav1.GetOptions{})
+	log.WithFields(log.Fields{
+		"tabId":       tab.TabID,
+		"projectName": tab.ProjectName,
+		"namespace":   tab.Namespace,
+		"cpuLimit":    tab.CPULimit,
+		"memoryLimit": tab.MemoryLimit,
+	}).Info("DEBUG: collectK8sMetrics called")
+
+	// Use label selector to find pods for this project
+	labelSelector := fmt.Sprintf("kubetty.io/project=%s", tab.ProjectName)
+	log.WithFields(log.Fields{
+		"tabId":    tab.TabID,
+		"selector": labelSelector,
+	}).Info("DEBUG: Querying metrics-server with label selector")
+
+	podMetricsList, err := c.metricsClient.MetricsV1beta1().PodMetricses(tab.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
 	if err != nil {
 		log.WithError(err).WithFields(log.Fields{
 			"tabId":     tab.TabID,
-			"pod":       tab.PodName,
+			"project":   tab.ProjectName,
 			"namespace": tab.Namespace,
-		}).Debug("Failed to get pod metrics from metrics-server")
+			"selector":  labelSelector,
+		}).Warn("DEBUG: Failed to list pod metrics from metrics-server")
 		return result
 	}
 
-	// Sum metrics from all containers
+	log.WithFields(log.Fields{
+		"tabId":    tab.TabID,
+		"podCount": len(podMetricsList.Items),
+	}).Info("DEBUG: metrics-server returned pod metrics")
+
+	if len(podMetricsList.Items) == 0 {
+		log.WithFields(log.Fields{
+			"tabId":     tab.TabID,
+			"project":   tab.ProjectName,
+			"namespace": tab.Namespace,
+			"selector":  labelSelector,
+		}).Warn("DEBUG: No pods found matching label selector")
+		return result
+	}
+
+	// Sum metrics from all containers in the first matching pod
+	// (each project should have only one pod)
+	podMetrics := podMetricsList.Items[0]
 	var cpuUsage, memUsage int64
 	for _, container := range podMetrics.Containers {
-		cpuUsage += container.Usage.Cpu().MilliValue()
-		memUsage += container.Usage.Memory().Value()
+		containerCPU := container.Usage.Cpu().MilliValue()
+		containerMem := container.Usage.Memory().Value()
+		log.WithFields(log.Fields{
+			"tabId":         tab.TabID,
+			"podName":       podMetrics.Name,
+			"containerName": container.Name,
+			"cpuMillicores": containerCPU,
+			"memoryBytes":   containerMem,
+		}).Info("DEBUG: Container metrics from metrics-server")
+		cpuUsage += containerCPU
+		memUsage += containerMem
 	}
+
+	log.WithFields(log.Fields{
+		"tabId":         tab.TabID,
+		"totalCPU":      cpuUsage,
+		"totalMemory":   memUsage,
+		"cpuLimit":      tab.CPULimit,
+		"memoryLimit":   tab.MemoryLimit,
+		"containersCnt": len(podMetrics.Containers),
+	}).Info("DEBUG: Total pod metrics aggregated")
 
 	// Calculate percentages
 	result.CPU = ResourceMetric{
@@ -221,6 +316,38 @@ func (c *Collector) collectK8sMetrics(ctx context.Context, tab TabInfo) K8sMetri
 	}
 	if tab.MemoryLimit > 0 {
 		result.Memory.Percent = int((memUsage * 100) / tab.MemoryLimit)
+	}
+
+	log.WithFields(log.Fields{
+		"tabId":      tab.TabID,
+		"cpuPercent": result.CPU.Percent,
+		"memPercent": result.Memory.Percent,
+	}).Info("DEBUG: Final calculated percentages")
+
+	// Collect pod metadata (node name, pod IP, etc.)
+	if c.k8sClient != nil {
+		pod, err := c.k8sClient.CoreV1().Pods(tab.Namespace).Get(ctx, podMetrics.Name, metav1.GetOptions{})
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"tabId":     tab.TabID,
+				"podName":   podMetrics.Name,
+				"namespace": tab.Namespace,
+			}).Warn("Failed to get pod details for metadata")
+		} else {
+			result.Metadata = &PodMetadata{
+				PodName:   pod.Name,
+				NodeName:  pod.Spec.NodeName,
+				Namespace: pod.Namespace,
+				PodIP:     pod.Status.PodIP,
+			}
+			log.WithFields(log.Fields{
+				"tabId":     tab.TabID,
+				"podName":   pod.Name,
+				"nodeName":  pod.Spec.NodeName,
+				"namespace": pod.Namespace,
+				"podIP":     pod.Status.PodIP,
+			}).Info("DEBUG: Pod metadata collected")
+		}
 	}
 
 	return result

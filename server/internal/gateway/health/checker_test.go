@@ -64,7 +64,7 @@ func TestBuildHealthURL(t *testing.T) {
 				Namespace: "my-namespace",
 				Port:      8080,
 			},
-			expected: "http://my-service.my-namespace.svc:8080/healthz",
+			expected: "http://my-service.my-namespace.svc:8080/api/healthz",
 		},
 		{
 			name: "custom health path",
@@ -90,7 +90,7 @@ func TestBuildHealthURL(t *testing.T) {
 					Path: "",
 				},
 			},
-			expected: "http://svc.ns.svc:80/healthz",
+			expected: "http://svc.ns.svc:80/api/healthz",
 		},
 	}
 
@@ -322,4 +322,84 @@ func TestStatusCopy(t *testing.T) {
 	// Get status again - should still be online (we got a copy)
 	status2 := checker.GetStatus("proj-1")
 	require.Equal(t, StatusOnline, status2.Status)
+}
+
+func TestAddProject(t *testing.T) {
+	// Start with one project
+	projects := []gatewayconfig.Project{
+		{ID: "proj-1", Service: "svc1", Namespace: "ns1", Port: 8080},
+	}
+	checker := NewChecker(projects)
+
+	// Verify initial state
+	require.Len(t, checker.statuses, 1)
+	require.NotNil(t, checker.GetStatus("proj-1"))
+	require.Nil(t, checker.GetStatus("proj-2"))
+
+	// Add a new project
+	checker.AddProject(gatewayconfig.Project{
+		ID: "proj-2", Service: "svc2", Namespace: "ns2", Port: 9090,
+	})
+
+	// Verify new project was added
+	require.Len(t, checker.statuses, 2)
+	status := checker.GetStatus("proj-2")
+	require.NotNil(t, status)
+	require.Equal(t, StatusUnknown, status.Status)
+
+	// Adding the same project again should be a no-op
+	checker.AddProject(gatewayconfig.Project{
+		ID: "proj-2", Service: "svc2-new", Namespace: "ns2-new", Port: 9091,
+	})
+	require.Len(t, checker.statuses, 2)
+}
+
+func TestRemoveProject(t *testing.T) {
+	projects := []gatewayconfig.Project{
+		{ID: "proj-1", Service: "svc1", Namespace: "ns1", Port: 8080},
+		{ID: "proj-2", Service: "svc2", Namespace: "ns2", Port: 8080},
+	}
+	checker := NewChecker(projects)
+
+	// Verify initial state
+	require.Len(t, checker.statuses, 2)
+	require.NotNil(t, checker.GetStatus("proj-1"))
+	require.NotNil(t, checker.GetStatus("proj-2"))
+
+	// Remove proj-1
+	checker.RemoveProject("proj-1")
+
+	// Verify proj-1 was removed but proj-2 remains
+	require.Len(t, checker.statuses, 1)
+	require.Nil(t, checker.GetStatus("proj-1"))
+	require.NotNil(t, checker.GetStatus("proj-2"))
+
+	// Removing a nonexistent project should be a no-op
+	checker.RemoveProject("nonexistent")
+	require.Len(t, checker.statuses, 1)
+}
+
+func TestAddRemoveProjectDynamic(t *testing.T) {
+	// Test that dynamically added projects get health checked
+	checker := NewChecker(nil) // Start with no projects
+
+	// Add a project dynamically
+	checker.AddProject(gatewayconfig.Project{
+		ID: "dynamic-1", Service: "svc-dyn", Namespace: "ns-dyn", Port: 8080,
+	})
+
+	// Verify project was added to statuses
+	require.Len(t, checker.statuses, 1)
+	status := checker.GetStatus("dynamic-1")
+	require.NotNil(t, status)
+	require.Equal(t, StatusUnknown, status.Status)
+
+	// Verify project was added to projects slice (for health check loop)
+	statuses := checker.GetAllStatuses()
+	require.Contains(t, statuses, "dynamic-1")
+
+	// Remove the project
+	checker.RemoveProject("dynamic-1")
+	require.Len(t, checker.statuses, 0)
+	require.Nil(t, checker.GetStatus("dynamic-1"))
 }

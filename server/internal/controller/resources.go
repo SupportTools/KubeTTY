@@ -43,6 +43,10 @@ type ResourceConfig struct {
 	// Env is the environment suffix parsed from the namespace
 	// (e.g., "dev", "prd") - used for cluster-scoped resources
 	Env string
+
+	// ImagePullSecrets lists secret names for pulling container images
+	// (e.g., ["harbor-supporttools"])
+	ImagePullSecrets []string
 }
 
 // dnsNameRegex validates DNS subdomain names per RFC 1123
@@ -89,6 +93,18 @@ func (c ResourceConfig) ClusterRoleName(projectName, role string) string {
 		return fmt.Sprintf("%s-%s", baseName, role)
 	}
 	return fmt.Sprintf("%s-%s-%s", baseName, role, c.Env)
+}
+
+// buildImagePullSecrets converts a list of secret names to LocalObjectReferences.
+func buildImagePullSecrets(secretNames []string) []corev1.LocalObjectReference {
+	if len(secretNames) == 0 {
+		return nil
+	}
+	refs := make([]corev1.LocalObjectReference, len(secretNames))
+	for i, name := range secretNames {
+		refs[i] = corev1.LocalObjectReference{Name: name}
+	}
+	return refs
 }
 
 // BuildPVC creates a PersistentVolumeClaim for project data storage.
@@ -382,9 +398,10 @@ fi
 					SecurityContext: &corev1.PodSecurityContext{
 						SupplementalGroups: []int64{0},
 					},
-					InitContainers: initContainers,
-					Containers:     containers,
-					Volumes:        volumes,
+					ImagePullSecrets: buildImagePullSecrets(cfg.ImagePullSecrets),
+					InitContainers:   initContainers,
+					Containers:       containers,
+					Volumes:          volumes,
 				},
 			},
 		},

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -352,7 +353,7 @@ func main() {
 
 	// Admin API handlers for project management (requires auth when enabled)
 	if srv.projectStore != nil && srv.projCtrl != nil {
-		adminHandlers := handlers_admin.NewProjectHandlers(srv.projectStore, srv.projCtrl)
+		adminHandlers := handlers_admin.NewProjectHandlers(srv.projectStore, srv.projCtrl, srv.cfg.RecommendedImageTag)
 		// Set callback to unregister project from tabManager when deleted
 		adminHandlers.SetDeleteCallback(func(projectName string) {
 			tabManager.UnregisterProject(projectName)
@@ -401,7 +402,7 @@ func main() {
 			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjectsWithStatus()})
 		})))
 		mux.Handle("/api/tabs", requireAuth(http.HandlerFunc(srv.handleTabs)))
-		mux.Handle("/api/tabs/", requireAuth(http.HandlerFunc(srv.handleTabByID)))
+		mux.Handle("/api/tabs/", requireAuth(http.HandlerFunc(srv.routeTabByID)))
 		mux.Handle("/api/tabs/events", requireAuth(http.HandlerFunc(srv.handleTabEvents)))
 	} else {
 		// Session handlers (extracted) - no auth
@@ -417,7 +418,7 @@ func main() {
 			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjectsWithStatus()})
 		}))
 		mux.Handle("/api/tabs", http.HandlerFunc(srv.handleTabs))
-		mux.Handle("/api/tabs/", http.HandlerFunc(srv.handleTabByID))
+		mux.Handle("/api/tabs/", http.HandlerFunc(srv.routeTabByID))
 		mux.Handle("/api/tabs/events", http.HandlerFunc(srv.handleTabEvents))
 	}
 	// Static files are always public (React handles auth state)
@@ -596,6 +597,17 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// routeTabByID dispatches tab-specific requests to the appropriate handler
+func (s *server) routeTabByID(w http.ResponseWriter, r *http.Request) {
+	// Check if this is a health check request
+	if strings.HasSuffix(r.URL.Path, "/health") {
+		s.handleTabHealth(w, r)
+		return
+	}
+	// Otherwise, handle as tab deletion
+	s.handleTabByID(w, r)
+}
+
 func (s *server) handleTabByID(w http.ResponseWriter, r *http.Request) {
 	if s.tabManager == nil || s.tabStore == nil {
 		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
@@ -640,6 +652,100 @@ func (s *server) handleTabByID(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 	s.broadcastTabDelete(clientID, id)
+}
+
+func (s *server) handleTabHealth(w http.ResponseWriter, r *http.Request) {
+	if s.tabManager == nil || s.tabStore == nil {
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
+		return
+	}
+	if r.Method != http.MethodGet {
+		apierrors.WriteError(w, apierrors.ErrorResponse{
+			Status:  http.StatusMethodNotAllowed,
+			Error:   "method_not_allowed",
+			Message: "method not allowed",
+		})
+		return
+	}
+
+	// Extract tab ID from path: /api/tabs/{tabId}/health
+	path := strings.TrimPrefix(r.URL.Path, "/api/tabs/")
+	path = strings.TrimSuffix(path, "/health")
+	tabID := path
+	if tabID == "" {
+		apierrors.WriteError(w, apierrors.BadRequest("missing tab id", ""))
+		return
+	}
+
+	clientID := s.ensureClientID(w, r)
+	tab, err := s.tabStore.Get(r.Context(), tabID)
+	if err != nil {
+		if errors.Is(err, tabs.ErrNotFound) {
+			apierrors.WriteError(w, apierrors.NotFound("tab not found", ""))
+			return
+		}
+		log.Printf("load tab error: %v", err)
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
+		return
+	}
+
+	if tab.ClientID != clientID {
+		apierrors.WriteError(w, apierrors.Forbidden("forbidden", ""))
+		return
+	}
+
+	// Check if tab has downstream URI
+	if tab.DownstreamURI == nil || *tab.DownstreamURI == "" {
+		apierrors.WriteError(w, apierrors.ServiceUnavailable("tab not ready", ""))
+		return
+	}
+
+	// Parse downstream URI and build health check URL
+	downstreamURL, err := url.Parse(*tab.DownstreamURI)
+	if err != nil {
+		log.Printf("invalid downstream URI for tab %s: %v", tabID, err)
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
+		return
+	}
+
+	// Build health check URL: convert ws(s):// to http(s):// and use /api/healthz path
+	healthURL := &url.URL{
+		Scheme: "http",
+		Host:   downstreamURL.Host,
+		Path:   "/api/healthz",
+	}
+	if downstreamURL.Scheme == "wss" {
+		healthURL.Scheme = "https"
+	}
+
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 4 * time.Second,
+	}
+
+	// Make request to project pod
+	resp, err := client.Get(healthURL.String())
+	if err != nil {
+		log.Printf("health check failed for tab %s: %v", tabID, err)
+		apierrors.WriteError(w, apierrors.ServiceUnavailable("health check failed", ""))
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy status code
+	w.WriteHeader(resp.StatusCode)
+
+	// Copy response headers
+	for k, v := range resp.Header {
+		for _, vv := range v {
+			w.Header().Add(k, vv)
+		}
+	}
+
+	// Copy response body
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("failed to copy health response for tab %s: %v", tabID, err)
+	}
 }
 
 func (s *server) handleTabEvents(w http.ResponseWriter, r *http.Request) {

@@ -4,6 +4,7 @@ export type HealthStatus = 'healthy' | 'degraded' | 'unhealthy' | 'checking';
 
 type HealthIndicatorProps = {
   wsUrl?: string;
+  healthUrl?: string;
   onUnhealthy?: () => void;
   checkInterval?: number;
   failureThreshold?: number;
@@ -15,6 +16,7 @@ type HealthIndicatorProps = {
  */
 const HealthIndicator = ({
   wsUrl,
+  healthUrl,
   onUnhealthy,
   checkInterval = 5000,
   failureThreshold = 3,
@@ -41,11 +43,27 @@ const HealthIndicator = ({
     }
   }, []);
 
+  const handleFailure = useCallback(() => {
+    consecutiveFailures.current++;
+    setLastCheck(new Date());
+
+    if (consecutiveFailures.current >= failureThreshold) {
+      setStatus('unhealthy');
+      setPtyStatus('unreachable');
+      if (onUnhealthy) {
+        onUnhealthy();
+      }
+    } else {
+      setStatus('degraded');
+    }
+  }, [failureThreshold, onUnhealthy]);
+
   const checkHealth = useCallback(async () => {
-    const healthUrl = getHealthUrl(wsUrl);
+    // Use provided healthUrl, otherwise derive from wsUrl
+    const url = healthUrl || getHealthUrl(wsUrl);
 
     try {
-      const response = await fetch(healthUrl, {
+      const response = await fetch(url, {
         method: 'GET',
         credentials: 'include',
         // Short timeout to avoid blocking
@@ -73,22 +91,7 @@ const HealthIndicator = ({
     } catch {
       handleFailure();
     }
-  }, [wsUrl, getHealthUrl]);
-
-  const handleFailure = useCallback(() => {
-    consecutiveFailures.current++;
-    setLastCheck(new Date());
-
-    if (consecutiveFailures.current >= failureThreshold) {
-      setStatus('unhealthy');
-      setPtyStatus('unreachable');
-      if (onUnhealthy) {
-        onUnhealthy();
-      }
-    } else {
-      setStatus('degraded');
-    }
-  }, [failureThreshold, onUnhealthy]);
+  }, [wsUrl, healthUrl, getHealthUrl, handleFailure]);
 
   useEffect(() => {
     // Initial check

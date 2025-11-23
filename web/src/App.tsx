@@ -47,6 +47,10 @@ const App = () => {
     return `${protocol}://${window.location.host}/ws?tab=${encodeURIComponent(tabId)}`;
   }, []);
 
+  const healthForTab = useCallback((tabId: string) => {
+    return `${window.location.origin}/api/tabs/${encodeURIComponent(tabId)}/health`;
+  }, []);
+
   useEffect(() => {
     if (authState !== "unauthenticated") {
       return;
@@ -179,7 +183,13 @@ const App = () => {
           ...data.tab,
           wsUrl: data.wsUrl || wsForTab(data.tab.tabId)
         };
-        setTabs((prev) => [...prev, tab]);
+        // Use functional update with deduplication to prevent race condition with SSE
+        setTabs((prev) => {
+          if (prev.some((t) => t.tabId === tab.tabId)) {
+            return prev;
+          }
+          return [...prev, tab];
+        });
         setActiveTabId(tab.tabId);
         setPickerOpen(false);
       } catch {
@@ -320,6 +330,7 @@ const App = () => {
                 >
                   <TerminalView
                     wsUrl={tab.wsUrl}
+                    healthUrl={healthForTab(tab.tabId)}
                     isFocused={tab.tabId === activeTabId}
                     onReconnect={handleReconnect}
                     externalStatus={tab.status as 'connecting' | 'connected' | 'reconnecting' | 'closed'}

@@ -46,7 +46,7 @@ func TestCollector_RegisterUnregisterTab(t *testing.T) {
 	tabInfo := TabInfo{
 		TabID:         "tab-123",
 		ProjectID:     "project-1",
-		PodName:       "pod-abc",
+		ProjectName:   "project-1",
 		Namespace:     "default",
 		DownstreamURI: "http://localhost:8080",
 		CPULimit:      1000,
@@ -285,9 +285,9 @@ func TestCollector_CollectTabMetrics_NilClients(t *testing.T) {
 	}
 
 	tab := TabInfo{
-		TabID:     "test",
-		PodName:   "pod-1",
-		Namespace: "default",
+		TabID:       "test",
+		ProjectName: "project-1",
+		Namespace:   "default",
 		// No DownstreamURI
 	}
 

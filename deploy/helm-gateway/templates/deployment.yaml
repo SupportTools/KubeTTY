@@ -110,6 +110,10 @@ spec:
               value: {{ .Values.controller.healthCheckInterval | quote }}
             - name: ENV_SECRET_NAME
               value: {{ .Values.controller.envSecretName | quote }}
+            {{- if .Values.controller.imagePullSecrets }}
+            - name: IMAGE_PULL_SECRETS
+              value: {{ .Values.controller.imagePullSecrets | quote }}
+            {{- end }}
             {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}

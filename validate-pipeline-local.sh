@@ -109,12 +109,19 @@ if ! command -v go &> /dev/null; then
 fi
 
 GO_CURRENT_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
-if [[ ! "$GO_CURRENT_VERSION" =~ ^${GO_VERSION}\. ]]; then
-    print_error "Go version mismatch. Expected ${GO_VERSION}.x, got ${GO_CURRENT_VERSION}"
-    echo "Please install Go ${GO_VERSION} or update GO_VERSION in this script"
+GO_MAJOR=$(echo "$GO_CURRENT_VERSION" | cut -d. -f1)
+GO_MINOR=$(echo "$GO_CURRENT_VERSION" | cut -d. -f2)
+GO_REQ_MAJOR=$(echo "$GO_VERSION" | cut -d. -f1)
+GO_REQ_MINOR=$(echo "$GO_VERSION" | cut -d. -f2)
+
+# Allow any Go version >= required version (e.g., 1.25 >= 1.23)
+if [[ "$GO_MAJOR" -lt "$GO_REQ_MAJOR" ]] || \
+   [[ "$GO_MAJOR" -eq "$GO_REQ_MAJOR" && "$GO_MINOR" -lt "$GO_REQ_MINOR" ]]; then
+    print_error "Go version too old. Expected >= ${GO_VERSION}, got ${GO_CURRENT_VERSION}"
+    echo "Please install Go ${GO_VERSION} or higher"
     exit 1
 fi
-print_success "Go version: ${GO_CURRENT_VERSION}"
+print_success "Go version: ${GO_CURRENT_VERSION} (>= ${GO_VERSION} required)"
 
 # Check Node.js version
 print_stage "Checking Node.js version"

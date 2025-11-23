@@ -1,4 +1,4 @@
-import { TabMetrics, getMetricStatus } from '../types';
+import { TabMetrics, PodMetadata, getMetricStatus } from '../types';
 
 type StatusBarProps = {
   tabLabel: string;
@@ -40,6 +40,9 @@ const StatusBar = ({ tabLabel, metrics }: StatusBarProps) => {
         rxRate={metrics.network.rxRate}
         txRate={metrics.network.txRate}
       />
+      {metrics.metadata && (
+        <MetadataDisplay metadata={metrics.metadata} />
+      )}
     </div>
   );
 };
@@ -84,6 +87,26 @@ const NetworkDisplay = ({ rxRate, txRate }: NetworkDisplayProps) => {
         <span className="network-down">↓{formatBytesRate(rxRate)}</span>
         <span className="network-up">↑{formatBytesRate(txRate)}</span>
       </span>
+    </div>
+  );
+};
+
+type MetadataDisplayProps = {
+  metadata: PodMetadata;
+};
+
+const MetadataDisplay = ({ metadata }: MetadataDisplayProps) => {
+  const tooltip = [
+    `Pod: ${metadata.podName}`,
+    `Node: ${metadata.nodeName}`,
+    `Namespace: ${metadata.namespace}`,
+    `IP: ${metadata.podIP}`
+  ].join('\n');
+
+  return (
+    <div className="metadata-display" title={tooltip}>
+      <span className="metadata-label">NODE</span>
+      <span className="metadata-value">{metadata.nodeName}</span>
     </div>
   );
 };

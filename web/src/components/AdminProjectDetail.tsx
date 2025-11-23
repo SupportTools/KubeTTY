@@ -101,6 +101,10 @@ const AdminProjectDetail = ({
       }
       const data = (await res.json()) as UpgradeInfoResponse;
       setUpgradeInfo(data);
+      // Set the recommended version as the default value if available
+      if (data.recommendedVersion) {
+        setNewVersion(data.recommendedVersion);
+      }
       setShowUpgradeModal(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load upgrade info");
@@ -394,6 +398,12 @@ const AdminProjectDetail = ({
                     <label>Current Version:</label>
                     <span className="mono">{upgradeInfo.currentVersion}</span>
                   </div>
+                  {upgradeInfo.recommendedVersion && (
+                    <div className="info-item">
+                      <label>Recommended Version:</label>
+                      <span className="mono recommended">{upgradeInfo.recommendedVersion}</span>
+                    </div>
+                  )}
                   <div className="info-item">
                     <label>Last Activity:</label>
                     <span>{formatActivityTime(upgradeInfo.lastActivity)}</span>

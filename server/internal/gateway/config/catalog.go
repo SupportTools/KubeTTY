@@ -72,6 +72,13 @@ func ParseCatalog(data []byte) (Catalog, error) {
 	if err := cat.Validate(); err != nil {
 		return Catalog{}, err
 	}
+
+	// Debug logging for parsed catalog
+	for _, p := range cat.Projects {
+		fmt.Printf("DEBUG: Parsed catalog project: id=%s namespace=%s cpuMillicores=%d memoryBytes=%d\n",
+			p.ID, p.Namespace, p.Limits.CPUMillicores, p.Limits.MemoryBytes)
+	}
+
 	return cat, nil
 }
 

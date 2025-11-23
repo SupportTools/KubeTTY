@@ -14,6 +14,8 @@ deploymentId: kubetty-gateway-dev
 # Debug logging for development
 env:
   LOG_LEVEL: debug
+  # Use semantic version for recommended upgrades (not floating tags like "dev")
+  RECOMMENDED_IMAGE_TAG: "v0.8.0"
 
 # Authentication - enabled for dev testing
 auth:
@@ -84,6 +86,7 @@ controller:
   reconcileInterval: 30s
   healthCheckInterval: 60s
   envSecretName: env-secrets
+  imagePullSecrets: "harbor-supporttools"
 
 # Lower resources for dev
 resources:

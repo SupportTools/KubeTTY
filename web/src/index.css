@@ -1525,6 +1525,27 @@ button.danger:hover:not(:disabled) {
   color: #8b5cf6;
 }
 
+/* Metadata Display */
+.metadata-display {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.metadata-label {
+  font-size: 0.7rem;
+  color: #7b7f8f;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  width: 35px;
+}
+
+.metadata-value {
+  font-size: 0.75rem;
+  color: #d7dae7;
+  font-family: monospace;
+}
+
 /* Tabbed layout adjustment for status bar */
 .main.full-width.tabbed {
   flex-direction: column;
@@ -1605,4 +1626,98 @@ button.danger:hover:not(:disabled) {
   50% {
     opacity: 0.5;
   }
+}
+
+/* Upgrade modal styles */
+.upgrade-info {
+  margin: 1rem 0;
+  padding: 1rem;
+  background: #0f1115;
+  border: 1px solid #2f333c;
+  border-radius: 6px;
+}
+
+.upgrade-info .info-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 0.75rem 0;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #1d1f26;
+}
+
+.upgrade-info .info-item:last-child {
+  border-bottom: none;
+}
+
+.upgrade-info .info-item label {
+  color: #8b8d98;
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+.upgrade-info .info-item span {
+  color: #f2f4f8;
+  font-size: 0.9rem;
+}
+
+.upgrade-info .info-item span.recommended {
+  color: #10b981;
+  font-weight: 600;
+}
+
+.warning-box {
+  margin: 1rem 0;
+  padding: 1rem;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid #ef4444;
+  border-radius: 6px;
+  color: #fca5a5;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.warning-box strong {
+  color: #ef4444;
+}
+
+.form-group {
+  margin: 1rem 0;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: #f2f4f8;
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+.form-input {
+  width: 100%;
+  padding: 0.75rem;
+  background: #0f1115;
+  border: 1px solid #2f333c;
+  border-radius: 6px;
+  color: #f2f4f8;
+  font-size: 0.9rem;
+  font-family: 'JetBrains Mono', 'Courier New', Courier, monospace;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.form-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.form-help {
+  display: block;
+  margin-top: 0.5rem;
+  color: #8b8d98;
+  font-size: 0.85rem;
 }

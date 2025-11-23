@@ -7,6 +7,7 @@ import HealthIndicator from './HealthIndicator';
 type Props = {
   onReconnect?: () => void;
   wsUrl?: string;
+  healthUrl?: string;
   isFocused?: boolean;
   externalStatus?: 'connecting' | 'connected' | 'reconnecting' | 'closed';
 };
@@ -20,7 +21,7 @@ const decoder = new TextDecoder();
 
 const FORCE_RECONNECT_THRESHOLD = 3; // Show force button after this many failed attempts
 
-const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: Props) => {
+const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externalStatus }: Props) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -237,6 +238,7 @@ const TerminalView = ({ onReconnect, wsUrl, isFocused = true, externalStatus }: 
       >
         <HealthIndicator
           wsUrl={wsUrl}
+          healthUrl={healthUrl}
           onUnhealthy={handleHealthUnhealthy}
           checkInterval={5000}
           failureThreshold={3}

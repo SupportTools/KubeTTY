@@ -27,7 +27,7 @@ const (
 )
 
 const (
-	defaultHealthPath    = "/healthz"
+	defaultHealthPath    = "/api/healthz"
 	defaultPeriodSeconds = 30
 	defaultTimeout       = 5 * time.Second
 	consecutiveFailures  = 3 // Mark degraded after this many failures
@@ -116,42 +116,74 @@ func (c *Checker) GetAllStatuses() map[string]*ProjectStatus {
 	return result
 }
 
+// AddProject adds a project to the health checker dynamically.
+// If the project already exists, it will be skipped.
+func (c *Checker) AddProject(p gatewayconfig.Project) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if project already exists
+	if _, exists := c.statuses[p.ID]; exists {
+		log.WithField("project_id", p.ID).Debug("Project already in health checker, skipping")
+		return
+	}
+
+	c.statuses[p.ID] = &ProjectStatus{
+		Status: StatusUnknown,
+	}
+	c.projects = append(c.projects, p)
+	log.WithFields(log.Fields{
+		"project_id": p.ID,
+		"service":    p.Service,
+		"namespace":  p.Namespace,
+	}).Info("Added project to health checker")
+}
+
+// RemoveProject removes a project from the health checker.
+func (c *Checker) RemoveProject(projectID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Remove from statuses map
+	delete(c.statuses, projectID)
+
+	// Remove from projects slice
+	for i, p := range c.projects {
+		if p.ID == projectID {
+			c.projects = append(c.projects[:i], c.projects[i+1:]...)
+			break
+		}
+	}
+
+	log.WithField("project_id", projectID).Info("Removed project from health checker")
+}
+
 func (c *Checker) run() {
 	defer c.wg.Done()
 
 	// Perform initial check immediately
 	c.checkAllProjects()
 
-	// Group projects by their check period
-	periods := c.groupByPeriod()
-
-	// Create tickers for each unique period
-	tickers := make(map[int]*time.Ticker)
-	for period := range periods {
-		tickers[period] = time.NewTicker(time.Duration(period) * time.Second)
-		defer tickers[period].Stop()
-	}
+	// Use a single ticker for the default check period
+	// Projects with custom periods will be handled by tracking their last check time
+	ticker := time.NewTicker(time.Duration(defaultPeriodSeconds) * time.Second)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-c.stopCh:
 			return
-		default:
-			// Check each period's ticker
-			for period, ticker := range tickers {
-				select {
-				case <-ticker.C:
-					c.checkProjects(periods[period])
-				default:
-				}
-			}
-			// Small sleep to avoid busy loop
-			time.Sleep(100 * time.Millisecond)
+		case <-ticker.C:
+			// Re-fetch current projects on each tick to handle dynamic additions
+			c.checkAllProjects()
 		}
 	}
 }
 
 func (c *Checker) groupByPeriod() map[int][]gatewayconfig.Project {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	periods := make(map[int][]gatewayconfig.Project)
 	for _, p := range c.projects {
 		period := c.getPeriod(p)
@@ -168,7 +200,13 @@ func (c *Checker) getPeriod(p gatewayconfig.Project) int {
 }
 
 func (c *Checker) checkAllProjects() {
-	for _, p := range c.projects {
+	// Make a copy of the projects slice to avoid holding the lock during HTTP calls
+	c.mu.RLock()
+	projects := make([]gatewayconfig.Project, len(c.projects))
+	copy(projects, c.projects)
+	c.mu.RUnlock()
+
+	for _, p := range projects {
 		c.checkProject(p)
 	}
 }

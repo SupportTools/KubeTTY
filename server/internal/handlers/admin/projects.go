@@ -18,16 +18,18 @@ import (
 
 // ProjectHandlers provides HTTP handlers for project management.
 type ProjectHandlers struct {
-	store            projects.Store
-	controller       *controller.Controller
-	onProjectDeleted func(projectName string) // Callback when project is deleted
+	store               projects.Store
+	controller          *controller.Controller
+	recommendedImageTag string
+	onProjectDeleted    func(projectName string) // Callback when project is deleted
 }
 
 // NewProjectHandlers creates a new ProjectHandlers instance.
-func NewProjectHandlers(store projects.Store, ctrl *controller.Controller) *ProjectHandlers {
+func NewProjectHandlers(store projects.Store, ctrl *controller.Controller, recommendedImageTag string) *ProjectHandlers {
 	return &ProjectHandlers{
-		store:      store,
-		controller: ctrl,
+		store:               store,
+		controller:          ctrl,
+		recommendedImageTag: recommendedImageTag,
 	}
 }
 
@@ -349,6 +351,7 @@ func (h *ProjectHandlers) GetUpgradeInfo(w http.ResponseWriter, r *http.Request)
 
 	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
 		"currentVersion":       project.ImageTag,
+		"recommendedVersion":   h.recommendedImageTag,
 		"lastActivity":         project.LastActivity,
 		"minutesSinceActivity": minutesSinceActivity,
 	})
@@ -440,9 +443,9 @@ func extractProjectID(r *http.Request) (uuid.UUID, error) {
 	return uuid.Parse(idStr)
 }
 
-// versionPattern matches semantic versions like v1.2.3, 1.2.3, v0.7.2-rc1, etc.
-// Stricter pattern prevents command injection: only alphanumeric and hyphens in pre-release
-var versionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[a-zA-Z0-9]+)?$`)
+// versionPattern matches strict semantic versions: v1.2.3 or 1.2.3
+// No pre-release suffixes allowed (e.g., -rc, -beta, -alpha) per project standards
+var versionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
 
 // isValidVersion checks if a string is a valid semantic version.
 func isValidVersion(version string) bool {

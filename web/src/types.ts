@@ -45,11 +45,19 @@ export type NetworkMetric = {
   txRate: number;   // Transmit rate in bytes/sec
 };
 
+export type PodMetadata = {
+  podName: string;    // Name of the pod running the terminal
+  nodeName: string;   // Name of the node where pod is scheduled
+  namespace: string;  // Kubernetes namespace
+  podIP: string;      // Pod IP address
+};
+
 export type TabMetrics = {
   cpu: ResourceMetric;
   memory: ResourceMetric;
   disk: ResourceMetric;
   network: NetworkMetric;
+  metadata?: PodMetadata;  // Optional pod/node metadata
   updatedAt: string;
 };
 
@@ -218,6 +226,7 @@ export interface ProjectStatusResponse {
 
 export interface UpgradeInfoResponse {
   currentVersion: string;
+  recommendedVersion?: string;
   lastActivity?: string;
   minutesSinceActivity?: number;
 }

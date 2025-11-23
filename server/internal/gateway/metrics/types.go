@@ -18,12 +18,21 @@ type NetworkMetric struct {
 	TxRate  int64 `json:"txRate"`  // Transmit rate in bytes/sec
 }
 
+// PodMetadata contains Kubernetes pod and node information.
+type PodMetadata struct {
+	PodName   string `json:"podName"`   // Name of the pod running the terminal
+	NodeName  string `json:"nodeName"`  // Name of the node where pod is scheduled
+	Namespace string `json:"namespace"` // Kubernetes namespace
+	PodIP     string `json:"podIP"`     // Pod IP address
+}
+
 // TabMetrics contains all resource metrics for a tab.
 type TabMetrics struct {
 	CPU       ResourceMetric `json:"cpu"`
 	Memory    ResourceMetric `json:"memory"`
 	Disk      ResourceMetric `json:"disk"`
 	Network   NetworkMetric  `json:"network"`
+	Metadata  *PodMetadata   `json:"metadata,omitempty"` // Optional pod/node metadata
 	UpdatedAt time.Time      `json:"updatedAt"`
 }
 
@@ -47,8 +56,9 @@ type PodMetrics struct {
 
 // K8sMetrics represents metrics from Kubernetes metrics-server.
 type K8sMetrics struct {
-	CPU    ResourceMetric `json:"cpu"`
-	Memory ResourceMetric `json:"memory"`
+	CPU      ResourceMetric `json:"cpu"`
+	Memory   ResourceMetric `json:"memory"`
+	Metadata *PodMetadata   `json:"metadata,omitempty"` // Pod/node metadata
 }
 
 // MetricsUpdate is sent via SSE/WebSocket when metrics change.

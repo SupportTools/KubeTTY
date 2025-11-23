@@ -99,6 +99,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     screen \
     socat \
     strace \
+    stress \
+    stress-ng \
     sudo \
     sysstat \
     tcpdump \
@@ -133,6 +135,11 @@ RUN mkdir -p /usr/local/lib/docker/cli-plugins \
        -o /usr/local/lib/docker/cli-plugins/docker-compose \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
     && ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+
+# Install Docker Buildx plugin
+RUN curl -fsSL https://github.com/docker/buildx/releases/download/v0.16.2/buildx-v0.16.2.linux-amd64 \
+       -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
 
 # Symlink fd command.
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd

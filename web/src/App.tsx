@@ -91,6 +91,26 @@ const App = () => {
     };
   }, [authenticated, authFetch]);
 
+  // Poll for project updates every 10 seconds to detect new projects
+  useEffect(() => {
+    if (gatewayState !== "enabled" || !authenticated) {
+      return;
+    }
+    const pollProjects = async () => {
+      try {
+        const res = await authFetch("/api/projects");
+        if (res.ok) {
+          const data = (await res.json()) as ProjectsResponse;
+          setProjects(data.projects || []);
+        }
+      } catch {
+        // Ignore polling errors - initial load already set gateway state
+      }
+    };
+    const interval = setInterval(pollProjects, 10000);
+    return () => clearInterval(interval);
+  }, [gatewayState, authenticated, authFetch]);
+
   useEffect(() => {
     if (gatewayState !== "enabled" || !authenticated) {
       return;

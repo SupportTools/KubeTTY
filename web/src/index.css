@@ -91,6 +91,12 @@ button:disabled {
   flex: 1;
   background-color: #050608;
   position: relative;
+  overflow: hidden;
+  min-height: 0; /* Allow flex item to shrink below content size */
+}
+
+.terminal-pane.hidden {
+  display: none;
 }
 
 .status {
@@ -254,7 +260,12 @@ button.secondary {
 .terminal-container {
   width: 100%;
   height: 100%;
-  position: relative;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
 }
 
 .connection-overlay {

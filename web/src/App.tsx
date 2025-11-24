@@ -325,8 +325,7 @@ const App = () => {
               tabs.map((tab) => (
                 <div
                   key={tab.tabId}
-                  className="terminal-pane"
-                  style={{ display: tab.tabId === activeTabId ? "block" : "none" }}
+                  className={`terminal-pane${tab.tabId !== activeTabId ? ' hidden' : ''}`}
                 >
                   <TerminalView
                     wsUrl={tab.wsUrl}

@@ -520,6 +520,39 @@ func BuildReadClusterRoleBinding(p *projects.Project, cfg ResourceConfig) *rbacv
 	}
 }
 
+// BuildEnvSecret creates a Secret for project-specific environment variables.
+// Name format: {prefix}{project-name}-env
+// This secret is mounted as envFrom in the project's deployment.
+func BuildEnvSecret(p *projects.Project, cfg ResourceConfig, data map[string]string) *corev1.Secret {
+	resourceName := fmt.Sprintf("%s-env", cfg.ResourceName(p.Name))
+
+	// Convert string map to []byte map
+	secretData := make(map[string][]byte)
+	for k, v := range data {
+		secretData[k] = []byte(v)
+	}
+
+	return &corev1.Secret{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Secret",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      resourceName,
+			Namespace: cfg.Namespace,
+			Labels:    projectLabels(p, cfg),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: secretData,
+	}
+}
+
+// EnvSecretName returns the name of the per-project environment secret.
+// Name format: {prefix}{project-name}-env
+func (c ResourceConfig) EnvSecretName(projectName string) string {
+	return fmt.Sprintf("%s-env", c.ResourceName(projectName))
+}
+
 // projectLabels returns the standard labels for all project resources.
 // Includes both Kubernetes-standard labels and KubeTTY-specific labels.
 func projectLabels(p *projects.Project, cfg ResourceConfig) map[string]string {

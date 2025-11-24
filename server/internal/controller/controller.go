@@ -271,8 +271,17 @@ func (c *Controller) handlePending(ctx context.Context, p *projects.Project) err
 		}
 	}
 
-	// Create Deployment
-	deploy := BuildDeployment(p, cfg, c.cfg.EnvSecretName)
+	// Create per-project env secret (empty initially, can be populated via API)
+	envSecret := BuildEnvSecret(p, cfg, nil)
+	if _, err := c.clientset.CoreV1().Secrets(cfg.Namespace).Create(ctx, envSecret, metav1.CreateOptions{}); err != nil {
+		if !errors.IsAlreadyExists(err) {
+			logger.WithError(err).Warn("Failed to create env secret")
+		}
+	}
+
+	// Create Deployment (use per-project secret name)
+	envSecretName := cfg.EnvSecretName(p.Name)
+	deploy := BuildDeployment(p, cfg, envSecretName)
 	if _, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Create(ctx, deploy, metav1.CreateOptions{}); err != nil {
 		if !errors.IsAlreadyExists(err) {
 			if statusErr := c.store.SetStatus(ctx, p.ID, projects.StatusFailed, fmt.Sprintf("Failed to create Deployment: %v", err)); statusErr != nil {
@@ -339,8 +348,9 @@ func (c *Controller) handleUpdating(ctx context.Context, p *projects.Project) er
 	cfg := c.cfg.ResourceConfig
 	resourceName := cfg.ResourceName(p.Name)
 
-	// Update the deployment spec
-	deploy := BuildDeployment(p, cfg, c.cfg.EnvSecretName)
+	// Update the deployment spec (use per-project secret name)
+	envSecretName := cfg.EnvSecretName(p.Name)
+	deploy := BuildDeployment(p, cfg, envSecretName)
 
 	existing, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
 	if err != nil {
@@ -390,6 +400,14 @@ func (c *Controller) handleDeleting(ctx context.Context, p *projects.Project) er
 	if err := c.clientset.CoreV1().ServiceAccounts(cfg.Namespace).Delete(ctx, saName, metav1.DeleteOptions{}); err != nil {
 		if !errors.IsNotFound(err) {
 			logger.WithError(err).Warn("Failed to delete service account")
+		}
+	}
+
+	// Delete per-project env secret
+	envSecretName := cfg.EnvSecretName(p.Name)
+	if err := c.clientset.CoreV1().Secrets(cfg.Namespace).Delete(ctx, envSecretName, metav1.DeleteOptions{}); err != nil {
+		if !errors.IsNotFound(err) {
+			logger.WithError(err).Warn("Failed to delete env secret")
 		}
 	}
 
@@ -598,6 +616,67 @@ func isPodReady(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// GetProjectSecrets returns the environment secrets for a project (key names only, not values).
+func (c *Controller) GetProjectSecrets(ctx context.Context, p *projects.Project) (map[string]string, error) {
+	cfg := c.cfg.ResourceConfig
+	envSecretName := cfg.EnvSecretName(p.Name)
+
+	secret, err := c.clientset.CoreV1().Secrets(cfg.Namespace).Get(ctx, envSecretName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Secret doesn't exist yet, return empty map
+			return map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("failed to get secret: %w", err)
+	}
+
+	// Return key-value pairs (values as strings)
+	result := make(map[string]string)
+	for k, v := range secret.Data {
+		result[k] = string(v)
+	}
+	return result, nil
+}
+
+// UpdateProjectSecrets updates the environment secrets for a project.
+// This replaces the entire secret data with the new values and triggers a deployment restart.
+func (c *Controller) UpdateProjectSecrets(ctx context.Context, p *projects.Project, secrets map[string]string) error {
+	logger := log.WithField("project", p.Name)
+	cfg := c.cfg.ResourceConfig
+	envSecretName := cfg.EnvSecretName(p.Name)
+
+	// Build the secret data
+	secretData := make(map[string][]byte)
+	for k, v := range secrets {
+		secretData[k] = []byte(v)
+	}
+
+	// Check if secret exists
+	existing, err := c.clientset.CoreV1().Secrets(cfg.Namespace).Get(ctx, envSecretName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Create new secret
+			newSecret := BuildEnvSecret(p, cfg, secrets)
+			if _, err := c.clientset.CoreV1().Secrets(cfg.Namespace).Create(ctx, newSecret, metav1.CreateOptions{}); err != nil {
+				return fmt.Errorf("failed to create secret: %w", err)
+			}
+			logger.Info("Created project env secret")
+		} else {
+			return fmt.Errorf("failed to get secret: %w", err)
+		}
+	} else {
+		// Update existing secret
+		existing.Data = secretData
+		if _, err := c.clientset.CoreV1().Secrets(cfg.Namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("failed to update secret: %w", err)
+		}
+		logger.Info("Updated project env secret")
+	}
+
+	// Trigger a deployment restart to pick up the new secrets
+	return c.RestartProject(ctx, p)
 }
 
 // Ensure interfaces are implemented (compile-time check)

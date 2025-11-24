@@ -1681,6 +1681,36 @@ button.danger:hover:not(:disabled) {
   color: #ef4444;
 }
 
+.info-box {
+  margin: 1rem 0;
+  padding: 1rem;
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid #3b82f6;
+  border-radius: 6px;
+  color: #93c5fd;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.info-box.secondary {
+  background: rgba(107, 114, 128, 0.1);
+  border-color: #6b7280;
+  color: #9ca3af;
+}
+
+.info-box strong {
+  color: #60a5fa;
+}
+
+.info-box.secondary strong {
+  color: #d1d5db;
+}
+
+.edit-resources-modal {
+  width: 450px;
+  max-width: 95vw;
+}
+
 .form-group {
   margin: 1rem 0;
 }
@@ -1720,4 +1750,132 @@ button.danger:hover:not(:disabled) {
   margin-top: 0.5rem;
   color: #8b8d98;
   font-size: 0.85rem;
+}
+
+/* Secrets Modal */
+.secrets-modal {
+  width: 600px;
+  max-width: 95vw;
+  max-height: 80vh;
+}
+
+.secrets-modal .modal-body {
+  overflow-y: auto;
+  max-height: 60vh;
+}
+
+.secrets-list {
+  margin: 1rem 0;
+}
+
+.secrets-list h4 {
+  margin: 0 0 0.75rem 0;
+  color: #f2f4f8;
+  font-size: 0.95rem;
+}
+
+.no-secrets {
+  color: #8a8f98;
+  font-style: italic;
+  padding: 1rem;
+  text-align: center;
+  background: #0f1115;
+  border-radius: 6px;
+}
+
+.secrets-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.secrets-table th,
+.secrets-table td {
+  padding: 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid #2f333c;
+}
+
+.secrets-table th {
+  color: #8a8f98;
+  font-weight: 500;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+}
+
+.secrets-table td.secret-value-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.secret-input {
+  flex: 1;
+  padding: 0.5rem !important;
+  font-size: 0.85rem !important;
+}
+
+.toggle-visibility {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  background: #2f333c;
+  border: none;
+  border-radius: 4px;
+  color: #8a8f98;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.toggle-visibility:hover {
+  background: #3f444c;
+  color: #f2f4f8;
+}
+
+.danger-small {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  background: #ef4444;
+  border: none;
+  border-radius: 4px;
+  color: white;
+  cursor: pointer;
+}
+
+.danger-small:hover {
+  background: #dc2626;
+}
+
+.danger-small:disabled {
+  background: #6b7280;
+  cursor: not-allowed;
+}
+
+.add-secret-section {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #2f333c;
+}
+
+.add-secret-section h4 {
+  margin: 0 0 1rem 0;
+  color: #f2f4f8;
+  font-size: 0.95rem;
+}
+
+.add-secret-form {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.add-secret-form .form-group {
+  flex: 1;
+  min-width: 150px;
+  margin: 0;
+}
+
+.add-secret-btn {
+  padding: 0.75rem 1rem;
+  white-space: nowrap;
 }

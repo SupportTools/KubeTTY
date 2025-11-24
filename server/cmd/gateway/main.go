@@ -138,36 +138,8 @@ func main() {
 		return pool
 	}(), cfg.Controller.ProjectsNamespace)
 
-	// Start project controller (manages K8s resources) if enabled
-	if cfg.Controller.Enabled && cfg.Controller.ProjectsNamespace != "" {
-		ctrlCfg := controller.Config{
-			ReconcileInterval:   cfg.Controller.ReconcileInterval,
-			HealthCheckInterval: cfg.Controller.HealthCheckInterval,
-			EnvSecretName:       cfg.Controller.EnvSecretName,
-			ResourceConfig: controller.ResourceConfig{
-				Namespace:        cfg.Controller.ProjectsNamespace,
-				Prefix:           cfg.Controller.ResourcePrefix,
-				Env:              cfg.Controller.ParseEnvironment(),
-				ImagePullSecrets: cfg.Controller.ImagePullSecrets,
-			},
-		}
-		projCtrl, err = controller.New(ctrlCfg, projectStore)
-		if err != nil {
-			log.Printf("warn: project controller disabled: %v", err)
-		} else {
-			projCtrl.Start(ctx)
-			defer projCtrl.Stop()
-			log.Printf("Project controller started (namespace=%s, prefix=%s, env=%s)",
-				ctrlCfg.ResourceConfig.Namespace,
-				ctrlCfg.ResourceConfig.Prefix,
-				ctrlCfg.ResourceConfig.Env)
-		}
-	} else {
-		log.Printf("Project controller disabled (enabled=%v, namespace=%q)",
-			cfg.Controller.Enabled, cfg.Controller.ProjectsNamespace)
-	}
-
-	// Always initialize tabManager to support both static catalog and dynamic projects
+	// Always initialize tabManager FIRST to support both static catalog and dynamic projects
+	// NOTE: tabManager must be created before controller starts so the callback can be set
 	tabPoolConfig, err := cfg.ConnConfig()
 	if err != nil {
 		log.Fatalf("build tab pool config: %v", err)
@@ -191,7 +163,89 @@ func main() {
 		tabManager.SetProjectStore(projectStore)
 	}
 
-	// Register running projects from the database
+	// Create project controller (manages K8s resources) if enabled
+	// NOTE: We create the controller but don't start it yet - we need to set the callback first
+	if cfg.Controller.Enabled && cfg.Controller.ProjectsNamespace != "" {
+		ctrlCfg := controller.Config{
+			ReconcileInterval:   cfg.Controller.ReconcileInterval,
+			HealthCheckInterval: cfg.Controller.HealthCheckInterval,
+			EnvSecretName:       cfg.Controller.EnvSecretName,
+			ResourceConfig: controller.ResourceConfig{
+				Namespace:        cfg.Controller.ProjectsNamespace,
+				Prefix:           cfg.Controller.ResourcePrefix,
+				Env:              cfg.Controller.ParseEnvironment(),
+				ImagePullSecrets: cfg.Controller.ImagePullSecrets,
+			},
+		}
+		projCtrl, err = controller.New(ctrlCfg, projectStore)
+		if err != nil {
+			log.Printf("warn: project controller disabled: %v", err)
+		} else {
+			// Set up controller callback BEFORE starting the controller
+			// This ensures projects that transition to running during initial reconciliation
+			// are properly registered with tabManager (fixes race condition)
+			projCtrl.SetStatusCallback(func(p *projects.Project, status projects.ProjectStatus) {
+				if status == projects.StatusRunning {
+					// Use ServiceName from database, fallback to computed name for backwards compatibility
+					serviceName := p.ServiceName
+					if serviceName == "" {
+						serviceName = projects.ComputeServiceName(p.Name)
+						log.Printf("warn: project %q missing ServiceName, using computed: %s", p.Name, serviceName)
+					}
+
+					// Parse CPU and memory limits for metrics percentage calculation
+					var cpuMillicores, memoryBytes int64
+					if p.CPULimit != "" {
+						if qty, err := resource.ParseQuantity(p.CPULimit); err == nil {
+							cpuMillicores = qty.MilliValue()
+						} else {
+							log.Printf("warn: project %q has invalid CPULimit %q: %v", p.Name, p.CPULimit, err)
+						}
+					}
+					if p.MemoryLimit != "" {
+						if qty, err := resource.ParseQuantity(p.MemoryLimit); err == nil {
+							memoryBytes = qty.Value()
+						} else {
+							log.Printf("warn: project %q has invalid MemoryLimit %q: %v", p.Name, p.MemoryLimit, err)
+						}
+					}
+
+					log.Printf("Controller callback: registering project %q with tabManager", p.Name)
+					tabManager.RegisterProject(gatewayconfig.Project{
+						ID:          p.Name,
+						DisplayName: p.DisplayName,
+						Namespace:   p.TargetNamespace,
+						Service:     serviceName,
+						Port:        8080,
+						Description: p.Description,
+						Icon:        p.Icon,
+						Limits: gatewayconfig.ProjectLimits{
+							MaxTabsPerClient: p.MaxTabsPerClient,
+							MaxTabsTotal:     p.MaxTabsTotal,
+							CPUMillicores:    cpuMillicores,
+							MemoryBytes:      memoryBytes,
+						},
+					})
+				} else if status == projects.StatusDeleting || status == projects.StatusDeleted {
+					log.Printf("Controller callback: unregistering project %q from tabManager", p.Name)
+					tabManager.UnregisterProject(p.Name)
+				}
+			})
+
+			// Now start the controller - callback is already set
+			projCtrl.Start(ctx)
+			defer projCtrl.Stop()
+			log.Printf("Project controller started (namespace=%s, prefix=%s, env=%s)",
+				ctrlCfg.ResourceConfig.Namespace,
+				ctrlCfg.ResourceConfig.Prefix,
+				ctrlCfg.ResourceConfig.Env)
+		}
+	} else {
+		log.Printf("Project controller disabled (enabled=%v, namespace=%q)",
+			cfg.Controller.Enabled, cfg.Controller.ProjectsNamespace)
+	}
+
+	// Register running projects from the database (for projects that were already running before gateway started)
 	if projectStore != nil {
 		runningProjects, err := projectStore.List(ctx, projects.ListFilter{Status: "running"})
 		if err != nil {
@@ -249,55 +303,6 @@ func main() {
 	go tabManager.StartIdleChecker(ctx)
 	// Start background health checking for projects
 	tabManager.StartHealthChecker()
-
-	// Set up controller callback to register projects when they become running
-	if projCtrl != nil {
-		projCtrl.SetStatusCallback(func(p *projects.Project, status projects.ProjectStatus) {
-			if status == projects.StatusRunning {
-				// Use ServiceName from database, fallback to computed name for backwards compatibility
-				serviceName := p.ServiceName
-				if serviceName == "" {
-					serviceName = projects.ComputeServiceName(p.Name)
-					log.Printf("warn: project %q missing ServiceName, using computed: %s", p.Name, serviceName)
-				}
-
-				// Parse CPU and memory limits for metrics percentage calculation
-				var cpuMillicores, memoryBytes int64
-				if p.CPULimit != "" {
-					if qty, err := resource.ParseQuantity(p.CPULimit); err == nil {
-						cpuMillicores = qty.MilliValue()
-					} else {
-						log.Printf("warn: project %q has invalid CPULimit %q: %v", p.Name, p.CPULimit, err)
-					}
-				}
-				if p.MemoryLimit != "" {
-					if qty, err := resource.ParseQuantity(p.MemoryLimit); err == nil {
-						memoryBytes = qty.Value()
-					} else {
-						log.Printf("warn: project %q has invalid MemoryLimit %q: %v", p.Name, p.MemoryLimit, err)
-					}
-				}
-
-				tabManager.RegisterProject(gatewayconfig.Project{
-					ID:          p.Name,
-					DisplayName: p.DisplayName,
-					Namespace:   p.TargetNamespace,
-					Service:     serviceName,
-					Port:        8080,
-					Description: p.Description,
-					Icon:        p.Icon,
-					Limits: gatewayconfig.ProjectLimits{
-						MaxTabsPerClient: p.MaxTabsPerClient,
-						MaxTabsTotal:     p.MaxTabsTotal,
-						CPUMillicores:    cpuMillicores,
-						MemoryBytes:      memoryBytes,
-					},
-				})
-			} else if status == projects.StatusDeleting || status == projects.StatusDeleted {
-				tabManager.UnregisterProject(p.Name)
-			}
-		})
-	}
 
 	uiFS, err := fs.Sub(embeddedUI, "ui/dist")
 	if err != nil {
@@ -368,6 +373,8 @@ func main() {
 			mux.Handle("GET /api/admin/projects/{id}/status", requireAuth(http.HandlerFunc(adminHandlers.GetProjectStatus)))
 			mux.Handle("GET /api/admin/projects/{id}/upgrade-info", requireAuth(http.HandlerFunc(adminHandlers.GetUpgradeInfo)))
 			mux.Handle("POST /api/admin/projects/{id}/upgrade", requireAuth(http.HandlerFunc(adminHandlers.UpgradeProject)))
+			mux.Handle("GET /api/admin/projects/{id}/secrets", requireAuth(http.HandlerFunc(adminHandlers.GetProjectSecrets)))
+			mux.Handle("PUT /api/admin/projects/{id}/secrets", requireAuth(http.HandlerFunc(adminHandlers.UpdateProjectSecrets)))
 		} else {
 			mux.HandleFunc("GET /api/admin/projects", adminHandlers.ListProjects)
 			mux.HandleFunc("POST /api/admin/projects", adminHandlers.CreateProject)
@@ -378,6 +385,8 @@ func main() {
 			mux.HandleFunc("GET /api/admin/projects/{id}/status", adminHandlers.GetProjectStatus)
 			mux.HandleFunc("GET /api/admin/projects/{id}/upgrade-info", adminHandlers.GetUpgradeInfo)
 			mux.HandleFunc("POST /api/admin/projects/{id}/upgrade", adminHandlers.UpgradeProject)
+			mux.HandleFunc("GET /api/admin/projects/{id}/secrets", adminHandlers.GetProjectSecrets)
+			mux.HandleFunc("PUT /api/admin/projects/{id}/secrets", adminHandlers.UpdateProjectSecrets)
 		}
 	}
 

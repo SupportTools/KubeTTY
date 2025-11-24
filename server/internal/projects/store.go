@@ -269,6 +269,16 @@ func (s *PGStore) ListByStatuses(ctx context.Context, statuses []ProjectStatus) 
 		return []Project{}, nil
 	}
 
+	// Check if we're looking for deleting status - these have deleted_at set
+	// because Delete() sets both deleted_at=NOW() and status='deleting'
+	includeDeleting := false
+	for _, status := range statuses {
+		if status == StatusDeleting {
+			includeDeleting = true
+			break
+		}
+	}
+
 	query := `
 SELECT id, name, display_name, description, icon,
     target_namespace, service_name, session_id, user_name,
@@ -281,8 +291,14 @@ SELECT id, name, display_name, description, icon,
     status, status_message, last_health_check, last_activity, pod_ip,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
-WHERE deleted_at IS NULL AND status = ANY($1)
-ORDER BY created_at ASC`
+WHERE status = ANY($1)`
+
+	// Only filter out deleted projects if we're not looking for deleting status
+	if !includeDeleting {
+		query += " AND deleted_at IS NULL"
+	}
+
+	query += " ORDER BY created_at ASC"
 
 	// Convert to string slice for pgx
 	statusStrings := make([]string, len(statuses))

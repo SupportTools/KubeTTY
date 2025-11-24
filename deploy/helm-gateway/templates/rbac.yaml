@@ -40,7 +40,7 @@ rules:
     verbs: ["create", "get", "list", "watch", "update", "delete"]
   # Controller: manage core resources in any namespace
   - apiGroups: [""]
-    resources: ["services", "persistentvolumeclaims", "serviceaccounts"]
+    resources: ["services", "persistentvolumeclaims", "serviceaccounts", "secrets"]
     verbs: ["create", "get", "list", "watch", "update", "delete"]
   # Controller: manage deployments
   - apiGroups: ["apps"]

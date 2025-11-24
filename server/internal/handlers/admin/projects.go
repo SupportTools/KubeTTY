@@ -421,6 +421,85 @@ func (h *ProjectHandlers) UpgradeProject(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// GetProjectSecrets handles GET /api/admin/projects/{id}/secrets
+func (h *ProjectHandlers) GetProjectSecrets(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	projectID, err := extractProjectID(r)
+	if err != nil {
+		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid project ID", ""))
+		return
+	}
+
+	project, err := h.store.Get(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, projects.ErrProjectNotFound) {
+			_ = apierrors.WriteError(w, apierrors.NotFound("project not found", ""))
+			return
+		}
+		log.WithError(err).Error("admin/projects: failed to get project")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to get project", ""))
+		return
+	}
+
+	secrets, err := h.controller.GetProjectSecrets(ctx, project)
+	if err != nil {
+		log.WithError(err).Error("admin/projects: failed to get project secrets")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to get project secrets", ""))
+		return
+	}
+
+	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
+		"secrets": secrets,
+	})
+}
+
+// UpdateProjectSecrets handles PUT /api/admin/projects/{id}/secrets
+func (h *ProjectHandlers) UpdateProjectSecrets(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	projectID, err := extractProjectID(r)
+	if err != nil {
+		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid project ID", ""))
+		return
+	}
+
+	var req struct {
+		Secrets map[string]string `json:"secrets"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
+		return
+	}
+
+	project, err := h.store.Get(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, projects.ErrProjectNotFound) {
+			_ = apierrors.WriteError(w, apierrors.NotFound("project not found", ""))
+			return
+		}
+		log.WithError(err).Error("admin/projects: failed to get project")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to get project", ""))
+		return
+	}
+
+	if err := h.controller.UpdateProjectSecrets(ctx, project, req.Secrets); err != nil {
+		log.WithError(err).Error("admin/projects: failed to update project secrets")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to update project secrets", ""))
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"project_id":   project.ID.String(),
+		"project_name": project.Name,
+		"secret_count": len(req.Secrets),
+	}).Info("admin/projects: project secrets updated")
+
+	_ = util.WriteJSON(w, http.StatusOK, map[string]string{
+		"message": "secrets updated, deployment restart triggered",
+	})
+}
+
 // RegisterRoutes registers all admin project routes on the provided mux.
 func (h *ProjectHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/projects", h.ListProjects)
@@ -432,6 +511,8 @@ func (h *ProjectHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/projects/{id}/status", h.GetProjectStatus)
 	mux.HandleFunc("GET /api/admin/projects/{id}/upgrade-info", h.GetUpgradeInfo)
 	mux.HandleFunc("POST /api/admin/projects/{id}/upgrade", h.UpgradeProject)
+	mux.HandleFunc("GET /api/admin/projects/{id}/secrets", h.GetProjectSecrets)
+	mux.HandleFunc("PUT /api/admin/projects/{id}/secrets", h.UpdateProjectSecrets)
 }
 
 // extractProjectID extracts the project ID from the URL path.

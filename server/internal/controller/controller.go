@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -348,30 +349,60 @@ func (c *Controller) handleUpdating(ctx context.Context, p *projects.Project) er
 	cfg := c.cfg.ResourceConfig
 	resourceName := cfg.ResourceName(p.Name)
 
+	// Handle PVC expansion if storage size changed
+	if err := c.expandPVCIfNeeded(ctx, p, cfg, resourceName); err != nil {
+		logger.WithError(err).Warn("Failed to expand PVC (may require manual intervention)")
+		// Don't fail the entire update - PVC expansion may not be supported by storage class
+	}
+
 	// Update the deployment spec (use per-project secret name)
 	envSecretName := cfg.EnvSecretName(p.Name)
 	deploy := BuildDeployment(p, cfg, envSecretName)
 
-	existing, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// Create if doesn't exist
-			_, err = c.clientset.AppsV1().Deployments(cfg.Namespace).Create(ctx, deploy, metav1.CreateOptions{})
+	// Retry loop for handling optimistic concurrency conflicts
+	const maxRetries = 5
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		existing, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// Create if doesn't exist
+				_, err = c.clientset.AppsV1().Deployments(cfg.Namespace).Create(ctx, deploy, metav1.CreateOptions{})
+				if err == nil {
+					logger.Info("Deployment created (was not found), transitioning to creating status")
+					return c.store.SetStatus(ctx, p.ID, projects.StatusCreating, "Waiting for deployment rollout")
+				}
+			}
+			return err
 		}
-		return err
-	}
 
-	// Update spec
-	existing.Spec = deploy.Spec
-	if _, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+		// Update spec
+		existing.Spec = deploy.Spec
+		_, err = c.clientset.AppsV1().Deployments(cfg.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
+		if err == nil {
+			logger.Info("Deployment updated, transitioning to creating status")
+			return c.store.SetStatus(ctx, p.ID, projects.StatusCreating, "Waiting for deployment rollout")
+		}
+
+		// Check if it's a conflict error - retry with fresh data
+		if errors.IsConflict(err) {
+			logger.WithField("attempt", attempt).Warn("Deployment update conflict, retrying with fresh data")
+			lastErr = err
+			continue
+		}
+
+		// Non-conflict error - fail immediately
 		if statusErr := c.store.SetStatus(ctx, p.ID, projects.StatusFailed, fmt.Sprintf("Failed to update deployment: %v", err)); statusErr != nil {
 			logger.WithError(statusErr).Error("Failed to update project status to failed")
 		}
 		return fmt.Errorf("failed to update deployment: %w", err)
 	}
 
-	logger.Info("Deployment updated, transitioning to creating status")
-	return c.store.SetStatus(ctx, p.ID, projects.StatusCreating, "Waiting for deployment rollout")
+	// Exhausted retries
+	if statusErr := c.store.SetStatus(ctx, p.ID, projects.StatusFailed, fmt.Sprintf("Failed to update deployment after %d retries: %v", maxRetries, lastErr)); statusErr != nil {
+		logger.WithError(statusErr).Error("Failed to update project status to failed")
+	}
+	return fmt.Errorf("failed to update deployment after %d retries: %w", maxRetries, lastErr)
 }
 
 func (c *Controller) handleDeleting(ctx context.Context, p *projects.Project) error {
@@ -529,25 +560,42 @@ func (c *Controller) RestartProject(ctx context.Context, p *projects.Project) er
 	cfg := c.cfg.ResourceConfig
 	resourceName := cfg.ResourceName(p.Name)
 
-	// Get current deployment
-	deploy, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get deployment: %w", err)
-	}
+	// Retry loop for handling optimistic concurrency conflicts
+	const maxRetries = 5
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Get current deployment (fresh on each attempt)
+		deploy, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get deployment: %w", err)
+		}
 
-	// Add/update restart annotation
-	if deploy.Spec.Template.Annotations == nil {
-		deploy.Spec.Template.Annotations = map[string]string{}
-	}
-	deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
+		// Add/update restart annotation
+		if deploy.Spec.Template.Annotations == nil {
+			deploy.Spec.Template.Annotations = map[string]string{}
+		}
+		deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
 
-	// Update deployment
-	if _, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Update(ctx, deploy, metav1.UpdateOptions{}); err != nil {
+		// Update deployment
+		_, err = c.clientset.AppsV1().Deployments(cfg.Namespace).Update(ctx, deploy, metav1.UpdateOptions{})
+		if err == nil {
+			// Set status to creating to wait for rollout
+			return c.store.SetStatus(ctx, p.ID, projects.StatusCreating, "Restarting deployment")
+		}
+
+		// Check if it's a conflict error - retry with fresh data
+		if errors.IsConflict(err) {
+			logger.WithField("attempt", attempt).Warn("Deployment restart conflict, retrying with fresh data")
+			lastErr = err
+			continue
+		}
+
+		// Non-conflict error - fail immediately
 		return fmt.Errorf("failed to update deployment: %w", err)
 	}
 
-	// Set status to creating to wait for rollout
-	return c.store.SetStatus(ctx, p.ID, projects.StatusCreating, "Restarting deployment")
+	// Exhausted retries
+	return fmt.Errorf("failed to restart deployment after %d retries: %w", maxRetries, lastErr)
 }
 
 // GetDeploymentStatus returns the current status of a project's deployment.
@@ -677,6 +725,55 @@ func (c *Controller) UpdateProjectSecrets(ctx context.Context, p *projects.Proje
 
 	// Trigger a deployment restart to pick up the new secrets
 	return c.RestartProject(ctx, p)
+}
+
+// expandPVCIfNeeded expands a project's PVC if the requested storage is larger than current.
+// This only works if the storage class supports volume expansion (allowVolumeExpansion: true).
+func (c *Controller) expandPVCIfNeeded(ctx context.Context, p *projects.Project, cfg ResourceConfig, resourceName string) error {
+	logger := log.WithField("project", p.Name)
+	pvcName := fmt.Sprintf("%s-data", resourceName)
+
+	// Get current PVC
+	pvc, err := c.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// PVC doesn't exist, nothing to expand
+			return nil
+		}
+		return fmt.Errorf("failed to get PVC: %w", err)
+	}
+
+	// Parse current storage from PVC
+	currentStorage := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+
+	// Parse requested storage from project
+	requestedStorage, err := resource.ParseQuantity(p.StorageSize)
+	if err != nil {
+		return fmt.Errorf("failed to parse requested storage size %q: %w", p.StorageSize, err)
+	}
+
+	// Compare: only expand, never shrink
+	if requestedStorage.Cmp(currentStorage) <= 0 {
+		logger.WithFields(logrus.Fields{
+			"current":   currentStorage.String(),
+			"requested": requestedStorage.String(),
+		}).Debug("PVC expansion not needed (requested <= current)")
+		return nil
+	}
+
+	// Update PVC with new storage request
+	logger.WithFields(logrus.Fields{
+		"current":   currentStorage.String(),
+		"requested": requestedStorage.String(),
+	}).Info("Expanding PVC storage")
+
+	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = requestedStorage
+	if _, err := c.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("failed to update PVC for expansion: %w", err)
+	}
+
+	logger.Info("PVC expansion requested successfully")
+	return nil
 }
 
 // Ensure interfaces are implemented (compile-time check)

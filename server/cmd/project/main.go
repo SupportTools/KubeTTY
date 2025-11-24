@@ -36,13 +36,34 @@ const (
 	maxPTYRows = 200
 )
 
+// wsClient wraps a websocket connection with a write mutex to prevent concurrent writes.
+// The gorilla/websocket library does not support concurrent writers.
+type wsClient struct {
+	conn    *websocket.Conn
+	writeMu sync.Mutex
+}
+
+// writeMessage safely writes a message to the websocket with mutex protection.
+func (c *wsClient) writeMessage(messageType int, data []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.conn.WriteMessage(messageType, data)
+}
+
+// writeControl safely writes a control message to the websocket with mutex protection.
+func (c *wsClient) writeControl(messageType int, data []byte, deadline time.Time) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.conn.WriteControl(messageType, data, deadline)
+}
+
 type ptySession struct {
 	cmd       *exec.Cmd
 	ptmx      *os.File
 	createdAt time.Time
 
 	mu            sync.RWMutex
-	clients       map[*websocket.Conn]bool
+	clients       map[*websocket.Conn]*wsClient
 	outputBuffer  []byte // Buffer for initial output (MOTD, etc.)
 	bufferMaxSize int    // Maximum buffer size (64KB)
 }
@@ -200,8 +221,8 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[WS %s] Connection established", connID)
 
-	// Register this client
-	ps.addClient(conn)
+	// Register this client and get the wsClient wrapper for safe writes
+	wsClient := ps.addClient(conn)
 	defer ps.removeClient(conn)
 
 	if s.appMetrics != nil {
@@ -251,8 +272,8 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 					log.Printf("[WS %s] PTY resize error: %v", connID, err)
 				}
 			case "ping":
-				// Send pong response to keep connection alive
-				if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"pong"}`)); err != nil {
+				// Send pong response to keep connection alive (use safe write)
+				if err := wsClient.writeMessage(websocket.TextMessage, []byte(`{"type":"pong"}`)); err != nil {
 					log.Printf("[WS %s] Pong write error: %v", connID, err)
 				}
 			}
@@ -326,7 +347,7 @@ func (s *server) initPTY(ctx context.Context) error {
 		cmd:           cmd,
 		ptmx:          ptmx,
 		createdAt:     time.Now(),
-		clients:       make(map[*websocket.Conn]bool),
+		clients:       make(map[*websocket.Conn]*wsClient),
 		outputBuffer:  make([]byte, 0, 65536), // Pre-allocate 64KB capacity
 		bufferMaxSize: 65536,                  // 64KB max buffer size
 	}
@@ -401,18 +422,22 @@ func (s *server) initPTY(ctx context.Context) error {
 	return nil
 }
 
-func (ps *ptySession) addClient(conn *websocket.Conn) {
+func (ps *ptySession) addClient(conn *websocket.Conn) *wsClient {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
+	client := &wsClient{conn: conn}
+
 	// Replay buffered output to the new client (MOTD, etc.)
+	// Use the safe write method to prevent races
 	if len(ps.outputBuffer) > 0 {
-		if err := conn.WriteMessage(websocket.BinaryMessage, ps.outputBuffer); err != nil {
+		if err := client.writeMessage(websocket.BinaryMessage, ps.outputBuffer); err != nil {
 			log.Printf("warn: failed to replay buffer to new client: %v", err)
 		}
 	}
 
-	ps.clients[conn] = true
+	ps.clients[conn] = client
+	return client
 }
 
 func (ps *ptySession) removeClient(conn *websocket.Conn) {
@@ -431,8 +456,8 @@ func (ps *ptySession) broadcast(data []byte) {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	for conn := range ps.clients {
-		if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+	for _, client := range ps.clients {
+		if err := client.writeMessage(websocket.BinaryMessage, data); err != nil {
 			log.Printf("broadcast error: %v", err)
 		}
 	}
@@ -442,8 +467,8 @@ func (ps *ptySession) broadcastClose() {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	for conn := range ps.clients {
-		_ = conn.WriteControl(websocket.CloseMessage,
+	for conn, client := range ps.clients {
+		_ = client.writeControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "PTY exited"),
 			time.Now().Add(time.Second))
 		conn.Close()

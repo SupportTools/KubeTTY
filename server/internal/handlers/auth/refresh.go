@@ -122,6 +122,8 @@ func NewAuthRefreshHandler(cfg AuthConfig, authMgr *auth.Manager) http.HandlerFu
 				_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token expired", ""))
 			case errors.Is(err, auth.ErrTokenRevoked):
 				_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token revoked", ""))
+			case errors.Is(err, auth.ErrRefreshTokenNotFound):
+				_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token invalid", ""))
 			case errors.Is(err, auth.ErrInvalidCredentials):
 				_ = apierrors.WriteError(w, apierrors.Unauthorized("account disabled", ""))
 			default:

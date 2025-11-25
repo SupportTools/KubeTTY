@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"sync"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	log "github.com/sirupsen/logrus"
 
 	gatewayconfig "github.com/supporttools/KubeTTY/server/internal/gateway/config"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/health"
@@ -89,7 +89,10 @@ func NewWithConfig(cat gatewayconfig.Catalog, store tabs.Store, cfg ManagerConfi
 
 	// Validate minimum idle timeout (10 minutes)
 	if cfg.IdleTimeout < 10*time.Minute {
-		log.Printf("gateway: idle timeout %v is below minimum 10m, enforcing minimum", cfg.IdleTimeout)
+		log.WithFields(log.Fields{
+			"requested_timeout": cfg.IdleTimeout.String(),
+			"minimum_timeout":   (10 * time.Minute).String(),
+		}).Warn("gateway/manager: idle timeout below minimum, enforcing minimum")
 		cfg.IdleTimeout = 10 * time.Minute
 	}
 
@@ -119,7 +122,12 @@ func (m *Manager) RegisterProject(project gatewayconfig.Project) {
 		m.healthChecker.AddProject(project)
 	}
 
-	log.Printf("gateway: registered project %q (%s:%d)", project.ID, project.Namespace, project.Port)
+	log.WithFields(log.Fields{
+		"project_id": project.ID,
+		"namespace":  project.Namespace,
+		"port":       project.Port,
+		"service":    project.Service,
+	}).Info("gateway/manager: registered project")
 }
 
 // UnregisterProject removes a project from the manager.
@@ -134,7 +142,9 @@ func (m *Manager) UnregisterProject(projectID string) {
 		m.healthChecker.RemoveProject(projectID)
 	}
 
-	log.Printf("gateway: unregistered project %q", projectID)
+	log.WithFields(log.Fields{
+		"project_id": projectID,
+	}).Info("gateway/manager: unregistered project")
 }
 
 // HasProject returns whether a project is registered.
@@ -216,12 +226,20 @@ func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string,
 			return fmt.Errorf("tab %s owned by another client", tabID)
 		}
 		// Force takeover: update clientID
-		log.Printf("gateway: force takeover of tab %s from client %s to %s", tabID, e.clientID, clientID)
+		log.WithFields(log.Fields{
+			"tab_id":        tabID,
+			"old_client_id": e.clientID,
+			"new_client_id": clientID,
+		}).Info("gateway/manager: force takeover of tab")
 		e.clientID = clientID
 		// Update in database
 		go func() {
 			if err := m.store.UpdateClientID(context.Background(), tabID, clientID); err != nil {
-				log.Printf("gateway: update client ID for tab %s: %v", tabID, err)
+				log.WithFields(log.Fields{
+					"tab_id":    tabID,
+					"client_id": clientID,
+					"error":     err.Error(),
+				}).Warn("gateway/manager: failed to update client ID in database")
 			}
 		}()
 	}
@@ -315,9 +333,15 @@ func (m *Manager) RestoreTabs(ctx context.Context) error {
 	for _, row := range rows {
 		project, ok := m.projects[row.ProjectID]
 		if !ok {
-			log.Printf("gateway: deleting orphaned tab %s for unknown project %s", row.TabID, row.ProjectID)
+			log.WithFields(log.Fields{
+				"tab_id":     row.TabID,
+				"project_id": row.ProjectID,
+			}).Warn("gateway/manager: deleting orphaned tab for unknown project")
 			if err := m.store.Delete(ctx, row.TabID); err != nil {
-				log.Printf("gateway: failed to delete orphaned tab %s: %v", row.TabID, err)
+				log.WithFields(log.Fields{
+					"tab_id": row.TabID,
+					"error":  err.Error(),
+				}).Error("gateway/manager: failed to delete orphaned tab")
 			}
 			continue
 		}
@@ -386,12 +410,20 @@ func (m *Manager) recordActivity(tabID string) {
 	projectID := entry.project.ID
 	m.mu.Unlock()
 
+	log.WithFields(log.Fields{
+		"tab_id":     tabID,
+		"project_id": projectID,
+	}).Debug("gateway/manager: recorded tab activity")
+
 	// Update project activity in database (async, don't block on errors)
 	if m.projectStore != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := m.projectStore.UpdateLastActivity(ctx, projectID); err != nil {
-			log.Printf("gateway/manager: failed to update project activity for %s: %v", projectID, err)
+			log.WithFields(log.Fields{
+				"project_id": projectID,
+				"error":      err.Error(),
+			}).Warn("gateway/manager: failed to update project activity")
 		}
 	}
 }
@@ -400,6 +432,10 @@ func (m *Manager) watchStatus(ctx context.Context, tabID string, entry *tabEntry
 	for {
 		select {
 		case <-ctx.Done():
+			log.WithFields(log.Fields{
+				"tab_id":     tabID,
+				"project_id": entry.project.ID,
+			}).Debug("gateway/manager: watchStatus context cancelled")
 			return
 		case evt := <-ch:
 			status := toTabStatus(evt.Status)
@@ -412,8 +448,24 @@ func (m *Manager) watchStatus(ctx context.Context, tabID string, entry *tabEntry
 				errStr = &msg
 			}
 			downURI := entry.downstreamURI
+
+			logFields := log.Fields{
+				"tab_id":     tabID,
+				"project_id": entry.project.ID,
+				"status":     status,
+			}
+			if errStr != nil {
+				logFields["error"] = *errStr
+			}
+			log.WithFields(logFields).Debug("gateway/manager: received status update from relay")
+
 			if err := m.store.UpdateStatus(ctx, tabID, status, errStr, &downURI); err != nil && !errors.Is(err, tabs.ErrNotFound) {
-				log.Printf("gateway: update tab %s status: %v", tabID, err)
+				log.WithFields(log.Fields{
+					"tab_id":     tabID,
+					"project_id": entry.project.ID,
+					"status":     status,
+					"error":      err.Error(),
+				}).Warn("gateway/manager: failed to update tab status in database")
 			} else if m.statusCb != nil {
 				payload := tabs.Tab{
 					TabID:         tabID,
@@ -449,26 +501,35 @@ func (m *Manager) SetProjectStore(store ProjectStore) {
 // StartMetricsCollector begins the background metrics collection goroutine.
 func (m *Manager) StartMetricsCollector() {
 	if !m.metricsEnabled {
-		log.Println("gateway: metrics collection disabled")
+		log.Info("gateway/manager: metrics collection disabled")
 		return
 	}
 
 	collector, err := metrics.NewCollector(m.metricsInterval, m.handleMetricsUpdate)
 	if err != nil {
-		log.Printf("gateway: failed to create metrics collector: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Error("gateway/manager: failed to create metrics collector")
 		return
 	}
 
 	m.metricsCollector = collector
 	m.metricsCollector.Start()
-	log.Printf("gateway: metrics collector started (interval=%v)", m.metricsInterval)
+	log.WithFields(log.Fields{
+		"interval": m.metricsInterval.String(),
+	}).Info("gateway/manager: metrics collector started")
 
 	// Register all existing tabs
 	m.mu.Lock()
+	tabCount := len(m.tabs)
 	for tabID, entry := range m.tabs {
 		m.registerTabForMetrics(tabID, entry)
 	}
 	m.mu.Unlock()
+
+	log.WithFields(log.Fields{
+		"tab_count": tabCount,
+	}).Debug("gateway/manager: registered existing tabs for metrics collection")
 }
 
 // handleMetricsUpdate is called when metrics are collected for a tab.
@@ -481,7 +542,9 @@ func (m *Manager) handleMetricsUpdate(tabID string, tabMetrics metrics.TabMetric
 // registerTabForMetrics registers a tab with the metrics collector.
 func (m *Manager) registerTabForMetrics(tabID string, entry *tabEntry) {
 	if m.metricsCollector == nil {
-		log.Printf("DEBUG: metricsCollector is nil, skipping registration for tab %s", tabID)
+		log.WithFields(log.Fields{
+			"tab_id": tabID,
+		}).Debug("gateway/manager: metrics collector is nil, skipping tab registration")
 		return
 	}
 
@@ -492,8 +555,12 @@ func (m *Manager) registerTabForMetrics(tabID string, entry *tabEntry) {
 		entry.project.Port,
 	)
 
-	log.Printf("DEBUG: registerTabForMetrics - project=%s limits: cpuMillicores=%d memoryBytes=%d maxTabsPerClient=%d",
-		entry.project.ID, entry.project.Limits.CPUMillicores, entry.project.Limits.MemoryBytes, entry.project.Limits.MaxTabsPerClient)
+	log.WithFields(log.Fields{
+		"project_id":          entry.project.ID,
+		"cpu_millicores":      entry.project.Limits.CPUMillicores,
+		"memory_bytes":        entry.project.Limits.MemoryBytes,
+		"max_tabs_per_client": entry.project.Limits.MaxTabsPerClient,
+	}).Debug("gateway/manager: preparing tab registration for metrics collection")
 
 	info := metrics.TabInfo{
 		TabID:         tabID,
@@ -505,8 +572,14 @@ func (m *Manager) registerTabForMetrics(tabID string, entry *tabEntry) {
 		MemoryLimit:   entry.project.Limits.MemoryBytes,
 	}
 
-	log.Printf("DEBUG: registering TabInfo - tabId=%s projectName=%s namespace=%s cpuLimit=%d memLimit=%d downstreamURI=%s",
-		info.TabID, info.ProjectName, info.Namespace, info.CPULimit, info.MemoryLimit, info.DownstreamURI)
+	log.WithFields(log.Fields{
+		"tab_id":         info.TabID,
+		"project_name":   info.ProjectName,
+		"namespace":      info.Namespace,
+		"cpu_limit":      info.CPULimit,
+		"memory_limit":   info.MemoryLimit,
+		"downstream_uri": info.DownstreamURI,
+	}).Debug("gateway/manager: registering tab for metrics collection")
 
 	m.metricsCollector.RegisterTab(info)
 }
@@ -524,15 +597,18 @@ func (m *Manager) StartIdleChecker(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
 	defer ticker.Stop()
 
-	log.Printf("gateway: starting idle checker (timeout=%v, warning=%v)", m.idleTimeout, m.idleWarningBefore)
+	log.WithFields(log.Fields{
+		"timeout": m.idleTimeout.String(),
+		"warning": m.idleWarningBefore.String(),
+	}).Info("gateway/manager: starting idle checker")
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("gateway: idle checker stopped (context cancelled)")
+			log.Info("gateway/manager: idle checker stopped (context cancelled)")
 			return
 		case <-m.stopIdleChecker:
-			log.Printf("gateway: idle checker stopped (shutdown signal)")
+			log.Info("gateway/manager: idle checker stopped (shutdown signal)")
 			return
 		case <-ticker.C:
 			m.checkIdleTabs(ctx)
@@ -569,7 +645,12 @@ func (m *Manager) checkIdleTabs(ctx context.Context) {
 
 		// Tab has exceeded idle timeout - close it
 		if idleDuration >= m.idleTimeout {
-			log.Printf("gateway: tab %s idle for %v (timeout=%v), closing", tabID, idleDuration, m.idleTimeout)
+			log.WithFields(log.Fields{
+				"tab_id":        tabID,
+				"project_id":    entry.project.ID,
+				"idle_duration": idleDuration.String(),
+				"timeout":       m.idleTimeout.String(),
+			}).Info("gateway/manager: closing idle tab")
 			m.closeIdleTab(ctx, tabID, entry)
 			continue
 		}
@@ -578,7 +659,12 @@ func (m *Manager) checkIdleTabs(ctx context.Context) {
 		warningThreshold := m.idleTimeout - m.idleWarningBefore
 		if idleDuration >= warningThreshold && !entry.warned {
 			remaining := m.idleTimeout - idleDuration
-			log.Printf("gateway: tab %s idle for %v, sending warning (remaining=%v)", tabID, idleDuration, remaining)
+			log.WithFields(log.Fields{
+				"tab_id":        tabID,
+				"project_id":    entry.project.ID,
+				"idle_duration": idleDuration.String(),
+				"remaining":     remaining.String(),
+			}).Info("gateway/manager: sending idle warning for tab")
 			m.sendIdleWarning(tabID, entry, remaining)
 			entry.warned = true
 		}
@@ -612,7 +698,10 @@ func (m *Manager) closeIdleTab(ctx context.Context, tabID string, entry *tabEntr
 	// Delete from database (spawn goroutine to avoid blocking)
 	go func() {
 		if err := m.store.Delete(ctx, tabID); err != nil {
-			log.Printf("gateway: delete idle tab %s: %v", tabID, err)
+			log.WithFields(log.Fields{
+				"tab_id": tabID,
+				"error":  err.Error(),
+			}).Warn("gateway/manager: failed to delete idle tab from database")
 		}
 	}()
 

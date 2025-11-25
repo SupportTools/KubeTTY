@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -41,6 +42,7 @@ const (
 type wsClient struct {
 	conn    *websocket.Conn
 	writeMu sync.Mutex
+	paused  atomic.Bool // Flow control: true when client cannot accept more data
 }
 
 // writeMessage safely writes a message to the websocket with mutex protection.
@@ -182,11 +184,19 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	remoteAddr := r.RemoteAddr
 	connID := fmt.Sprintf("%s-%d", remoteAddr, time.Now().UnixNano())
 
-	log.Printf("[WS %s] Connection attempt from %s", connID, remoteAddr)
+	log.WithFields(log.Fields{
+		"conn_id":     connID,
+		"remote_addr": remoteAddr,
+		"user_agent":  r.UserAgent(),
+		"path":        r.URL.Path,
+	}).Debug("project/ws: WebSocket connection attempt")
 
 	// Ensure PTY exists
 	if err := s.initPTY(ctx); err != nil {
-		log.WithError(err).WithField("conn_id", connID).Error("PTY initialization failed")
+		log.WithFields(log.Fields{
+			"conn_id": connID,
+			"error":   err.Error(),
+		}).Error("project/ws: PTY initialization failed")
 		apierrors.WriteError(w, apierrors.InternalServerError("PTY unavailable", ""))
 		return
 	}
@@ -197,29 +207,43 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	if ps == nil {
+		log.WithField("conn_id", connID).Error("project/ws: PTY not initialized after init")
 		apierrors.WriteError(w, apierrors.InternalServerError("PTY not initialized", ""))
 		return
 	}
 
 	// Enforce single client per session
 	if ps.hasClients() {
-		log.Printf("[WS %s] Rejected: another client is already connected to this session", connID)
+		log.WithFields(log.Fields{
+			"conn_id":      connID,
+			"remote_addr":  remoteAddr,
+			"client_count": ps.getClientCount(),
+		}).Warn("project/ws: Rejected - another client is already connected (single-client enforcement)")
 		apierrors.WriteError(w, apierrors.Conflict("session already attached", "only one client allowed"))
 		return
 	}
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.WithError(err).WithField("conn_id", connID).Error("WebSocket upgrade failed")
+		log.WithFields(log.Fields{
+			"conn_id": connID,
+			"error":   err.Error(),
+		}).Error("project/ws: WebSocket upgrade failed")
 		apierrors.WriteError(w, apierrors.InternalServerError("WebSocket upgrade failed", ""))
 		return
 	}
 	defer func() {
 		conn.Close()
-		log.Printf("[WS %s] Connection closed", connID)
+		log.WithFields(log.Fields{
+			"conn_id":     connID,
+			"remote_addr": remoteAddr,
+		}).Info("project/ws: Connection closed")
 	}()
 
-	log.Printf("[WS %s] Connection established", connID)
+	log.WithFields(log.Fields{
+		"conn_id":     connID,
+		"remote_addr": remoteAddr,
+	}).Info("project/ws: WebSocket connection established")
 
 	// Register this client and get the wsClient wrapper for safe writes
 	wsClient := ps.addClient(conn)
@@ -235,11 +259,17 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				log.Printf("[WS %s] Client closed connection normally", connID)
+				log.WithFields(log.Fields{
+					"conn_id":    connID,
+					"close_code": "normal/going_away",
+				}).Info("project/ws: Client closed connection normally")
 			} else if errors.Is(err, io.EOF) {
-				log.Printf("[WS %s] Connection EOF", connID)
+				log.WithField("conn_id", connID).Info("project/ws: Connection EOF")
 			} else {
-				log.Printf("[WS %s] Read error: %v", connID, err)
+				log.WithFields(log.Fields{
+					"conn_id": connID,
+					"error":   err.Error(),
+				}).Warn("project/ws: Read error - disconnecting client")
 			}
 			return
 		}
@@ -251,31 +281,76 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 				Rows uint16 `json:"rows"`
 			}
 			if err := json.Unmarshal(data, &msg); err != nil {
-				log.Printf("[WS %s] Invalid JSON message: %v", connID, err)
+				log.WithFields(log.Fields{
+					"conn_id": connID,
+					"error":   err.Error(),
+					"data":    string(data),
+				}).Warn("project/ws: Invalid JSON message")
 				continue
 			}
 			switch msg.Type {
 			case "resize":
 				if msg.Cols == 0 || msg.Rows == 0 {
-					log.Printf("[WS %s] Invalid resize: cols and rows must be > 0", connID)
+					log.WithFields(log.Fields{
+						"conn_id": connID,
+						"cols":    msg.Cols,
+						"rows":    msg.Rows,
+					}).Warn("project/ws: Invalid resize - cols and rows must be > 0")
 					continue
 				}
 				if msg.Cols > maxPTYCols {
-					log.Printf("[WS %s] Invalid resize: cols %d exceeds max %d", connID, msg.Cols, maxPTYCols)
+					log.WithFields(log.Fields{
+						"conn_id": connID,
+						"cols":    msg.Cols,
+						"max":     maxPTYCols,
+					}).Warn("project/ws: Invalid resize - cols exceeds max")
 					continue
 				}
 				if msg.Rows > maxPTYRows {
-					log.Printf("[WS %s] Invalid resize: rows %d exceeds max %d", connID, msg.Rows, maxPTYRows)
+					log.WithFields(log.Fields{
+						"conn_id": connID,
+						"rows":    msg.Rows,
+						"max":     maxPTYRows,
+					}).Warn("project/ws: Invalid resize - rows exceeds max")
 					continue
 				}
 				if err := pty.Setsize(ps.ptmx, &pty.Winsize{Cols: msg.Cols, Rows: msg.Rows}); err != nil {
-					log.Printf("[WS %s] PTY resize error: %v", connID, err)
+					log.WithFields(log.Fields{
+						"conn_id": connID,
+						"cols":    msg.Cols,
+						"rows":    msg.Rows,
+						"error":   err.Error(),
+					}).Error("project/ws: PTY resize failed")
+				} else {
+					log.WithFields(log.Fields{
+						"conn_id": connID,
+						"cols":    msg.Cols,
+						"rows":    msg.Rows,
+					}).Debug("project/ws: PTY resized")
 				}
 			case "ping":
 				// Send pong response to keep connection alive (use safe write)
 				if err := wsClient.writeMessage(websocket.TextMessage, []byte(`{"type":"pong"}`)); err != nil {
-					log.Printf("[WS %s] Pong write error: %v", connID, err)
+					log.WithFields(log.Fields{
+						"conn_id": connID,
+						"error":   err.Error(),
+					}).Warn("project/ws: Pong write error")
+				} else {
+					log.WithField("conn_id", connID).Debug("project/ws: Pong sent")
 				}
+			case "pause":
+				// Client is requesting to pause PTY output (flow control)
+				wsClient.paused.Store(true)
+				log.WithField("conn_id", connID).Info("project/ws: Client paused (flow control enabled)")
+			case "resume":
+				// Client is ready to receive PTY output again (flow control)
+				wsClient.paused.Store(false)
+				log.WithField("conn_id", connID).Info("project/ws: Client resumed (flow control disabled)")
+			default:
+				log.WithFields(log.Fields{
+					"conn_id":      connID,
+					"message_type": msg.Type,
+				}).Debug("project/ws: Received unknown message type")
 			}
 			continue
 		}
@@ -291,7 +366,10 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if _, err := ps.ptmx.Write(data); err != nil {
-			log.Printf("pty write error: %v", err)
+			log.WithFields(log.Fields{
+				"conn_id": connID,
+				"error":   err.Error(),
+			}).Error("project/ws: PTY write error - disconnecting")
 			return
 		}
 	}
@@ -329,8 +407,15 @@ func (s *server) initPTY(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	if s.pty != nil && s.pty.isAlive() {
+		log.Debug("project/pty: PTY already initialized and alive")
 		return nil // Already initialized
 	}
+
+	log.WithFields(log.Fields{
+		"shell":   s.cfg.Shell,
+		"user":    s.cfg.KubettyUser,
+		"project": s.cfg.KubettyProject,
+	}).Info("project/pty: Initializing PTY session")
 
 	// Start bash as a login shell to source .bash_profile and display MOTD
 	cmd := exec.Command(s.cfg.Shell, "-l")
@@ -340,6 +425,10 @@ func (s *server) initPTY(ctx context.Context) error {
 	)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"shell": s.cfg.Shell,
+			"error": err.Error(),
+		}).Error("project/pty: Failed to start PTY")
 		return fmt.Errorf("start pty: %w", err)
 	}
 
@@ -352,28 +441,46 @@ func (s *server) initPTY(ctx context.Context) error {
 		bufferMaxSize: 65536,                  // 64KB max buffer size
 	}
 
+	log.WithFields(log.Fields{
+		"pid":         cmd.Process.Pid,
+		"buffer_size": 65536,
+	}).Info("project/pty: PTY session created successfully")
+
 	// Start PTY reader (broadcast to all clients)
 	go func() {
+		log.Debug("project/pty: PTY reader goroutine started")
 		buf := make([]byte, 4096)
+		totalBytesRead := 0
+
 		for {
 			n, err := ptmx.Read(buf)
 			if err != nil {
-				log.Printf("PTY read error: %v", err)
+				log.WithFields(log.Fields{
+					"error":      err.Error(),
+					"bytes_read": totalBytesRead,
+				}).Info("project/pty: PTY reader exiting - read error")
 				break
 			}
 			if n > 0 {
+				totalBytesRead += n
 				data := make([]byte, n)
 				copy(data, buf[:n])
 
 				// Store in output buffer for replay to new clients (limited to bufferMaxSize)
 				s.pty.mu.Lock()
-				if len(s.pty.outputBuffer) < s.pty.bufferMaxSize {
-					remainingSpace := s.pty.bufferMaxSize - len(s.pty.outputBuffer)
+				bufferLen := len(s.pty.outputBuffer)
+				if bufferLen < s.pty.bufferMaxSize {
+					remainingSpace := s.pty.bufferMaxSize - bufferLen
 					if n <= remainingSpace {
 						s.pty.outputBuffer = append(s.pty.outputBuffer, data...)
 					} else {
 						// If data would exceed buffer, only append what fits
 						s.pty.outputBuffer = append(s.pty.outputBuffer, data[:remainingSpace]...)
+						log.WithFields(log.Fields{
+							"data_size":       n,
+							"remaining_space": remainingSpace,
+							"truncated":       true,
+						}).Debug("project/pty: Output buffer full, truncating data")
 					}
 				}
 				s.pty.mu.Unlock()
@@ -395,12 +502,15 @@ func (s *server) initPTY(ctx context.Context) error {
 		if s.ptyLogger != nil {
 			s.ptyLogger.Flush()
 		}
+
+		log.WithField("total_bytes", totalBytesRead).Debug("project/pty: PTY reader goroutine exited")
 	}()
 
 	// Monitor PTY exit
 	go func() {
+		log.Debug("project/pty: PTY monitor goroutine started")
 		err := cmd.Wait()
-		log.Printf("PTY exited: %v", err)
+
 		exitCode := 0
 		if err != nil {
 			exitCode = 1
@@ -408,15 +518,27 @@ func (s *server) initPTY(ctx context.Context) error {
 				exitCode = exitErr.ExitCode()
 			}
 		}
+
+		log.WithFields(log.Fields{
+			"exit_code": exitCode,
+			"error":     fmt.Sprintf("%v", err),
+			"pid":       cmd.Process.Pid,
+			"runtime":   time.Since(s.pty.createdAt).String(),
+		}).Info("project/pty: PTY process exited")
+
 		if s.appMetrics != nil {
 			s.appMetrics.observePtyExit(exitCode)
 		}
+
 		s.mu.Lock()
 		if s.pty != nil {
 			s.pty.broadcastClose()
+			log.Debug("project/pty: Cleaning up PTY session")
 		}
 		s.pty = nil
 		s.mu.Unlock()
+
+		log.Debug("project/pty: PTY monitor goroutine exited")
 	}()
 
 	return nil
@@ -430,20 +552,41 @@ func (ps *ptySession) addClient(conn *websocket.Conn) *wsClient {
 
 	// Replay buffered output to the new client (MOTD, etc.)
 	// Use the safe write method to prevent races
-	if len(ps.outputBuffer) > 0 {
+	bufferSize := len(ps.outputBuffer)
+	if bufferSize > 0 {
 		if err := client.writeMessage(websocket.BinaryMessage, ps.outputBuffer); err != nil {
-			log.Printf("warn: failed to replay buffer to new client: %v", err)
+			log.WithFields(log.Fields{
+				"buffer_size": bufferSize,
+				"error":       err.Error(),
+			}).Warn("project/pty: Failed to replay buffer to new client")
+		} else {
+			log.WithField("buffer_size", bufferSize).Debug("project/pty: Replayed output buffer to new client")
 		}
 	}
 
 	ps.clients[conn] = client
+
+	log.WithFields(log.Fields{
+		"client_count": len(ps.clients),
+		"pty_age":      time.Since(ps.createdAt).String(),
+	}).Info("project/pty: Client added to PTY session")
+
 	return client
 }
 
 func (ps *ptySession) removeClient(conn *websocket.Conn) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+
+	_, existed := ps.clients[conn]
 	delete(ps.clients, conn)
+
+	if existed {
+		log.WithFields(log.Fields{
+			"client_count": len(ps.clients),
+			"pty_age":      time.Since(ps.createdAt).String(),
+		}).Info("project/pty: Client removed from PTY session")
+	}
 }
 
 func (ps *ptySession) hasClients() bool {
@@ -452,20 +595,57 @@ func (ps *ptySession) hasClients() bool {
 	return len(ps.clients) > 0
 }
 
+func (ps *ptySession) getClientCount() int {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return len(ps.clients)
+}
+
 func (ps *ptySession) broadcast(data []byte) {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
+	totalClients := len(ps.clients)
+	pausedCount := 0
+	errorCount := 0
+
 	for _, client := range ps.clients {
-		if err := client.writeMessage(websocket.BinaryMessage, data); err != nil {
-			log.Printf("broadcast error: %v", err)
+		// Skip paused clients (flow control)
+		if client.paused.Load() {
+			pausedCount++
+			continue
 		}
+
+		if err := client.writeMessage(websocket.BinaryMessage, data); err != nil {
+			errorCount++
+			log.WithFields(log.Fields{
+				"error":     err.Error(),
+				"data_size": len(data),
+			}).Warn("project/pty: Broadcast write error")
+		}
+	}
+
+	// Log summary if there were issues
+	if pausedCount > 0 || errorCount > 0 {
+		log.WithFields(log.Fields{
+			"total_clients":  totalClients,
+			"paused_clients": pausedCount,
+			"write_errors":   errorCount,
+			"data_size":      len(data),
+		}).Debug("project/pty: Broadcast completed with paused/error clients")
 	}
 }
 
 func (ps *ptySession) broadcastClose() {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
+
+	clientCount := len(ps.clients)
+
+	log.WithFields(log.Fields{
+		"client_count": clientCount,
+		"pty_age":      time.Since(ps.createdAt).String(),
+	}).Info("project/pty: Broadcasting close to all clients")
 
 	for conn, client := range ps.clients {
 		_ = client.writeControl(websocket.CloseMessage,

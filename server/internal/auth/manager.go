@@ -13,6 +13,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -80,75 +81,154 @@ func NewManager(store Store, secret string, issuer string, accessTTL, refreshTTL
 
 // Authenticate verifies username/password and ensures the user is active.
 func (m *Manager) Authenticate(ctx context.Context, username, password string) (*User, error) {
+	log.WithFields(log.Fields{
+		"username": username,
+	}).Debug("auth/manager: authentication attempt")
+
 	user, err := m.store.GetUserByUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
+			log.WithFields(log.Fields{
+				"username": username,
+			}).Debug("auth/manager: user not found")
 			return nil, ErrInvalidCredentials
 		}
+		log.WithFields(log.Fields{
+			"username": username,
+			"error":    err.Error(),
+		}).Error("auth/manager: failed to get user")
 		return nil, err
 	}
 	if !user.IsActive {
+		log.WithFields(log.Fields{
+			"username": username,
+			"user_id":  user.ID.String(),
+		}).Warn("auth/manager: inactive user authentication attempt")
 		return nil, ErrInvalidCredentials
 	}
 	if err := bcrypt.CompareHashAndPassword(user.PasswordHash, []byte(password)); err != nil {
+		log.WithFields(log.Fields{
+			"username": username,
+			"user_id":  user.ID.String(),
+		}).Warn("auth/manager: password validation failed")
 		return nil, ErrInvalidCredentials
 	}
+	log.WithFields(log.Fields{
+		"username": username,
+		"user_id":  user.ID.String(),
+	}).Info("auth/manager: authentication successful")
 	return user, nil
 }
 
 // ChangePassword verifies the current password and updates to the new password.
 // It also revokes all existing refresh tokens for security.
 func (m *Manager) ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string) error {
+	log.WithFields(log.Fields{
+		"user_id": userID.String(),
+	}).Debug("auth/manager: password change attempt")
+
 	// Validate new password strength
 	if len(newPassword) < 8 {
+		log.WithFields(log.Fields{
+			"user_id": userID.String(),
+		}).Warn("auth/manager: password change failed - weak password")
 		return ErrWeakPassword
 	}
 
 	// Get the user
 	user, err := m.store.GetUser(ctx, userID)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"user_id": userID.String(),
+			"error":   err.Error(),
+		}).Error("auth/manager: failed to get user for password change")
 		return err
 	}
 
 	// Verify current password
 	if err := bcrypt.CompareHashAndPassword(user.PasswordHash, []byte(currentPassword)); err != nil {
+		log.WithFields(log.Fields{
+			"user_id":  userID.String(),
+			"username": user.Username,
+		}).Warn("auth/manager: password change failed - current password incorrect")
 		return ErrInvalidCredentials
 	}
 
 	// Hash new password
 	newHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"user_id": userID.String(),
+			"error":   err.Error(),
+		}).Error("auth/manager: failed to hash new password")
 		return fmt.Errorf("hash new password: %w", err)
 	}
 
 	// Update password in store
 	if err := m.store.UpdateUserPassword(ctx, userID, newHash); err != nil {
+		log.WithFields(log.Fields{
+			"user_id": userID.String(),
+			"error":   err.Error(),
+		}).Error("auth/manager: failed to update password in store")
 		return err
 	}
 
 	// Revoke all existing refresh tokens for security
-	_, err = m.store.RevokeRefreshTokensByUser(ctx, userID, m.now())
+	revokedCount, err := m.store.RevokeRefreshTokensByUser(ctx, userID, m.now())
 	if err != nil {
+		log.WithFields(log.Fields{
+			"user_id": userID.String(),
+			"error":   err.Error(),
+		}).Warn("auth/manager: failed to revoke refresh tokens after password change")
 		// Log the error but don't fail the password change
 		// The password was successfully changed
 		return nil
 	}
+
+	log.WithFields(log.Fields{
+		"user_id":        userID.String(),
+		"username":       user.Username,
+		"revoked_tokens": revokedCount,
+	}).Info("auth/manager: password changed successfully")
 
 	return nil
 }
 
 // IssueTokenPair creates signed access/refresh tokens for the user.
 func (m *Manager) IssueTokenPair(ctx context.Context, user *User, meta TokenMetadata) (*TokenPair, error) {
+	log.WithFields(log.Fields{
+		"user_id":   user.ID.String(),
+		"username":  user.Username,
+		"client_ip": meta.ClientIP,
+	}).Debug("auth/manager: issuing token pair")
+
 	now := m.now()
 	accessExp := now.Add(m.accessTTL)
 	accessToken, err := m.signAccessToken(user, now, accessExp)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"user_id":  user.ID.String(),
+			"username": user.Username,
+			"error":    err.Error(),
+		}).Error("auth/manager: failed to sign access token")
 		return nil, err
 	}
 	refresh, err := m.createRefreshToken(ctx, user.ID, now, meta)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"user_id":  user.ID.String(),
+			"username": user.Username,
+			"error":    err.Error(),
+		}).Error("auth/manager: failed to create refresh token")
 		return nil, err
 	}
+	log.WithFields(log.Fields{
+		"user_id":            user.ID.String(),
+		"username":           user.Username,
+		"refresh_token_id":   refresh.record.TokenID.String(),
+		"access_expires_at":  accessExp.Format("2006-01-02T15:04:05Z07:00"),
+		"refresh_expires_at": refresh.record.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"),
+	}).Info("auth/manager: token pair issued successfully")
 	return &TokenPair{
 		AccessToken:      accessToken,
 		AccessExpiresAt:  accessExp,
@@ -166,27 +246,63 @@ func (m *Manager) IssueTokenPair(ctx context.Context, user *User, meta TokenMeta
 func (m *Manager) Refresh(ctx context.Context, token string, meta TokenMetadata) (*TokenPair, error) {
 	tokenID, secret, err := ParseRefreshToken(token)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Warn("auth/manager: refresh token parse failed")
 		return nil, err
 	}
+	log.WithFields(log.Fields{
+		"token_id":  tokenID.String(),
+		"client_ip": meta.ClientIP,
+	}).Debug("auth/manager: refresh token validation attempt")
+
 	record, err := m.store.GetRefreshToken(ctx, tokenID)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"token_id": tokenID.String(),
+			"error":    err.Error(),
+		}).Warn("auth/manager: refresh token not found in store")
 		return nil, err
 	}
 	now := m.now()
 	if record.RevokedAt != nil {
+		log.WithFields(log.Fields{
+			"token_id":   tokenID.String(),
+			"user_id":    record.UserID.String(),
+			"revoked_at": record.RevokedAt.Format("2006-01-02T15:04:05Z07:00"),
+		}).Warn("auth/manager: refresh token was revoked")
 		return nil, ErrTokenRevoked
 	}
 	if now.After(record.ExpiresAt) {
+		log.WithFields(log.Fields{
+			"token_id":   tokenID.String(),
+			"user_id":    record.UserID.String(),
+			"expires_at": record.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"),
+		}).Warn("auth/manager: refresh token expired")
 		return nil, ErrTokenExpired
 	}
 	if !hmac.Equal(record.TokenHash, hashSecret(secret)) {
+		log.WithFields(log.Fields{
+			"token_id": tokenID.String(),
+			"user_id":  record.UserID.String(),
+		}).Warn("auth/manager: refresh token secret mismatch")
 		return nil, ErrTokenMalformed
 	}
 	user, err := m.store.GetUser(ctx, record.UserID)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"token_id": tokenID.String(),
+			"user_id":  record.UserID.String(),
+			"error":    err.Error(),
+		}).Error("auth/manager: failed to get user for refresh")
 		return nil, err
 	}
 	if !user.IsActive {
+		log.WithFields(log.Fields{
+			"token_id": tokenID.String(),
+			"user_id":  user.ID.String(),
+			"username": user.Username,
+		}).Warn("auth/manager: refresh token for inactive user")
 		return nil, ErrInvalidCredentials
 	}
 
@@ -194,8 +310,21 @@ func (m *Manager) Refresh(ctx context.Context, token string, meta TokenMetadata)
 	accessExp := now.Add(m.accessTTL)
 	accessToken, err := m.signAccessToken(user, now, accessExp)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"token_id": tokenID.String(),
+			"user_id":  user.ID.String(),
+			"username": user.Username,
+			"error":    err.Error(),
+		}).Error("auth/manager: failed to sign new access token during refresh")
 		return nil, err
 	}
+
+	log.WithFields(log.Fields{
+		"token_id":          tokenID.String(),
+		"user_id":           user.ID.String(),
+		"username":          user.Username,
+		"access_expires_at": accessExp.Format("2006-01-02T15:04:05Z07:00"),
+	}).Info("auth/manager: refresh successful, new access token issued")
 
 	return &TokenPair{
 		AccessToken:      accessToken,
@@ -220,10 +349,21 @@ func (m *Manager) ValidateAccessToken(token string) (*AccessClaims, error) {
 	})
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
+			log.WithFields(log.Fields{
+				"username": claims.Username,
+				"subject":  claims.Subject,
+			}).Debug("auth/manager: access token expired")
 			return nil, ErrTokenExpired
 		}
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Warn("auth/manager: access token validation failed")
 		return nil, fmt.Errorf("parse access token: %w", err)
 	}
+	log.WithFields(log.Fields{
+		"username": claims.Username,
+		"subject":  claims.Subject,
+	}).Debug("auth/manager: access token validated successfully")
 	return claims, nil
 }
 

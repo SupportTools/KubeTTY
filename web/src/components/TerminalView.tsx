@@ -20,6 +20,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 const FORCE_RECONNECT_THRESHOLD = 3; // Show force button after this many failed attempts
+const HIGH_WATERMARK = 5; // Max pending writes before pausing server output
 
 const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externalStatus }: Props) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -36,6 +37,8 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
   const reconnectAttempts = useRef(0);
   const [showForceButton, setShowForceButton] = useState(false);
   const forceReconnectRef = useRef(false);
+  const [pendingWrites, setPendingWrites] = useState(0);
+  const pausedRef = useRef(false);
 
   // Handler for when HTTP health check fails - trigger WebSocket reconnect
   const handleHealthUnhealthy = useCallback(() => {
@@ -160,7 +163,39 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
           // Not valid JSON, write to terminal
         }
       }
-      termRef.current?.write(payload);
+
+      // Flow control: increment pending writes counter
+      setPendingWrites((prev) => {
+        const newCount = prev + 1;
+
+        // Pause server output if we exceed HIGH_WATERMARK
+        if (!pausedRef.current && newCount >= HIGH_WATERMARK) {
+          pausedRef.current = true;
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'pause' }));
+          }
+        }
+
+        return newCount;
+      });
+
+      // Write to terminal with callback to track completion
+      termRef.current?.write(payload, () => {
+        // Write completed - decrement pending counter
+        setPendingWrites((prev) => {
+          const newCount = prev - 1;
+
+          // Resume if we were paused and now below threshold
+          if (pausedRef.current && newCount < HIGH_WATERMARK) {
+            pausedRef.current = false;
+            if (socketRef.current?.readyState === WebSocket.OPEN) {
+              socketRef.current.send(JSON.stringify({ type: 'resume' }));
+            }
+          }
+
+          return newCount;
+        });
+      });
     };
 
     dataDisposable.current?.dispose();
@@ -185,8 +220,15 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
   }, [retrySignal, onReconnect, wsUrl]);
 
   useEffect(() => {
-    if (isFocused) {
-      termRef.current?.focus();
+    if (isFocused && termRef.current && fitAddonRef.current) {
+      // Small delay to ensure DOM has updated (display: none → block)
+      // before fitting the terminal to its new container size
+      const timeoutId = setTimeout(() => {
+        fitAddonRef.current?.fit();
+        notifyResize();
+        termRef.current?.focus();
+      }, 50);
+      return () => clearTimeout(timeoutId);
     }
   }, [isFocused]);
 

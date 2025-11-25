@@ -14,9 +14,9 @@ metadata:
   labels:
     {{- include "kubetty-gateway.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: 3
   strategy:
-    type: Recreate
+    type: RollingUpdate
   selector:
     matchLabels:
       {{- include "kubetty-gateway.selectorLabels" . | nindent 6 }}

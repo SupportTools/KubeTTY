@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // LogoutRequest represents the logout request body.
@@ -46,26 +47,69 @@ type LogoutRequest struct {
 // logs a warning but still clears cookies and returns success.
 func NewAuthLogoutHandler(cfg AuthConfig, authMgr *auth.Manager, authStore auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log.WithFields(log.Fields{
+			"client_ip":  r.RemoteAddr,
+			"user_agent": r.UserAgent(),
+			"has_cookie": r.Header.Get("Cookie") != "",
+		}).Debug("auth/logout: request received")
+
 		if !AuthEnabled(cfg, authMgr) {
+			log.Debug("auth/logout: authentication disabled, returning 204")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
 		var req LogoutRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			// Don't expose JSON parsing details to client for security
+			log.WithFields(log.Fields{
+				"error":     err.Error(),
+				"client_ip": r.RemoteAddr,
+			}).Warn("auth/logout: invalid JSON in request body")
 			_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
 			return
 		}
 
 		token := RefreshTokenFromRequest(r, strings.TrimSpace(req.RefreshToken))
+		tokenIDStr := "none"
+
 		if token != "" && authStore != nil {
 			if tokenID, _, err := auth.ParseRefreshToken(token); err == nil {
+				tokenIDStr = tokenID.String()
+				log.WithFields(log.Fields{
+					"token_id":  tokenIDStr,
+					"client_ip": r.RemoteAddr,
+				}).Debug("auth/logout: attempting to revoke refresh token")
+
 				if err := authStore.RevokeRefreshToken(r.Context(), tokenID, time.Now()); err != nil && !errors.Is(err, auth.ErrRefreshTokenNotFound) {
-					log.Printf("warn: revoke refresh token: %v", err)
+					log.WithFields(log.Fields{
+						"token_id":  tokenIDStr,
+						"error":     err.Error(),
+						"client_ip": r.RemoteAddr,
+					}).Warn("auth/logout: failed to revoke refresh token")
+				} else {
+					log.WithFields(log.Fields{
+						"token_id":  tokenIDStr,
+						"client_ip": r.RemoteAddr,
+					}).Info("auth/logout: refresh token revoked successfully")
 				}
+			} else {
+				log.WithFields(log.Fields{
+					"error":     err.Error(),
+					"client_ip": r.RemoteAddr,
+				}).Warn("auth/logout: failed to parse refresh token")
 			}
+		} else {
+			log.WithFields(log.Fields{
+				"has_token": token != "",
+				"has_store": authStore != nil,
+				"client_ip": r.RemoteAddr,
+			}).Debug("auth/logout: no refresh token to revoke")
 		}
+
+		log.WithFields(log.Fields{
+			"token_id":  tokenIDStr,
+			"client_ip": r.RemoteAddr,
+		}).Info("auth/logout: clearing auth cookies and completing logout")
 
 		ClearAuthCookies(w, cfg)
 		w.WriteHeader(http.StatusNoContent)

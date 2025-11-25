@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	log "github.com/sirupsen/logrus"
 )
 
 // Config describes the downstream target to connect to.
@@ -79,10 +79,24 @@ func (r *Relay) LastError() error {
 
 func (r *Relay) setStatus(status Status, err error) {
 	r.mu.Lock()
+	oldStatus := r.status
 	r.status = status
 	r.lastError = err
 	observers := append([]chan StatusEvent(nil), r.observers...)
 	r.mu.Unlock()
+
+	logFields := log.Fields{
+		"project_id":    r.cfg.ProjectID,
+		"old_status":    oldStatus,
+		"new_status":    status,
+		"num_observers": len(observers),
+	}
+	if err != nil {
+		logFields["error"] = err.Error()
+		log.WithFields(logFields).Warn("gateway/relay: status transition with error")
+	} else {
+		log.WithFields(logFields).Debug("gateway/relay: status transition")
+	}
 
 	evt := StatusEvent{Status: status, Err: err, When: time.Now()}
 	for _, ch := range observers {
@@ -115,7 +129,11 @@ func (r *Relay) Connect(ctx context.Context, backoff Backoff) (*websocket.Conn, 
 	if r.downstream != nil {
 		conn := r.downstream
 		r.mu.RUnlock()
-		log.Printf("[Relay %s] Reusing existing downstream connection", r.cfg.ProjectID)
+		log.WithFields(log.Fields{
+			"project_id": r.cfg.ProjectID,
+			"endpoint":   r.cfg.Endpoint.String(),
+			"status":     r.status,
+		}).Debug("gateway/relay: reusing existing downstream connection")
 		return conn, nil
 	}
 	r.mu.RUnlock()
@@ -123,18 +141,30 @@ func (r *Relay) Connect(ctx context.Context, backoff Backoff) (*websocket.Conn, 
 	attempt := 0
 	for {
 		if ctx.Err() != nil {
-			log.Printf("[Relay %s] Context error during connect: %v", r.cfg.ProjectID, ctx.Err())
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"endpoint":   r.cfg.Endpoint.String(),
+				"error":      ctx.Err().Error(),
+			}).Debug("gateway/relay: context error during connect")
 			return nil, ctx.Err()
 		}
 		r.setStatus(StatusConnecting, nil)
-		log.Printf("[Relay %s] Dial attempt %d to %s", r.cfg.ProjectID, attempt+1, r.cfg.Endpoint.String())
+		log.WithFields(log.Fields{
+			"project_id": r.cfg.ProjectID,
+			"endpoint":   r.cfg.Endpoint.String(),
+			"attempt":    attempt + 1,
+		}).Debug("gateway/relay: attempting to connect downstream")
 		conn, resp, err := r.cfg.Dialer.DialContext(ctx, r.cfg.Endpoint.String(), r.cfg.Headers)
 		if err == nil {
 			r.mu.Lock()
 			r.downstream = conn
 			r.mu.Unlock()
 			r.setStatus(StatusConnected, nil)
-			log.Printf("[Relay %s] Successfully connected to downstream", r.cfg.ProjectID)
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"endpoint":   r.cfg.Endpoint.String(),
+				"attempts":   attempt + 1,
+			}).Info("gateway/relay: successfully connected to downstream")
 			return conn, nil
 		}
 		attempt++
@@ -142,14 +172,28 @@ func (r *Relay) Connect(ctx context.Context, backoff Backoff) (*websocket.Conn, 
 		if resp != nil {
 			statusCode = resp.StatusCode
 		}
-		log.Printf("[Relay %s] Connect failed (attempt %d): %v (HTTP status: %d)", r.cfg.ProjectID, attempt, err, statusCode)
+		log.WithFields(log.Fields{
+			"project_id":  r.cfg.ProjectID,
+			"endpoint":    r.cfg.Endpoint.String(),
+			"attempt":     attempt,
+			"http_status": statusCode,
+			"error":       err.Error(),
+		}).Warn("gateway/relay: downstream connect failed")
 		r.setStatus(StatusReconnecting, err)
 		wait := backoff.Next(attempt)
-		log.Printf("[Relay %s] Waiting %s before retry", r.cfg.ProjectID, wait)
+		log.WithFields(log.Fields{
+			"project_id": r.cfg.ProjectID,
+			"wait":       wait.String(),
+			"attempt":    attempt,
+		}).Debug("gateway/relay: waiting before retry")
 		select {
 		case <-time.After(wait):
 		case <-ctx.Done():
-			log.Printf("[Relay %s] Context cancelled during backoff", r.cfg.ProjectID)
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"endpoint":   r.cfg.Endpoint.String(),
+				"error":      ctx.Err().Error(),
+			}).Debug("gateway/relay: context cancelled during backoff")
 			return nil, ctx.Err()
 		}
 	}
@@ -162,12 +206,29 @@ func (r *Relay) Close() error {
 	r.downstream = nil
 	r.status = StatusClosed
 	observers := append([]chan StatusEvent(nil), r.observers...)
+	numObservers := len(observers)
 	r.mu.Unlock()
+
+	log.WithFields(log.Fields{
+		"project_id":    r.cfg.ProjectID,
+		"had_conn":      downstream != nil,
+		"num_observers": numObservers,
+	}).Debug("gateway/relay: closing relay")
 
 	// Close connection outside of lock
 	var err error
 	if downstream != nil {
 		err = downstream.Close()
+		if err != nil {
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"error":      err.Error(),
+			}).Warn("gateway/relay: error closing downstream connection")
+		} else {
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+			}).Debug("gateway/relay: downstream connection closed successfully")
+		}
 	}
 
 	// Notify observers outside of lock to avoid deadlock
@@ -179,66 +240,97 @@ func (r *Relay) Close() error {
 		}
 	}
 
+	log.WithFields(log.Fields{
+		"project_id": r.cfg.ProjectID,
+		"had_error":  err != nil,
+	}).Info("gateway/relay: relay closed")
+
 	return err
 }
 
 // Proxy pumps data between upstream and downstream.
+// Note: This function does NOT attempt to reconnect on downstream failures because:
+// 1. The upstream goroutine may still be blocked on ReadMessage()
+// 2. We cannot safely interrupt a blocked WebSocket read
+// 3. Starting new goroutines while old ones are blocked causes panics
+// Instead, we return the error and let the client reconnect.
 func (r *Relay) Proxy(ctx context.Context, upstream *websocket.Conn) error {
-	log.Printf("[Relay %s] Starting proxy", r.cfg.ProjectID)
-	for {
-		log.Printf("[Relay %s] Connecting to downstream: %s", r.cfg.ProjectID, r.cfg.Endpoint.String())
-		downstream, err := r.Connect(ctx, DefaultBackoff())
-		if err != nil {
-			log.Printf("[Relay %s] Failed to connect downstream: %v", r.cfg.ProjectID, err)
-			return err
+	log.WithFields(log.Fields{
+		"project_id": r.cfg.ProjectID,
+		"endpoint":   r.cfg.Endpoint.String(),
+	}).Debug("gateway/relay: starting proxy")
+
+	downstream, err := r.Connect(ctx, DefaultBackoff())
+	if err != nil {
+		log.WithFields(log.Fields{
+			"project_id": r.cfg.ProjectID,
+			"endpoint":   r.cfg.Endpoint.String(),
+			"error":      err.Error(),
+		}).Error("gateway/relay: failed to connect downstream")
+		return err
+	}
+	log.WithFields(log.Fields{
+		"project_id": r.cfg.ProjectID,
+		"endpoint":   r.cfg.Endpoint.String(),
+	}).Info("gateway/relay: starting bidirectional pipe")
+
+	pipeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 2)
+	go r.pipe(pipeCtx, "up->down", upstream, downstream, errCh)
+	go r.pipe(pipeCtx, "down->up", downstream, upstream, errCh)
+
+	select {
+	case <-ctx.Done():
+		log.WithFields(log.Fields{
+			"project_id": r.cfg.ProjectID,
+			"error":      ctx.Err().Error(),
+		}).Debug("gateway/relay: context cancelled")
+		return ctx.Err()
+	case err := <-errCh:
+		// Check if this is a pipeError for better logging
+		var pErr *pipeError
+		if errors.As(err, &pErr) {
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"direction":  pErr.direction,
+				"is_read":    pErr.isRead,
+				"error":      pErr.err.Error(),
+			}).Warn("gateway/relay: pipe error")
+		} else {
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"error":      err.Error(),
+			}).Warn("gateway/relay: pipe error (unknown type)")
 		}
-		log.Printf("[Relay %s] Downstream connected, starting bidirectional pipe", r.cfg.ProjectID)
 
-		pipeCtx, cancel := context.WithCancel(ctx)
-		errCh := make(chan error, 2)
-		go r.pipe(pipeCtx, "up->down", upstream, downstream, errCh)
-		go r.pipe(pipeCtx, "down->up", downstream, upstream, errCh)
-
+		_ = downstream.Close()
+		r.mu.Lock()
+		if r.downstream == downstream {
+			r.downstream = nil
+		}
+		r.mu.Unlock()
+		// drain second error if present
 		select {
-		case <-ctx.Done():
-			log.Printf("[Relay %s] Context cancelled", r.cfg.ProjectID)
-			cancel()
-			return ctx.Err()
-		case err := <-errCh:
-			log.Printf("[Relay %s] Pipe error: %v", r.cfg.ProjectID, err)
-			cancel()
-			_ = downstream.Close()
-			r.mu.Lock()
-			if r.downstream == downstream {
-				r.downstream = nil
-			}
-			r.mu.Unlock()
-			// drain second error if present
-			select {
-			case <-errCh:
-			default:
-			}
-			if errors.Is(err, context.Canceled) {
-				log.Printf("[Relay %s] Pipe cancelled, exiting", r.cfg.ProjectID)
-				return nil
-			}
-
-			// Check if this is an upstream error (client disconnected) - don't reconnect
-			// Upstream errors: read up->down failed (client stopped sending) or write down->up failed (can't send to client)
-			// Downstream errors: write up->down failed (can't send to downstream) or read down->up failed (downstream stopped)
-			if pe, ok := err.(*pipeError); ok {
-				isUpstreamError := (pe.direction == "up->down" && pe.isRead) || (pe.direction == "down->up" && !pe.isRead)
-				if isUpstreamError {
-					log.Printf("[Relay %s] Upstream connection closed, exiting proxy", r.cfg.ProjectID)
-					return err
-				}
-			}
-
-			// Try again for downstream errors
-			log.Printf("[Relay %s] Reconnecting after downstream error...", r.cfg.ProjectID)
-			r.setStatus(StatusReconnecting, err)
-			continue
+		case <-errCh:
+		default:
 		}
+		if errors.Is(err, context.Canceled) {
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+			}).Debug("gateway/relay: pipe cancelled, exiting cleanly")
+			return nil
+		}
+		// Return error - client should reconnect
+		// We don't attempt reconnection because the upstream goroutine may still be
+		// blocked on ReadMessage(), and starting new goroutines would cause a panic
+		log.WithFields(log.Fields{
+			"project_id": r.cfg.ProjectID,
+			"error":      err.Error(),
+		}).Info("gateway/relay: connection lost, expecting client to reconnect")
+		r.setStatus(StatusClosed, err)
+		return err
 	}
 }
 
@@ -258,15 +350,29 @@ func (e *pipeError) Unwrap() error {
 }
 
 func (r *Relay) pipe(ctx context.Context, label string, src *websocket.Conn, dst *websocket.Conn, errCh chan<- error) {
+	log.WithFields(log.Fields{
+		"project_id": r.cfg.ProjectID,
+		"direction":  label,
+	}).Debug("gateway/relay: pipe goroutine started")
+
 	for {
 		select {
 		case <-ctx.Done():
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"direction":  label,
+			}).Debug("gateway/relay: pipe goroutine context cancelled")
 			errCh <- ctx.Err()
 			return
 		default:
 		}
 		msgType, data, err := src.ReadMessage()
 		if err != nil {
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"direction":  label,
+				"error":      err.Error(),
+			}).Warn("gateway/relay: pipe read error")
 			errCh <- &pipeError{
 				err:       fmt.Errorf("relay %s: read %s: %w", r.cfg.ProjectID, label, err),
 				direction: label,
@@ -275,6 +381,13 @@ func (r *Relay) pipe(ctx context.Context, label string, src *websocket.Conn, dst
 			return
 		}
 		if err := dst.WriteMessage(msgType, data); err != nil {
+			log.WithFields(log.Fields{
+				"project_id":   r.cfg.ProjectID,
+				"direction":    label,
+				"error":        err.Error(),
+				"message_type": msgType,
+				"data_size":    len(data),
+			}).Warn("gateway/relay: pipe write error")
 			errCh <- &pipeError{
 				err:       fmt.Errorf("relay %s: write %s: %w", r.cfg.ProjectID, label, err),
 				direction: label,

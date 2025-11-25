@@ -1,27 +1,57 @@
 # KubeTTY Gateway - Production Environment
-# Deploy to kubetty-gateway namespace
+# Deploy to kubetty-gateway-prd namespace
 # This file contains production-specific overrides to values.yaml
+#
+# Deployment:
+#   helm upgrade --install kubetty-gateway ./deploy/helm-gateway \
+#     -n kubetty-gateway-prd --create-namespace \
+#     -f deploy/helm-gateway/values.prd.yaml
 
 # Use stable tag for production
 image:
-  tag: "0.7.2"
+  repository: harbor.support.tools/kubetty/kubetty
+  tag: "v1.1.6"
   pullPolicy: IfNotPresent
 
+imagePullSecrets:
+  - harbor-supporttools
+
 deploymentId: kubetty-gateway
+
+# Production environment
+env:
+  LOG_LEVEL: info
+  RECOMMENDED_IMAGE_TAG: "v1.1.6"
+
+# Empty static catalog - production uses dynamic projects only
+catalog:
+  inline: |
+    projects: []
 
 # Authentication - enabled for production
 auth:
   mode: local
+  jwtSecretSecret:
+    name: "kubetty-gateway-auth"
+    key: jwt-secret
+  issuer: kubetty
+  accessTTL: 15m
+  refreshTTL: 720h   # 30 days
+  cookieDomain: ""
   cookieSecure: true
 
-# Database - production CNPG cluster
+# Database - local CNPG cluster in same namespace
 cnpg:
-  host: kubetty-shared-rw
+  host: kubetty-db-rw.kubetty-gateway-prd.svc
   port: 5432
   database: kubetty
   userSecret: kubetty-postgres-user
   usernameKey: username
   passwordKey: password
+
+service:
+  type: ClusterIP
+  port: 8080
 
 # Production ingress
 ingress:
@@ -31,10 +61,19 @@ ingress:
   hosts:
     - host: kubetty.support.tools
       path: /
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+
+serviceAccount:
+  create: true
+  name: ""
 
 rbac:
   create: true
-  projectNamespaces: []
+  projectNamespaces:
+    - kubetty-projects-prd
   # No suffix for production (owns the cluster-scoped resources)
   clusterResourceSuffix: ""
 
@@ -48,6 +87,7 @@ controller:
   reconcileInterval: 30s
   healthCheckInterval: 60s
   envSecretName: env-secrets
+  imagePullSecrets: "harbor-supporttools"
 
 # Production resources
 resources:
@@ -57,6 +97,8 @@ resources:
   limits:
     memory: "512Mi"
     cpu: "500m"
+
+podAnnotations: {}
 
 prometheus:
   scrape:

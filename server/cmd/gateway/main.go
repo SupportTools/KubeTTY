@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -26,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	log "github.com/sirupsen/logrus"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -75,27 +75,37 @@ func main() {
 
 	cfg, err := config.LoadGatewayConfig()
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Fatal("gateway/main: failed to load gateway configuration")
 	}
 
 	// Security warning when authentication is disabled
 	if cfg.AuthMode != "local" {
-		log.Printf("⚠️  SECURITY WARNING: Authentication is DISABLED (AUTH_MODE=%q)", cfg.AuthMode)
-		log.Printf("⚠️  All routes are unprotected. Set AUTH_MODE=local and configure AUTH_JWT_SECRET to enable authentication.")
+		log.WithFields(log.Fields{
+			"auth_mode": cfg.AuthMode,
+		}).Warn("gateway/main: SECURITY WARNING - authentication is DISABLED, all routes are unprotected")
+		log.Warn("gateway/main: set AUTH_MODE=local and configure AUTH_JWT_SECRET to enable authentication")
 	}
 
 	if err := runMigrations(ctx, cfg.ConnString()); err != nil {
-		log.Fatalf("apply migrations: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Fatal("gateway/main: failed to apply database migrations")
 	}
 
 	poolConfig, err := cfg.ConnConfig()
 	if err != nil {
-		log.Fatalf("build pool config: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Fatal("gateway/main: failed to build database pool config")
 	}
 
 	store, err := sessions.NewPGXStore(ctx, poolConfig)
 	if err != nil {
-		log.Fatalf("connect cnpg: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Fatal("gateway/main: failed to connect to CNPG database")
 	}
 	defer store.Close()
 
@@ -106,15 +116,23 @@ func main() {
 	if cfg.AuthMode == "local" {
 		authPoolConfig, err := cfg.ConnConfig()
 		if err != nil {
-			log.Fatalf("build auth pool config: %v", err)
+			log.WithFields(log.Fields{
+				"error": err.Error(),
+			}).Fatal("gateway/main: failed to build auth pool config")
 		}
 		authStore, err = auth.NewStore(ctx, authPoolConfig)
 		if err != nil {
-			log.Fatalf("connect auth store: %v", err)
+			log.WithFields(log.Fields{
+				"error": err.Error(),
+			}).Fatal("gateway/main: failed to connect to auth store")
 		}
 		authManager, err = auth.NewManager(authStore, cfg.AuthJWTSecret, cfg.AuthIssuer, cfg.AuthAccessTTL, cfg.AuthRefreshTTL)
 		if err != nil {
-			log.Fatalf("init auth manager: %v", err)
+			log.WithFields(log.Fields{
+				"error":       err.Error(),
+				"access_ttl":  cfg.AuthAccessTTL.String(),
+				"refresh_ttl": cfg.AuthRefreshTTL.String(),
+			}).Fatal("gateway/main: failed to initialize auth manager")
 		}
 	}
 	if authStore != nil {
@@ -128,12 +146,16 @@ func main() {
 	)
 	projectPoolConfig, err := cfg.ConnConfig()
 	if err != nil {
-		log.Fatalf("build project pool config: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Fatal("gateway/main: failed to build project pool config")
 	}
 	projectStore = projects.NewStoreFromPool(func() *pgxpool.Pool {
 		pool, err := pgxpool.NewWithConfig(ctx, projectPoolConfig)
 		if err != nil {
-			log.Fatalf("project store pool: %v", err)
+			log.WithFields(log.Fields{
+				"error": err.Error(),
+			}).Fatal("gateway/main: failed to create project store pool")
 		}
 		return pool
 	}(), cfg.Controller.ProjectsNamespace)
@@ -142,11 +164,15 @@ func main() {
 	// NOTE: tabManager must be created before controller starts so the callback can be set
 	tabPoolConfig, err := cfg.ConnConfig()
 	if err != nil {
-		log.Fatalf("build tab pool config: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Fatal("gateway/main: failed to build tab pool config")
 	}
 	tabPool, err := pgxpool.NewWithConfig(ctx, tabPoolConfig)
 	if err != nil {
-		log.Fatalf("gateway pool: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Fatal("gateway/main: failed to create gateway database pool")
 	}
 	defer tabPool.Close()
 
@@ -179,7 +205,10 @@ func main() {
 		}
 		projCtrl, err = controller.New(ctrlCfg, projectStore)
 		if err != nil {
-			log.Printf("warn: project controller disabled: %v", err)
+			log.WithFields(log.Fields{
+				"error":     err.Error(),
+				"namespace": cfg.Controller.ProjectsNamespace,
+			}).Warn("gateway/main: project controller disabled due to initialization error")
 		} else {
 			// Set up controller callback BEFORE starting the controller
 			// This ensures projects that transition to running during initial reconciliation
@@ -190,7 +219,10 @@ func main() {
 					serviceName := p.ServiceName
 					if serviceName == "" {
 						serviceName = projects.ComputeServiceName(p.Name)
-						log.Printf("warn: project %q missing ServiceName, using computed: %s", p.Name, serviceName)
+						log.WithFields(log.Fields{
+							"project":      p.Name,
+							"service_name": serviceName,
+						}).Warn("gateway/main: controller callback - project missing ServiceName, using computed name")
 					}
 
 					// Parse CPU and memory limits for metrics percentage calculation
@@ -199,18 +231,28 @@ func main() {
 						if qty, err := resource.ParseQuantity(p.CPULimit); err == nil {
 							cpuMillicores = qty.MilliValue()
 						} else {
-							log.Printf("warn: project %q has invalid CPULimit %q: %v", p.Name, p.CPULimit, err)
+							log.WithFields(log.Fields{
+								"project":   p.Name,
+								"cpu_limit": p.CPULimit,
+								"error":     err.Error(),
+							}).Warn("gateway/main: controller callback - project has invalid CPULimit, cannot parse quantity")
 						}
 					}
 					if p.MemoryLimit != "" {
 						if qty, err := resource.ParseQuantity(p.MemoryLimit); err == nil {
 							memoryBytes = qty.Value()
 						} else {
-							log.Printf("warn: project %q has invalid MemoryLimit %q: %v", p.Name, p.MemoryLimit, err)
+							log.WithFields(log.Fields{
+								"project":      p.Name,
+								"memory_limit": p.MemoryLimit,
+								"error":        err.Error(),
+							}).Warn("gateway/main: controller callback - project has invalid MemoryLimit, cannot parse quantity")
 						}
 					}
 
-					log.Printf("Controller callback: registering project %q with tabManager", p.Name)
+					log.WithFields(log.Fields{
+						"project": p.Name,
+					}).Info("gateway/main: controller callback - registering project with tabManager")
 					tabManager.RegisterProject(gatewayconfig.Project{
 						ID:          p.Name,
 						DisplayName: p.DisplayName,
@@ -227,7 +269,9 @@ func main() {
 						},
 					})
 				} else if status == projects.StatusDeleting || status == projects.StatusDeleted {
-					log.Printf("Controller callback: unregistering project %q from tabManager", p.Name)
+					log.WithFields(log.Fields{
+						"project": p.Name,
+					}).Info("gateway/main: controller callback - unregistering project from tabManager")
 					tabManager.UnregisterProject(p.Name)
 				}
 			})
@@ -235,28 +279,36 @@ func main() {
 			// Now start the controller - callback is already set
 			projCtrl.Start(ctx)
 			defer projCtrl.Stop()
-			log.Printf("Project controller started (namespace=%s, prefix=%s, env=%s)",
-				ctrlCfg.ResourceConfig.Namespace,
-				ctrlCfg.ResourceConfig.Prefix,
-				ctrlCfg.ResourceConfig.Env)
+			log.WithFields(log.Fields{
+				"namespace": ctrlCfg.ResourceConfig.Namespace,
+				"prefix":    ctrlCfg.ResourceConfig.Prefix,
+				"env":       ctrlCfg.ResourceConfig.Env,
+			}).Info("gateway/main: project controller started")
 		}
 	} else {
-		log.Printf("Project controller disabled (enabled=%v, namespace=%q)",
-			cfg.Controller.Enabled, cfg.Controller.ProjectsNamespace)
+		log.WithFields(log.Fields{
+			"enabled":   cfg.Controller.Enabled,
+			"namespace": cfg.Controller.ProjectsNamespace,
+		}).Info("gateway/main: project controller disabled")
 	}
 
 	// Register running projects from the database (for projects that were already running before gateway started)
 	if projectStore != nil {
 		runningProjects, err := projectStore.List(ctx, projects.ListFilter{Status: "running"})
 		if err != nil {
-			log.Printf("warn: load running projects: %v", err)
+			log.WithFields(log.Fields{
+				"error": err.Error(),
+			}).Warn("gateway/main: failed to load running projects from database")
 		} else {
 			for _, p := range runningProjects {
 				// Use ServiceName from database, fallback to computed name for backwards compatibility
 				serviceName := p.ServiceName
 				if serviceName == "" {
 					serviceName = projects.ComputeServiceName(p.Name)
-					log.Printf("warn: project %q missing ServiceName, using computed: %s", p.Name, serviceName)
+					log.WithFields(log.Fields{
+						"project":      p.Name,
+						"service_name": serviceName,
+					}).Warn("gateway/main: project missing ServiceName in database, using computed name")
 				}
 
 				// Parse CPU and memory limits for metrics percentage calculation
@@ -265,14 +317,22 @@ func main() {
 					if qty, err := resource.ParseQuantity(p.CPULimit); err == nil {
 						cpuMillicores = qty.MilliValue()
 					} else {
-						log.Printf("warn: project %q has invalid CPULimit %q: %v", p.Name, p.CPULimit, err)
+						log.WithFields(log.Fields{
+							"project":   p.Name,
+							"cpu_limit": p.CPULimit,
+							"error":     err.Error(),
+						}).Warn("gateway/main: project has invalid CPULimit, cannot parse quantity")
 					}
 				}
 				if p.MemoryLimit != "" {
 					if qty, err := resource.ParseQuantity(p.MemoryLimit); err == nil {
 						memoryBytes = qty.Value()
 					} else {
-						log.Printf("warn: project %q has invalid MemoryLimit %q: %v", p.Name, p.MemoryLimit, err)
+						log.WithFields(log.Fields{
+							"project":      p.Name,
+							"memory_limit": p.MemoryLimit,
+							"error":        err.Error(),
+						}).Warn("gateway/main: project has invalid MemoryLimit, cannot parse quantity")
 					}
 				}
 
@@ -292,12 +352,16 @@ func main() {
 					},
 				})
 			}
-			log.Printf("Registered %d running projects from database", len(runningProjects))
+			log.WithFields(log.Fields{
+				"count": len(runningProjects),
+			}).Info("gateway/main: registered running projects from database")
 		}
 	}
 
 	if err := tabManager.RestoreTabs(ctx); err != nil {
-		log.Printf("warn: restore tabs: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Warn("gateway/main: failed to restore tabs")
 	}
 	// Start idle checker goroutine for tab timeout monitoring
 	go tabManager.StartIdleChecker(ctx)
@@ -306,7 +370,10 @@ func main() {
 
 	uiFS, err := fs.Sub(embeddedUI, "ui/dist")
 	if err != nil {
-		log.Fatalf("prepare static assets: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+			"path":  "ui/dist",
+		}).Fatal("gateway/main: failed to prepare static assets")
 	}
 
 	appMetrics := metrics.NewAppMetrics()
@@ -445,9 +512,14 @@ func main() {
 	// Start graceful shutdown handler in background
 	go sharedserver.GracefulShutdown(httpSrv)
 
-	log.Printf("KubeTTY Gateway listening on :%s", cfg.Port)
+	log.WithFields(log.Fields{
+		"port": cfg.Port,
+	}).Info("gateway/main: KubeTTY Gateway listening")
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("server exited: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+			"port":  cfg.Port,
+		}).Fatal("gateway/main: server exited unexpectedly")
 	}
 }
 
@@ -525,25 +597,42 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 	clientID := s.ensureClientID(w, r)
 	remoteAddr := r.RemoteAddr
 
-	log.Printf("[GW %s] Tab connection attempt from %s (client=%s, force=%v)", tabID, remoteAddr, clientID, forceTakeover)
+	log.WithFields(log.Fields{
+		"tab_id":      tabID,
+		"remote_addr": remoteAddr,
+		"client_id":   clientID,
+		"force":       forceTakeover,
+	}).Debug("gateway/main: WebSocket tab connection attempt")
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[GW %s] Upgrade failed: %v", tabID, err)
+		log.WithFields(log.Fields{
+			"tab_id": tabID,
+			"error":  err.Error(),
+		}).Error("gateway/main: WebSocket upgrade failed")
 		apierrors.WriteError(w, apierrors.InternalServerError("WebSocket upgrade failed", ""))
 		return
 	}
 	defer func() {
 		conn.Close()
-		log.Printf("[GW %s] Connection closed (client=%s)", tabID, clientID)
+		log.WithFields(log.Fields{
+			"tab_id":    tabID,
+			"client_id": clientID,
+		}).Debug("gateway/main: WebSocket connection closed")
 	}()
 
-	log.Printf("[GW %s] Connection established (client=%s)", tabID, clientID)
+	log.WithFields(log.Fields{
+		"tab_id":    tabID,
+		"client_id": clientID,
+	}).Info("gateway/main: WebSocket connection established")
 
 	// Use background context after WebSocket upgrade - the original request context
 	// is no longer valid after hijacking and can cause "invalid Body.Read" panics
 	if err := s.tabManager.AttachWithOptions(context.Background(), tabID, clientID, conn, forceTakeover); err != nil {
-		log.Printf("[GW %s] Attach failed: %v", tabID, err)
+		log.WithFields(log.Fields{
+			"tab_id": tabID,
+			"error":  err.Error(),
+		}).Error("gateway/main: tab attach failed")
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()), time.Now().Add(time.Second))
 		return
 	}
@@ -559,7 +648,10 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		items, err := s.tabStore.ListByClient(r.Context(), clientID, 50)
 		if err != nil {
-			log.Printf("list tabs error: %v", err)
+			log.WithFields(log.Fields{
+				"client_id": clientID,
+				"error":     err.Error(),
+			}).Error("gateway/main: failed to list tabs")
 			apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 			return
 		}
@@ -587,7 +679,11 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 				))
 				return
 			}
-			log.Printf("create tab error: %v", err)
+			log.WithFields(log.Fields{
+				"client_id":  clientID,
+				"project_id": req.ProjectID,
+				"error":      err.Error(),
+			}).Error("gateway/main: failed to create tab")
 			apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 			return
 		}
@@ -642,7 +738,9 @@ func (s *server) handleTabByID(w http.ResponseWriter, r *http.Request) {
 			apierrors.WriteError(w, apierrors.NotFound("tab not found", ""))
 			return
 		}
-		log.Printf("load tab error: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Error("gateway/main: failed to load tab")
 		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 		return
 	}
@@ -655,7 +753,10 @@ func (s *server) handleTabByID(w http.ResponseWriter, r *http.Request) {
 			apierrors.WriteError(w, apierrors.NotFound("tab not found", ""))
 			return
 		}
-		log.Printf("close tab error: %v", err)
+		log.WithFields(log.Fields{
+			"tab_id": id,
+			"error":  err.Error(),
+		}).Error("gateway/main: failed to close tab")
 		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 		return
 	}
@@ -693,7 +794,9 @@ func (s *server) handleTabHealth(w http.ResponseWriter, r *http.Request) {
 			apierrors.WriteError(w, apierrors.NotFound("tab not found", ""))
 			return
 		}
-		log.Printf("load tab error: %v", err)
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+		}).Error("gateway/main: failed to load tab")
 		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 		return
 	}
@@ -712,7 +815,10 @@ func (s *server) handleTabHealth(w http.ResponseWriter, r *http.Request) {
 	// Parse downstream URI and build health check URL
 	downstreamURL, err := url.Parse(*tab.DownstreamURI)
 	if err != nil {
-		log.Printf("invalid downstream URI for tab %s: %v", tabID, err)
+		log.WithFields(log.Fields{
+			"tab_id": tabID,
+			"error":  err.Error(),
+		}).Error("gateway/main: invalid downstream URI for tab")
 		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 		return
 	}
@@ -735,7 +841,10 @@ func (s *server) handleTabHealth(w http.ResponseWriter, r *http.Request) {
 	// Make request to project pod
 	resp, err := client.Get(healthURL.String())
 	if err != nil {
-		log.Printf("health check failed for tab %s: %v", tabID, err)
+		log.WithFields(log.Fields{
+			"tab_id": tabID,
+			"error":  err.Error(),
+		}).Warn("gateway/main: health check failed for tab")
 		apierrors.WriteError(w, apierrors.ServiceUnavailable("health check failed", ""))
 		return
 	}
@@ -753,7 +862,10 @@ func (s *server) handleTabHealth(w http.ResponseWriter, r *http.Request) {
 
 	// Copy response body
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		log.Printf("failed to copy health response for tab %s: %v", tabID, err)
+		log.WithFields(log.Fields{
+			"tab_id": tabID,
+			"error":  err.Error(),
+		}).Warn("gateway/main: failed to copy health response for tab")
 	}
 }
 
@@ -773,20 +885,30 @@ func (s *server) handleTabEventsWS(w http.ResponseWriter, r *http.Request) {
 	clientID := s.ensureClientID(w, r)
 	remoteAddr := r.RemoteAddr
 
-	log.Printf("[TabEvents %s] Connection attempt from %s", clientID, remoteAddr)
+	log.WithFields(log.Fields{
+		"client_id":   clientID,
+		"remote_addr": remoteAddr,
+	}).Debug("gateway/main: TabEvents WebSocket connection attempt")
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[TabEvents %s] Upgrade failed: %v", clientID, err)
+		log.WithFields(log.Fields{
+			"client_id": clientID,
+			"error":     err.Error(),
+		}).Error("gateway/main: TabEvents WebSocket upgrade failed")
 		apierrors.WriteError(w, apierrors.InternalServerError("WebSocket upgrade failed", ""))
 		return
 	}
 	defer func() {
 		conn.Close()
-		log.Printf("[TabEvents %s] Connection closed", clientID)
+		log.WithFields(log.Fields{
+			"client_id": clientID,
+		}).Debug("gateway/main: TabEvents WebSocket connection closed")
 	}()
 
-	log.Printf("[TabEvents %s] Connection established", clientID)
+	log.WithFields(log.Fields{
+		"client_id": clientID,
+	}).Info("gateway/main: TabEvents WebSocket connection established")
 
 	ch := s.subscribeTabEvents(clientID)
 	defer s.unsubscribeTabEvents(clientID, ch)
@@ -806,15 +928,22 @@ func (s *server) handleTabEventsWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-done:
-			log.Printf("[TabEvents %s] Connection closed by client", clientID)
+			log.WithFields(log.Fields{
+				"client_id": clientID,
+			}).Debug("gateway/main: TabEvents connection closed by client")
 			return
 		case msg, ok := <-ch:
 			if !ok {
-				log.Printf("[TabEvents %s] Channel closed", clientID)
+				log.WithFields(log.Fields{
+					"client_id": clientID,
+				}).Debug("gateway/main: TabEvents channel closed")
 				return
 			}
 			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-				log.Printf("[TabEvents %s] Write error: %v", clientID, err)
+				log.WithFields(log.Fields{
+					"client_id": clientID,
+					"error":     err.Error(),
+				}).Warn("gateway/main: TabEvents write error")
 				return
 			}
 		}
@@ -914,7 +1043,10 @@ func (s *server) broadcastTabSnapshot(clientID string) {
 	}
 	tabsList, err := s.tabStore.ListByClient(context.Background(), clientID, 50)
 	if err != nil {
-		log.Printf("gateway: list tabs snapshot: %v", err)
+		log.WithFields(log.Fields{
+			"client_id": clientID,
+			"error":     err.Error(),
+		}).Warn("gateway/main: failed to list tabs snapshot")
 		return
 	}
 	s.sendTabEvent(clientID, map[string]any{"type": "snapshot", "tabs": tabsList})

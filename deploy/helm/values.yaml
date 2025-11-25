@@ -90,8 +90,8 @@ auth:
   issuer: kubetty
 
   # Access token time-to-live
-  # Short-lived token for API requests (recommended: 15m-1h)
-  accessTTL: 15m
+  # For internal tools: 24h reduces login interruptions (external: 15m-1h recommended)
+  accessTTL: 24h
 
   # Refresh token time-to-live
   # Long-lived token for obtaining new access tokens (recommended: 7d-30d)

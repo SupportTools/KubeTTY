@@ -134,6 +134,7 @@ type UpdateProjectRequest struct {
 	CPULimit      *string `json:"cpuLimit,omitempty"`
 	MemoryRequest *string `json:"memoryRequest,omitempty"`
 	MemoryLimit   *string `json:"memoryLimit,omitempty"`
+	StorageSize   *string `json:"storageSize,omitempty"` // PVC expansion (requires storage class support)
 
 	// Tab limits
 	MaxTabsPerClient *int `json:"maxTabsPerClient,omitempty"`

@@ -61,6 +61,7 @@ const AdminProjectDetail = ({
     cpuLimit: "",
     memoryRequest: "",
     memoryLimit: "",
+    storageSize: "",
   });
   const [savingResources, setSavingResources] = useState(false);
 
@@ -172,6 +173,7 @@ const AdminProjectDetail = ({
       cpuLimit: project.cpuLimit,
       memoryRequest: project.memoryRequest,
       memoryLimit: project.memoryLimit,
+      storageSize: project.storageSize,
     });
     setShowEditResourcesModal(true);
     setError(null);
@@ -184,6 +186,7 @@ const AdminProjectDetail = ({
       cpuLimit: "",
       memoryRequest: "",
       memoryLimit: "",
+      storageSize: "",
     });
     setError(null);
   };
@@ -204,6 +207,7 @@ const AdminProjectDetail = ({
           cpuLimit: editResources.cpuLimit,
           memoryRequest: editResources.memoryRequest,
           memoryLimit: editResources.memoryLimit,
+          storageSize: editResources.storageSize,
         }),
       });
       if (!res.ok) {
@@ -215,6 +219,7 @@ const AdminProjectDetail = ({
         cpuLimit: "",
         memoryRequest: "",
         memoryLimit: "",
+        storageSize: "",
       });
       await loadStatus();
       onRefresh();
@@ -542,7 +547,7 @@ const AdminProjectDetail = ({
           >
             Refresh
           </button>
-          {project.status === "running" && (
+          {(project.status === "running" || project.status === "failed") && (
             <>
               <button className="primary-button" onClick={handleEditResourcesClick}>
                 Edit Resources
@@ -550,10 +555,12 @@ const AdminProjectDetail = ({
               <button className="primary-button" onClick={handleManageSecretsClick} disabled={loadingSecrets}>
                 {loadingSecrets ? "Loading..." : "Manage Secrets"}
               </button>
-              <button className="primary-button" onClick={handleUpgradeClick}>
-                Upgrade
-              </button>
             </>
+          )}
+          {project.status === "running" && (
+            <button className="primary-button" onClick={handleUpgradeClick}>
+              Upgrade
+            </button>
           )}
           {(project.status === "running" || project.status === "failed") && (
             <button className="warning-button" onClick={handleRestart}>
@@ -725,9 +732,20 @@ const AdminProjectDetail = ({
                   </small>
                 </div>
 
-                <div className="info-box secondary">
-                  <strong>Note:</strong> Storage size cannot be changed after project creation.
-                  Current storage: {project.storageSize}
+                <div className="form-group">
+                  <label htmlFor="storageSize">Storage Size:</label>
+                  <input
+                    id="storageSize"
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g., 10Gi, 50Gi, 100Gi"
+                    value={editResources.storageSize}
+                    onChange={(e) => handleEditResourcesChange("storageSize", e.target.value)}
+                    disabled={savingResources}
+                  />
+                  <small className="form-help">
+                    Storage can only be expanded, not reduced. Requires storage class with allowVolumeExpansion.
+                  </small>
                 </div>
               </div>
               <div className="modal-actions">

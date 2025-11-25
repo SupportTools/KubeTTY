@@ -183,7 +183,7 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// If image tag or resources changed, trigger an update
-	if req.ImageTag != nil || req.CPULimit != nil || req.MemoryLimit != nil {
+	if req.ImageTag != nil || req.CPULimit != nil || req.MemoryLimit != nil || req.StorageSize != nil {
 		if err := h.store.SetStatus(ctx, projectID, projects.StatusUpdating, "Applying configuration changes"); err != nil {
 			log.WithError(err).Warn("admin/projects: failed to set updating status")
 		}

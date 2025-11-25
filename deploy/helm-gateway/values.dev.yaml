@@ -3,8 +3,8 @@
 
 image:
   repository: harbor.support.tools/kubetty/kubetty
-  tag: "dev"
-  pullPolicy: Always
+  tag: "v1.1.6"
+  pullPolicy: IfNotPresent
 
 imagePullSecrets:
   - harbor-supporttools
@@ -29,19 +29,14 @@ auth:
   cookieDomain: ""
   cookieSecure: false
 
-# Dev project catalog - points to dev project in kubetty-project-dev namespace
+# Dev project catalog - empty for dev (uses dynamic projects only)
 catalog:
   inline: |
-    projects:
-      - id: dev-project
-        displayName: "Dev Project"
-        namespace: kubetty-project-dev
-        service: project
-        port: 8080
+    projects: []
 
-# Database - uses existing prod CNPG cluster (kubetty-shared)
+# Database - local CNPG cluster in same namespace
 cnpg:
-  host: kubetty-shared-rw.kubetty-shared.svc.a1-ops-prd.local
+  host: kubetty-db-rw.kubetty-gateway-dev.svc
   port: 5432
   database: kubetty
   userSecret: kubetty-postgres-user
@@ -72,7 +67,7 @@ serviceAccount:
 rbac:
   create: true
   projectNamespaces:
-    - kubetty-project-dev
+    - kubetty-projects-dev
   # Suffix for cluster-scoped resources to avoid conflicts with prod
   clusterResourceSuffix: "-dev"
 

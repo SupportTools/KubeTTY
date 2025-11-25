@@ -12,6 +12,8 @@ import (
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Cookie names used for authentication
@@ -124,6 +126,7 @@ func SetAuthCookies(w http.ResponseWriter, pair *auth.TokenPair, cfg AuthConfig)
 
 // ClearAuthCookies clears both access and refresh token cookies.
 func ClearAuthCookies(w http.ResponseWriter, cfg AuthConfig) {
+	log.Debug("auth/helpers: clearing all auth cookies")
 	ClearAccessCookie(w, cfg)
 	ClearRefreshCookie(w, cfg)
 }
@@ -178,16 +181,43 @@ func AuthEnabled(cfg AuthConfig, authMgr *auth.Manager) bool {
 func AuthenticateRequest(r *http.Request, authMgr *auth.Manager) (*User, error) {
 	token := AccessTokenFromRequest(r)
 	if token == "" {
+		log.WithFields(log.Fields{
+			"path":       r.URL.Path,
+			"client_ip":  r.RemoteAddr,
+			"has_cookie": r.Header.Get("Cookie") != "",
+			"has_authz":  r.Header.Get("Authorization") != "",
+		}).Debug("auth/helpers: no access token found in request")
 		return nil, ErrAuthMissingToken
 	}
+
 	claims, err := authMgr.ValidateAccessToken(token)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"path":      r.URL.Path,
+			"client_ip": r.RemoteAddr,
+			"error":     err.Error(),
+		}).Debug("auth/helpers: token validation failed")
 		return nil, err
 	}
+
 	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
+		log.WithFields(log.Fields{
+			"path":      r.URL.Path,
+			"client_ip": r.RemoteAddr,
+			"subject":   claims.Subject,
+			"error":     err.Error(),
+		}).Warn("auth/helpers: invalid user ID in token claims")
 		return nil, auth.ErrTokenMalformed
 	}
+
+	log.WithFields(log.Fields{
+		"path":      r.URL.Path,
+		"client_ip": r.RemoteAddr,
+		"user_id":   userID.String(),
+		"username":  claims.Username,
+	}).Debug("auth/helpers: token validated successfully")
+
 	return &User{ID: userID, Username: claims.Username}, nil
 }
 
@@ -207,6 +237,13 @@ func HandleAuthFailure(w http.ResponseWriter, err error, cfg AuthConfig) {
 	case errors.Is(err, ErrAuthDisabled):
 		msg = "auth disabled"
 	}
+
+	log.WithFields(log.Fields{
+		"error":    err.Error(),
+		"response": msg,
+		"status":   status,
+	}).Debug("auth/helpers: handling authentication failure")
+
 	ClearAccessCookie(w, cfg)
 	w.Header().Set("WWW-Authenticate", `Bearer realm="kubetty"`)
 	_ = util.WriteJSON(w, status, map[string]any{"error": msg})

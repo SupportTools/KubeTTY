@@ -364,6 +364,11 @@ func (s *PGStore) Update(ctx context.Context, id uuid.UUID, req UpdateProjectReq
 		args = append(args, *req.MemoryLimit)
 		argN++
 	}
+	if req.StorageSize != nil {
+		setClauses = append(setClauses, fmt.Sprintf("storage_size = $%d", argN))
+		args = append(args, *req.StorageSize)
+		argN++
+	}
 	if req.MaxTabsPerClient != nil {
 		setClauses = append(setClauses, fmt.Sprintf("max_tabs_per_client = $%d", argN))
 		args = append(args, *req.MaxTabsPerClient)

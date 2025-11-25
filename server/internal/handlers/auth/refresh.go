@@ -117,6 +117,9 @@ func NewAuthRefreshHandler(cfg AuthConfig, authMgr *auth.Manager) http.HandlerFu
 				"client_ip": r.RemoteAddr,
 			}).Warn("auth/refresh: refresh failed")
 
+			// Clear auth cookies on refresh failure to remove stale tokens
+			ClearAuthCookies(w, cfg)
+
 			switch {
 			case errors.Is(err, auth.ErrTokenExpired):
 				_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token expired", ""))

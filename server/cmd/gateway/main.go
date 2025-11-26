@@ -40,6 +40,7 @@ import (
 	handlers_auth "github.com/supporttools/KubeTTY/server/internal/handlers/auth"
 	handlers_dashboard "github.com/supporttools/KubeTTY/server/internal/handlers/dashboard"
 	handlers_session "github.com/supporttools/KubeTTY/server/internal/handlers/session"
+	"github.com/supporttools/KubeTTY/server/internal/leaderelection"
 	"github.com/supporttools/KubeTTY/server/internal/projects"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
@@ -190,6 +191,9 @@ func main() {
 		tabManager.SetProjectStore(projectStore)
 	}
 
+	// leaderElector is declared here so it can be captured for the server struct
+	var leaderElector *leaderelection.LeaderElector
+
 	// Create project controller (manages K8s resources) if enabled
 	// NOTE: We create the controller but don't start it yet - we need to set the callback first
 	if cfg.Controller.Enabled && cfg.Controller.ProjectsNamespace != "" {
@@ -203,6 +207,13 @@ func main() {
 				Env:              cfg.Controller.ParseEnvironment(),
 				ImagePullSecrets: cfg.Controller.ImagePullSecrets,
 				TemplatePVCName:  cfg.Controller.TemplatePVCName,
+			},
+			StorageMonitor: controller.StorageMonitorConfig{
+				Enabled:         cfg.Controller.StorageMonitorEnabled,
+				Interval:        cfg.Controller.StorageMonitorInterval,
+				ExpandThreshold: cfg.Controller.StorageExpandThreshold,
+				ExpandAmount:    cfg.Controller.StorageExpandAmount,
+				ExpandCooldown:  cfg.Controller.StorageExpandCooldown,
 			},
 		}
 		projCtrl, err = controller.New(ctrlCfg, projectStore)
@@ -278,14 +289,61 @@ func main() {
 				}
 			})
 
-			// Now start the controller - callback is already set
-			projCtrl.Start(ctx)
-			defer projCtrl.Stop()
-			log.WithFields(log.Fields{
-				"namespace": ctrlCfg.ResourceConfig.Namespace,
-				"prefix":    ctrlCfg.ResourceConfig.Prefix,
-				"env":       ctrlCfg.ResourceConfig.Env,
-			}).Info("gateway/main: project controller started")
+			// Start controller with or without leader election
+			if cfg.LeaderElection.Enabled {
+				// Configure leader election
+				leCfg := leaderelection.DefaultConfig()
+				leCfg.LeaseName = cfg.LeaderElection.LeaseName
+				leCfg.LeaseDuration = cfg.LeaderElection.LeaseDuration
+				leCfg.RenewDeadline = cfg.LeaderElection.RenewDeadline
+				leCfg.RetryPeriod = cfg.LeaderElection.RetryPeriod
+
+				// Create leader elector with controller lifecycle callbacks
+				leaderElector, err = leaderelection.New(leCfg, leaderelection.Callbacks{
+					OnStartedLeading: func(leaderCtx context.Context) {
+						log.Info("gateway/main: acquired leadership, starting controller")
+						projCtrl.Start(leaderCtx)
+					},
+					OnStoppedLeading: func() {
+						log.Warn("gateway/main: lost leadership, stopping controller")
+						projCtrl.Stop()
+					},
+					OnNewLeader: func(identity string) {
+						log.WithField("leader", identity).Info("gateway/main: new leader elected")
+					},
+				})
+				if err != nil {
+					log.WithError(err).Fatal("gateway/main: failed to create leader elector")
+				}
+
+				// Set leader info on controller for status endpoints
+				projCtrl.SetLeaderInfo(leaderElector)
+
+				// Start leader election in background
+				go func() {
+					if err := leaderElector.Start(ctx); err != nil {
+						log.WithError(err).Error("gateway/main: leader election failed")
+					}
+				}()
+				defer leaderElector.Stop()
+
+				log.WithFields(log.Fields{
+					"namespace":      ctrlCfg.ResourceConfig.Namespace,
+					"prefix":         ctrlCfg.ResourceConfig.Prefix,
+					"env":            ctrlCfg.ResourceConfig.Env,
+					"lease_name":     leCfg.LeaseName,
+					"lease_duration": leCfg.LeaseDuration,
+				}).Info("gateway/main: project controller started with leader election")
+			} else {
+				// No leader election - start controller directly
+				projCtrl.Start(ctx)
+				defer projCtrl.Stop()
+				log.WithFields(log.Fields{
+					"namespace": ctrlCfg.ResourceConfig.Namespace,
+					"prefix":    ctrlCfg.ResourceConfig.Prefix,
+					"env":       ctrlCfg.ResourceConfig.Env,
+				}).Info("gateway/main: project controller started (no leader election)")
+			}
 		}
 	} else {
 		log.WithFields(log.Fields{
@@ -381,12 +439,13 @@ func main() {
 	appMetrics := metrics.NewAppMetrics()
 
 	srv := &server{
-		cfg:          cfg,
-		store:        store,
-		authStore:    authStore,
-		authMgr:      authManager,
-		projectStore: projectStore,
-		projCtrl:     projCtrl,
+		cfg:           cfg,
+		store:         store,
+		authStore:     authStore,
+		authMgr:       authManager,
+		projectStore:  projectStore,
+		projCtrl:      projCtrl,
+		leaderElector: leaderElector,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -423,6 +482,9 @@ func main() {
 	}
 	mux.Handle("/api/healthz", health.NewCompatHandler(dbPinger, gatewayChecker))
 
+	// Leader status endpoint for monitoring leader election
+	mux.Handle("/api/healthz/leader", health.NewLeaderStatusHandler(srv.leaderElector))
+
 	// Auth middleware
 	requireAuth := handlers_auth.RequireAuth(srv.cfg, srv.authMgr)
 
@@ -440,6 +502,7 @@ func main() {
 			mux.Handle("PUT /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.UpdateProject)))
 			mux.Handle("DELETE /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.DeleteProject)))
 			mux.Handle("POST /api/admin/projects/{id}/restart", requireAuth(http.HandlerFunc(adminHandlers.RestartProject)))
+			mux.Handle("POST /api/admin/projects/{id}/resync", requireAuth(http.HandlerFunc(adminHandlers.ResyncProject)))
 			mux.Handle("GET /api/admin/projects/{id}/status", requireAuth(http.HandlerFunc(adminHandlers.GetProjectStatus)))
 			mux.Handle("GET /api/admin/projects/{id}/upgrade-info", requireAuth(http.HandlerFunc(adminHandlers.GetUpgradeInfo)))
 			mux.Handle("POST /api/admin/projects/{id}/upgrade", requireAuth(http.HandlerFunc(adminHandlers.UpgradeProject)))
@@ -452,6 +515,7 @@ func main() {
 			mux.HandleFunc("PUT /api/admin/projects/{id}", adminHandlers.UpdateProject)
 			mux.HandleFunc("DELETE /api/admin/projects/{id}", adminHandlers.DeleteProject)
 			mux.HandleFunc("POST /api/admin/projects/{id}/restart", adminHandlers.RestartProject)
+			mux.HandleFunc("POST /api/admin/projects/{id}/resync", adminHandlers.ResyncProject)
 			mux.HandleFunc("GET /api/admin/projects/{id}/status", adminHandlers.GetProjectStatus)
 			mux.HandleFunc("GET /api/admin/projects/{id}/upgrade-info", adminHandlers.GetUpgradeInfo)
 			mux.HandleFunc("POST /api/admin/projects/{id}/upgrade", adminHandlers.UpgradeProject)
@@ -541,20 +605,21 @@ func main() {
 }
 
 type server struct {
-	cfg          config.GatewayConfig
-	store        sessions.Store
-	authStore    auth.Store
-	authMgr      *auth.Manager
-	projectStore *projects.PGStore
-	projCtrl     *controller.Controller
-	upgrader     websocket.Upgrader
-	uiFS         fs.FS
-	appMetrics   *metrics.AppMetrics
-	tabManager   *manager.Manager
-	tabStore     tabs.Store
-	tabSubsMu    sync.Mutex
-	tabSubs      map[string]map[chan []byte]struct{}
-	shutdownCtx  context.Context // Context cancelled on graceful shutdown
+	cfg           config.GatewayConfig
+	store         sessions.Store
+	authStore     auth.Store
+	authMgr       *auth.Manager
+	projectStore  *projects.PGStore
+	projCtrl      *controller.Controller
+	leaderElector *leaderelection.LeaderElector
+	upgrader      websocket.Upgrader
+	uiFS          fs.FS
+	appMetrics    *metrics.AppMetrics
+	tabManager    *manager.Manager
+	tabStore      tabs.Store
+	tabSubsMu     sync.Mutex
+	tabSubs       map[string]map[chan []byte]struct{}
+	shutdownCtx   context.Context // Context cancelled on graceful shutdown
 }
 
 type contextKey string

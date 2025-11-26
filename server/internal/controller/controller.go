@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -34,6 +35,9 @@ type Config struct {
 
 	// ResourceConfig holds naming configuration for Kubernetes resources.
 	ResourceConfig ResourceConfig
+
+	// StorageMonitor holds configuration for automatic PVC expansion.
+	StorageMonitor StorageMonitorConfig
 }
 
 // DefaultConfig returns sensible defaults.
@@ -53,6 +57,13 @@ func DefaultConfig() Config {
 // ProjectStatusCallback is called when a project transitions to a new status.
 type ProjectStatusCallback func(project *projects.Project, newStatus projects.ProjectStatus)
 
+// LeaderInfo provides read-only access to leader election status.
+type LeaderInfo interface {
+	IsLeader() bool
+	GetCurrentLeader() string
+	GetIdentity() string
+}
+
 // Controller manages the lifecycle of KubeTTY project resources.
 type Controller struct {
 	cfg       Config
@@ -62,6 +73,16 @@ type Controller struct {
 	statusCallback ProjectStatusCallback
 	stopCh         chan struct{}
 	wg             sync.WaitGroup
+
+	// running tracks whether the controller loops are active.
+	running atomic.Bool
+
+	// leaderInfo provides access to leader election status (optional).
+	leaderInfo LeaderInfo
+
+	// lastExpansionTime tracks the last PVC expansion time per PVC name.
+	// Used to enforce cooldown between expansions and prevent runaway growth.
+	lastExpansionTime map[string]time.Time
 }
 
 // New creates a new Controller instance.
@@ -78,20 +99,22 @@ func New(cfg Config, store projects.Store) (*Controller, error) {
 	}
 
 	return &Controller{
-		cfg:       cfg,
-		store:     store,
-		clientset: clientset,
-		stopCh:    make(chan struct{}),
+		cfg:               cfg,
+		store:             store,
+		clientset:         clientset,
+		stopCh:            make(chan struct{}),
+		lastExpansionTime: make(map[string]time.Time),
 	}, nil
 }
 
 // NewWithClient creates a Controller with an existing Kubernetes client (useful for testing).
 func NewWithClient(cfg Config, store projects.Store, clientset kubernetes.Interface) *Controller {
 	return &Controller{
-		cfg:       cfg,
-		store:     store,
-		clientset: clientset,
-		stopCh:    make(chan struct{}),
+		cfg:               cfg,
+		store:             store,
+		clientset:         clientset,
+		stopCh:            make(chan struct{}),
+		lastExpansionTime: make(map[string]time.Time),
 	}
 }
 
@@ -100,9 +123,46 @@ func (c *Controller) SetStatusCallback(cb ProjectStatusCallback) {
 	c.statusCallback = cb
 }
 
+// SetLeaderInfo sets the leader election info provider.
+func (c *Controller) SetLeaderInfo(info LeaderInfo) {
+	c.leaderInfo = info
+}
+
+// IsRunning returns true if the controller loops are currently active.
+func (c *Controller) IsRunning() bool {
+	return c.running.Load()
+}
+
+// IsLeader returns true if this instance is the leader.
+// Returns true if leader election is not configured (single replica mode).
+func (c *Controller) IsLeader() bool {
+	if c.leaderInfo == nil {
+		return true // No leader election = always leader
+	}
+	return c.leaderInfo.IsLeader()
+}
+
+// GetLeaderInfo returns leader election information.
+// Returns nil values if leader election is not configured.
+func (c *Controller) GetLeaderInfo() (isLeader bool, currentLeader, identity string) {
+	if c.leaderInfo == nil {
+		return true, "", ""
+	}
+	return c.leaderInfo.IsLeader(), c.leaderInfo.GetCurrentLeader(), c.leaderInfo.GetIdentity()
+}
+
 // Start begins the controller's reconciliation loops.
 func (c *Controller) Start(ctx context.Context) {
+	if c.running.Load() {
+		log.Warn("Controller already running, ignoring Start() call")
+		return
+	}
+
 	log.Info("Starting project controller")
+	c.running.Store(true)
+
+	// Reset stop channel for new run
+	c.stopCh = make(chan struct{})
 
 	// Reconciliation loop
 	c.wg.Add(1)
@@ -111,11 +171,24 @@ func (c *Controller) Start(ctx context.Context) {
 	// Health check loop
 	c.wg.Add(1)
 	go c.runHealthCheckLoop(ctx)
+
+	// Storage monitor loop (for automatic PVC expansion)
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.runStorageMonitorLoop(ctx)
+	}()
 }
 
 // Stop gracefully shuts down the controller.
 func (c *Controller) Stop() {
+	if !c.running.Load() {
+		log.Warn("Controller not running, ignoring Stop() call")
+		return
+	}
+
 	log.Info("Stopping project controller")
+	c.running.Store(false)
 	close(c.stopCh)
 	c.wg.Wait()
 	log.Info("Project controller stopped")
@@ -164,6 +237,7 @@ func (c *Controller) reconcileAll(ctx context.Context) {
 	// Get all projects that need reconciliation
 	statuses := []projects.ProjectStatus{
 		projects.StatusPending,
+		projects.StatusSyncing,
 		projects.StatusCreating,
 		projects.StatusUpdating,
 		projects.StatusDeleting,
@@ -189,6 +263,8 @@ func (c *Controller) reconcileProject(ctx context.Context, p *projects.Project) 
 	switch p.Status {
 	case projects.StatusPending:
 		return c.handlePending(ctx, p)
+	case projects.StatusSyncing:
+		return c.handleSyncing(ctx, p)
 	case projects.StatusCreating:
 		return c.handleCreating(ctx, p)
 	case projects.StatusUpdating:
@@ -280,7 +356,24 @@ func (c *Controller) handlePending(ctx context.Context, p *projects.Project) err
 		}
 	}
 
-	// Create Deployment (use per-project secret name)
+	// If template sync is enabled, create sync Job and wait for it to complete
+	// before creating the Deployment. This avoids keeping the template PVC
+	// attached to running project pods.
+	if cfg.TemplatePVCName != "" {
+		syncJob := BuildTemplateSyncJob(p, cfg)
+		if _, err := c.clientset.BatchV1().Jobs(cfg.Namespace).Create(ctx, syncJob, metav1.CreateOptions{}); err != nil {
+			if !errors.IsAlreadyExists(err) {
+				if statusErr := c.store.SetStatus(ctx, p.ID, projects.StatusFailed, fmt.Sprintf("Failed to create sync Job: %v", err)); statusErr != nil {
+					logger.WithError(statusErr).Error("Failed to update project status to failed")
+				}
+				return fmt.Errorf("failed to create sync Job: %w", err)
+			}
+		}
+		logger.Info("Template sync Job created, waiting for completion")
+		return c.store.SetStatus(ctx, p.ID, projects.StatusSyncing, "Waiting for template sync to complete")
+	}
+
+	// No template sync - create Deployment directly
 	envSecretName := cfg.EnvSecretName(p.Name)
 	deploy := BuildDeployment(p, cfg, envSecretName)
 	if _, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Create(ctx, deploy, metav1.CreateOptions{}); err != nil {
@@ -294,6 +387,71 @@ func (c *Controller) handlePending(ctx context.Context, p *projects.Project) err
 
 	logger.Info("Project resources created, waiting for deployment")
 	return nil
+}
+
+// handleSyncing waits for the template sync Job to complete, then creates the Deployment.
+func (c *Controller) handleSyncing(ctx context.Context, p *projects.Project) error {
+	logger := log.WithField("project", p.Name)
+	cfg := c.cfg.ResourceConfig
+	jobName := cfg.TemplateSyncJobName(p.Name)
+
+	// Check Job status
+	job, err := c.clientset.BatchV1().Jobs(cfg.Namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Job doesn't exist - either it was never created or TTL cleaned it up
+			// Check if marker file exists via creating deployment anyway
+			logger.Warn("Sync Job not found, proceeding to create deployment")
+			return c.createDeploymentAndTransition(ctx, p, cfg, logger)
+		}
+		return fmt.Errorf("failed to get sync Job: %w", err)
+	}
+
+	// Check Job completion status
+	if job.Status.Succeeded >= 1 {
+		logger.Info("Template sync Job completed successfully")
+		// Delete the Job (it will also be cleaned up by TTL, but let's be proactive)
+		propagationPolicy := metav1.DeletePropagationBackground
+		if err := c.clientset.BatchV1().Jobs(cfg.Namespace).Delete(ctx, jobName, metav1.DeleteOptions{
+			PropagationPolicy: &propagationPolicy,
+		}); err != nil && !errors.IsNotFound(err) {
+			logger.WithError(err).Warn("Failed to delete completed sync Job")
+		}
+		return c.createDeploymentAndTransition(ctx, p, cfg, logger)
+	}
+
+	if job.Status.Failed >= 3 { // BackoffLimit is 3
+		logger.Error("Template sync Job failed after retries")
+		// Delete the failed Job
+		propagationPolicy := metav1.DeletePropagationBackground
+		if err := c.clientset.BatchV1().Jobs(cfg.Namespace).Delete(ctx, jobName, metav1.DeleteOptions{
+			PropagationPolicy: &propagationPolicy,
+		}); err != nil && !errors.IsNotFound(err) {
+			logger.WithError(err).Warn("Failed to delete failed sync Job")
+		}
+		return c.store.SetStatus(ctx, p.ID, projects.StatusFailed, "Template sync failed after retries")
+	}
+
+	// Job is still running
+	logger.Debug("Waiting for template sync Job to complete")
+	return nil
+}
+
+// createDeploymentAndTransition creates the Deployment and transitions to creating status.
+func (c *Controller) createDeploymentAndTransition(ctx context.Context, p *projects.Project, cfg ResourceConfig, logger *logrus.Entry) error {
+	envSecretName := cfg.EnvSecretName(p.Name)
+	deploy := BuildDeployment(p, cfg, envSecretName)
+	if _, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Create(ctx, deploy, metav1.CreateOptions{}); err != nil {
+		if !errors.IsAlreadyExists(err) {
+			if statusErr := c.store.SetStatus(ctx, p.ID, projects.StatusFailed, fmt.Sprintf("Failed to create Deployment: %v", err)); statusErr != nil {
+				logger.WithError(statusErr).Error("Failed to update project status to failed")
+			}
+			return fmt.Errorf("failed to create Deployment: %w", err)
+		}
+	}
+
+	logger.Info("Deployment created, transitioning to creating status")
+	return c.store.SetStatus(ctx, p.ID, projects.StatusCreating, "Waiting for deployment to be ready")
 }
 
 func (c *Controller) handleCreating(ctx context.Context, p *projects.Project) error {
@@ -411,6 +569,17 @@ func (c *Controller) handleDeleting(ctx context.Context, p *projects.Project) er
 
 	cfg := c.cfg.ResourceConfig
 	resourceName := cfg.ResourceName(p.Name)
+
+	// Delete sync Job if it exists
+	jobName := cfg.TemplateSyncJobName(p.Name)
+	propagationPolicy := metav1.DeletePropagationBackground
+	if err := c.clientset.BatchV1().Jobs(cfg.Namespace).Delete(ctx, jobName, metav1.DeleteOptions{
+		PropagationPolicy: &propagationPolicy,
+	}); err != nil {
+		if !errors.IsNotFound(err) {
+			logger.WithError(err).Warn("Failed to delete sync Job")
+		}
+	}
 
 	// Delete deployment
 	if err := c.clientset.AppsV1().Deployments(cfg.Namespace).Delete(ctx, resourceName, metav1.DeleteOptions{}); err != nil {
@@ -550,6 +719,26 @@ func (c *Controller) checkProjectHealth(ctx context.Context, p *projects.Project
 	if err := c.store.UpdateHealthCheck(ctx, p.ID, podIP); err != nil {
 		logger.WithError(err).Warn("Failed to update health check")
 	}
+}
+
+// ResyncProject triggers a full resync of the project resources.
+// This sets the project status to "pending" which causes the controller to
+// recreate any missing resources (deployment, service, etc.) while preserving
+// existing resources like PVCs. This is useful for recovering from a "failed"
+// state when resources were accidentally deleted.
+func (c *Controller) ResyncProject(ctx context.Context, p *projects.Project) error {
+	logger := log.WithField("project", p.Name)
+	logger.Info("Resyncing project resources")
+
+	// Set status to pending to trigger full resource recreation
+	// The handlePending function uses IsAlreadyExists checks, so existing
+	// resources (like PVCs with important data) will be preserved
+	if err := c.store.SetStatus(ctx, p.ID, projects.StatusPending, "Resyncing project resources"); err != nil {
+		return fmt.Errorf("failed to set status to pending: %w", err)
+	}
+
+	logger.Info("Project marked for resync, controller will recreate missing resources")
+	return nil
 }
 
 // RestartProject triggers a restart of the project deployment.

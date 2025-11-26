@@ -239,6 +239,37 @@ spec:
             - name: TEMPLATE_PVC_NAME
               value: {{ .Values.controller.templatePVCName | quote }}
 {{- end }}
+{{- /* Storage monitoring configuration */}}
+            - name: STORAGE_MONITOR_ENABLED
+              value: {{ if .Values.controller.storageMonitor }}{{ default "true" .Values.controller.storageMonitor.enabled | quote }}{{ else }}"true"{{ end }}
+            - name: STORAGE_MONITOR_INTERVAL
+              value: {{ if .Values.controller.storageMonitor }}{{ default "60s" .Values.controller.storageMonitor.interval | quote }}{{ else }}"60s"{{ end }}
+            - name: STORAGE_EXPAND_THRESHOLD
+              value: {{ if .Values.controller.storageMonitor }}{{ default "0.70" .Values.controller.storageMonitor.expandThreshold | quote }}{{ else }}"0.70"{{ end }}
+            - name: STORAGE_EXPAND_AMOUNT
+              value: {{ if .Values.controller.storageMonitor }}{{ default "10Gi" .Values.controller.storageMonitor.expandAmount | quote }}{{ else }}"10Gi"{{ end }}
+            - name: STORAGE_EXPAND_COOLDOWN
+              value: {{ if .Values.controller.storageMonitor }}{{ default "5m" .Values.controller.storageMonitor.expandCooldown | quote }}{{ else }}"5m"{{ end }}
+{{- /* Leader election configuration */}}
+            - name: LEADER_ELECTION_ENABLED
+              value: {{ if .Values.leaderElection }}{{ default "true" .Values.leaderElection.enabled | quote }}{{ else }}"true"{{ end }}
+            - name: LEADER_ELECTION_LEASE_NAME
+              value: {{ if .Values.leaderElection }}{{ default "kubetty-gateway-leader" .Values.leaderElection.leaseName | quote }}{{ else }}"kubetty-gateway-leader"{{ end }}
+            - name: LEADER_ELECTION_LEASE_DURATION
+              value: {{ if .Values.leaderElection }}{{ default "15s" .Values.leaderElection.leaseDuration | quote }}{{ else }}"15s"{{ end }}
+            - name: LEADER_ELECTION_RENEW_DEADLINE
+              value: {{ if .Values.leaderElection }}{{ default "10s" .Values.leaderElection.renewDeadline | quote }}{{ else }}"10s"{{ end }}
+            - name: LEADER_ELECTION_RETRY_PERIOD
+              value: {{ if .Values.leaderElection }}{{ default "2s" .Values.leaderElection.retryPeriod | quote }}{{ else }}"2s"{{ end }}
+{{- /* Pod identity for leader election */}}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
 {{- end }}
 {{- if .Values.pipelines.dind.enabled }}
             - name: DOCKER_HOST

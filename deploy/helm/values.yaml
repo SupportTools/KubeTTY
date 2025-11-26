@@ -5,7 +5,7 @@
 # Container image configuration
 image:
   repository: harbor.support.tools/kubetty/kubetty
-  tag: latest
+  tag: v1.4.2
   pullPolicy: IfNotPresent
 
 # Image pull secrets for private registries
@@ -342,6 +342,45 @@ controller:
   # The template PVC must exist in the same namespace as the projects
   # Leave empty to disable template sync
   templatePVCName: ""
+
+  # Storage monitoring and auto-expansion configuration
+  # Automatically expands project PVCs when storage usage exceeds threshold
+  storageMonitor:
+    # Enable automatic PVC expansion when storage is low
+    enabled: true
+
+    # How often to check storage usage for all running projects
+    interval: "60s"
+
+    # Expand PVC when usage reaches this percentage (0.0-1.0)
+    # 0.70 = expand when disk usage >= 70%
+    expandThreshold: 0.70
+
+    # Fixed amount to add to PVC on each expansion
+    # Must be a valid Kubernetes quantity (e.g., "10Gi", "100Gi")
+    expandAmount: "10Gi"
+
+    # Minimum time between expansions for a single PVC
+    # Prevents runaway expansions when metrics update slowly
+    expandCooldown: "5m"
+
+# Leader election configuration
+# Ensures only one gateway replica runs the controller at a time
+leaderElection:
+  # Enable leader election (recommended when running multiple replicas)
+  enabled: true
+
+  # Name of the Lease resource used for leader election
+  leaseName: "kubetty-gateway-leader"
+
+  # Duration that non-leader candidates will wait before trying to acquire leadership
+  leaseDuration: "15s"
+
+  # Duration the leader will retry refreshing leadership before giving up
+  renewDeadline: "10s"
+
+  # Duration between attempts to acquire/renew leadership
+  retryPeriod: "2s"
 
 # Pipeline configuration
 pipelines:

@@ -184,3 +184,178 @@ func TestWriteJSON_LargePayload(t *testing.T) {
 		t.Errorf("WriteJSON() decoded length = %d, want 100", len(decoded))
 	}
 }
+
+// ---- ClientIPFromRequest tests ----
+
+// TestClientIPFromRequest_NilRequest verifies nil request handling
+func TestClientIPFromRequest_NilRequest(t *testing.T) {
+	ip := ClientIPFromRequest(nil)
+	if ip != "" {
+		t.Errorf("ClientIPFromRequest(nil) = %q, want empty string", ip)
+	}
+}
+
+// TestClientIPFromRequest_XForwardedFor verifies X-Forwarded-For header parsing
+func TestClientIPFromRequest_XForwardedFor(t *testing.T) {
+	tests := []struct {
+		name       string
+		xForwarded string
+		wantIP     string
+	}{
+		{
+			name:       "single IP",
+			xForwarded: "192.168.1.1",
+			wantIP:     "192.168.1.1",
+		},
+		{
+			name:       "multiple IPs - first is client",
+			xForwarded: "10.0.0.1, 192.168.1.1, 172.16.0.1",
+			wantIP:     "10.0.0.1",
+		},
+		{
+			name:       "multiple IPs with spaces",
+			xForwarded: "  203.0.113.195  ,  70.41.3.18  ,  150.172.238.178  ",
+			wantIP:     "203.0.113.195",
+		},
+		{
+			name:       "IPv6 address",
+			xForwarded: "2001:db8::1",
+			wantIP:     "2001:db8::1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.Header.Set("X-Forwarded-For", tt.xForwarded)
+
+			got := ClientIPFromRequest(r)
+			if got != tt.wantIP {
+				t.Errorf("ClientIPFromRequest() = %q, want %q", got, tt.wantIP)
+			}
+		})
+	}
+}
+
+// TestClientIPFromRequest_RemoteAddr verifies fallback to RemoteAddr
+func TestClientIPFromRequest_RemoteAddr(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		wantIP     string
+	}{
+		{
+			name:       "IP with port",
+			remoteAddr: "192.168.1.100:54321",
+			wantIP:     "192.168.1.100",
+		},
+		{
+			name:       "IPv6 with port",
+			remoteAddr: "[::1]:54321",
+			wantIP:     "::1",
+		},
+		{
+			name:       "IP without port - fallback to full value",
+			remoteAddr: "192.168.1.100",
+			wantIP:     "192.168.1.100",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.RemoteAddr = tt.remoteAddr
+			// No X-Forwarded-For header
+
+			got := ClientIPFromRequest(r)
+			if got != tt.wantIP {
+				t.Errorf("ClientIPFromRequest() = %q, want %q", got, tt.wantIP)
+			}
+		})
+	}
+}
+
+// TestClientIPFromRequest_XForwardedForPriority verifies X-Forwarded-For takes priority
+func TestClientIPFromRequest_XForwardedForPriority(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "127.0.0.1:8080"
+	r.Header.Set("X-Forwarded-For", "203.0.113.1")
+
+	got := ClientIPFromRequest(r)
+	if got != "203.0.113.1" {
+		t.Errorf("ClientIPFromRequest() = %q, want %q (X-Forwarded-For should take priority)", got, "203.0.113.1")
+	}
+}
+
+// ---- WebSocketScheme tests ----
+
+// TestWebSocketScheme_NoTLS verifies ws scheme for non-TLS requests
+func TestWebSocketScheme_NoTLS(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	// No TLS, no X-Forwarded-Proto
+
+	got := WebSocketScheme(r)
+	if got != "ws" {
+		t.Errorf("WebSocketScheme() = %q, want %q", got, "ws")
+	}
+}
+
+// TestWebSocketScheme_WithTLS verifies wss scheme for TLS requests
+func TestWebSocketScheme_WithTLS(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "https://example.com/ws", nil)
+	// httptest.NewRequest with https sets TLS to non-nil
+
+	got := WebSocketScheme(r)
+	if got != "wss" {
+		t.Errorf("WebSocketScheme() = %q, want %q", got, "wss")
+	}
+}
+
+// TestWebSocketScheme_XForwardedProto verifies wss scheme via X-Forwarded-Proto header
+func TestWebSocketScheme_XForwardedProto(t *testing.T) {
+	tests := []struct {
+		name        string
+		headerValue string
+		wantScheme  string
+	}{
+		{
+			name:        "https header",
+			headerValue: "https",
+			wantScheme:  "wss",
+		},
+		{
+			name:        "HTTPS uppercase",
+			headerValue: "HTTPS",
+			wantScheme:  "wss",
+		},
+		{
+			name:        "http header",
+			headerValue: "http",
+			wantScheme:  "ws",
+		},
+		{
+			name:        "HTTP uppercase",
+			headerValue: "HTTP",
+			wantScheme:  "ws",
+		},
+		{
+			name:        "empty header",
+			headerValue: "",
+			wantScheme:  "ws",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/ws", nil)
+			if tt.headerValue != "" {
+				r.Header.Set("X-Forwarded-Proto", tt.headerValue)
+			}
+
+			got := WebSocketScheme(r)
+			if got != tt.wantScheme {
+				t.Errorf("WebSocketScheme() = %q, want %q", got, tt.wantScheme)
+			}
+		})
+	}
+}

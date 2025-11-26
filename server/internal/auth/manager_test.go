@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"testing"
 	"time"
 
@@ -625,4 +626,286 @@ func TestParseRefreshToken(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---- Error constant tests ----
+
+func TestErrorConstants(t *testing.T) {
+	t.Run("error messages are distinct", func(t *testing.T) {
+		errors := []error{
+			ErrInvalidCredentials,
+			ErrTokenMalformed,
+			ErrTokenExpired,
+			ErrTokenRevoked,
+			ErrWeakPassword,
+		}
+		seen := make(map[string]bool)
+		for _, err := range errors {
+			msg := err.Error()
+			if seen[msg] {
+				t.Errorf("duplicate error message: %s", msg)
+			}
+			seen[msg] = true
+		}
+	})
+
+	t.Run("error strings are meaningful", func(t *testing.T) {
+		require.Contains(t, ErrInvalidCredentials.Error(), "invalid")
+		require.Contains(t, ErrTokenMalformed.Error(), "malformed")
+		require.Contains(t, ErrTokenExpired.Error(), "expired")
+		require.Contains(t, ErrTokenRevoked.Error(), "revoked")
+		require.Contains(t, ErrWeakPassword.Error(), "password")
+	})
+}
+
+// ---- Constant tests ----
+
+func TestRefreshTokenDelimiter(t *testing.T) {
+	require.Equal(t, ".", RefreshTokenDelimiter)
+	// Ensure delimiter is a single character for simple parsing
+	require.Len(t, RefreshTokenDelimiter, 1)
+}
+
+// ---- Struct field tests ----
+
+func TestTokenPairFields(t *testing.T) {
+	now := time.Now()
+	tokenID := uuid.New()
+	pair := TokenPair{
+		AccessToken:      "access-token-value",
+		AccessExpiresAt:  now.Add(15 * time.Minute),
+		RefreshToken:     "refresh-token-value",
+		RefreshTokenID:   tokenID,
+		RefreshExpiresAt: now.Add(7 * 24 * time.Hour),
+		AccessIssuedAt:   now,
+		RefreshIssuedAt:  now,
+	}
+
+	require.Equal(t, "access-token-value", pair.AccessToken)
+	require.Equal(t, "refresh-token-value", pair.RefreshToken)
+	require.Equal(t, tokenID, pair.RefreshTokenID)
+	require.Equal(t, now, pair.AccessIssuedAt)
+	require.Equal(t, now, pair.RefreshIssuedAt)
+}
+
+func TestTokenMetadataFields(t *testing.T) {
+	meta := TokenMetadata{
+		CreatedBy: "api-client",
+		UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+		ClientIP:  "192.168.1.100",
+	}
+
+	require.Equal(t, "api-client", meta.CreatedBy)
+	require.Equal(t, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", meta.UserAgent)
+	require.Equal(t, "192.168.1.100", meta.ClientIP)
+}
+
+func TestTokenMetadataEmpty(t *testing.T) {
+	var meta TokenMetadata
+	require.Equal(t, "", meta.CreatedBy)
+	require.Equal(t, "", meta.UserAgent)
+	require.Equal(t, "", meta.ClientIP)
+}
+
+func TestAccessClaimsFields(t *testing.T) {
+	claims := AccessClaims{
+		Username: "testuser",
+	}
+	require.Equal(t, "testuser", claims.Username)
+}
+
+// ---- Store error scenario tests ----
+
+func TestAuthenticate_StoreError(t *testing.T) {
+	ctx := context.Background()
+	store := NewMockStore()
+
+	// Set up a store error
+	customErr := errors.New("database connection failed")
+	store.SetError(customErr)
+
+	mgr := newTestManager(t, store)
+	_, err := mgr.Authenticate(ctx, "testuser", "password")
+	require.Error(t, err)
+	require.Equal(t, customErr, err)
+}
+
+func TestChangePassword_Success_RevokesTokens(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New()
+
+	store := NewMockStore()
+	user := &User{
+		ID:           userID,
+		Username:     "testuser",
+		PasswordHash: hashPassword(t, "oldpassword"),
+		IsActive:     true,
+		CreatedAt:    fixedTime,
+		UpdatedAt:    fixedTime,
+	}
+	store.AddUser(user)
+	mgr := newTestManager(t, store)
+
+	// Issue a token first
+	_, err := mgr.IssueTokenPair(ctx, user, TokenMetadata{})
+	require.NoError(t, err)
+
+	// Change password - should also revoke tokens
+	err = mgr.ChangePassword(ctx, userID, "oldpassword", "newpassword123")
+	require.NoError(t, err)
+
+	// Verify the password was actually changed
+	updatedUser, err := store.GetUser(ctx, userID)
+	require.NoError(t, err)
+	err = bcrypt.CompareHashAndPassword(updatedUser.PasswordHash, []byte("newpassword123"))
+	require.NoError(t, err)
+}
+
+func TestRefresh_ExpiredToken(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New()
+	user := &User{
+		ID:           userID,
+		Username:     "testuser",
+		PasswordHash: hashPassword(t, "password123"),
+		IsActive:     true,
+		CreatedAt:    fixedTime,
+		UpdatedAt:    fixedTime,
+	}
+
+	store := NewMockStore()
+	store.AddUser(user)
+
+	// Create a manager and issue tokens
+	mgr := newTestManager(t, store)
+	pair, err := mgr.IssueTokenPair(ctx, user, TokenMetadata{})
+	require.NoError(t, err)
+
+	// Manually expire the token in the store
+	tokenID, _, err := ParseRefreshToken(pair.RefreshToken)
+	require.NoError(t, err)
+
+	token, err := store.GetRefreshToken(ctx, tokenID)
+	require.NoError(t, err)
+
+	// Set expiration to the past
+	token.ExpiresAt = fixedTime.Add(-1 * time.Hour)
+
+	// Try to refresh - should fail with ErrTokenExpired
+	_, err = mgr.Refresh(ctx, pair.RefreshToken, TokenMetadata{})
+	require.ErrorIs(t, err, ErrTokenExpired)
+}
+
+func TestRefresh_InvalidSecret(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New()
+	user := &User{
+		ID:           userID,
+		Username:     "testuser",
+		PasswordHash: hashPassword(t, "password123"),
+		IsActive:     true,
+		CreatedAt:    fixedTime,
+		UpdatedAt:    fixedTime,
+	}
+
+	store := NewMockStore()
+	store.AddUser(user)
+
+	// Create a manager and issue tokens
+	mgr := newTestManager(t, store)
+	pair, err := mgr.IssueTokenPair(ctx, user, TokenMetadata{})
+	require.NoError(t, err)
+
+	// Parse the token to get the ID
+	tokenID, _, err := ParseRefreshToken(pair.RefreshToken)
+	require.NoError(t, err)
+
+	// Create a tampered token with wrong secret
+	tamperedSecret := base64.RawURLEncoding.EncodeToString([]byte("wrong-secret-value-32-bytesssss"))
+	tamperedToken := tokenID.String() + RefreshTokenDelimiter + tamperedSecret
+
+	// Try to refresh - should fail with ErrTokenMalformed (secret mismatch)
+	_, err = mgr.Refresh(ctx, tamperedToken, TokenMetadata{})
+	require.ErrorIs(t, err, ErrTokenMalformed)
+}
+
+func TestRefresh_UserNotFound(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New()
+	user := &User{
+		ID:           userID,
+		Username:     "testuser",
+		PasswordHash: hashPassword(t, "password123"),
+		IsActive:     true,
+		CreatedAt:    fixedTime,
+		UpdatedAt:    fixedTime,
+	}
+
+	store := NewMockStore()
+	store.AddUser(user)
+
+	// Create a manager and issue tokens
+	mgr := newTestManager(t, store)
+	pair, err := mgr.IssueTokenPair(ctx, user, TokenMetadata{})
+	require.NoError(t, err)
+
+	// Delete the user from the store
+	delete(store.users, userID)
+	delete(store.usersByName, user.Username)
+
+	// Try to refresh - should fail with ErrUserNotFound
+	_, err = mgr.Refresh(ctx, pair.RefreshToken, TokenMetadata{})
+	require.ErrorIs(t, err, ErrUserNotFound)
+}
+
+// ---- ValidateAccessToken edge cases ----
+
+func TestValidateAccessToken_WrongIssuer(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New()
+	user := &User{
+		ID:           userID,
+		Username:     "testuser",
+		PasswordHash: hashPassword(t, "password123"),
+		IsActive:     true,
+		CreatedAt:    fixedTime,
+		UpdatedAt:    fixedTime,
+	}
+
+	store := NewMockStore()
+	store.AddUser(user)
+
+	// Create manager with issuer "kubetty-test"
+	mgr := newTestManager(t, store)
+	pair, err := mgr.IssueTokenPair(ctx, user, TokenMetadata{})
+	require.NoError(t, err)
+
+	// Create another manager with different issuer
+	secret := base64.StdEncoding.EncodeToString([]byte("test-secret-must-be-at-least-32-bytes-long!"))
+	mgr2, err := NewManager(store, secret, "different-issuer", 15*time.Minute, 7*24*time.Hour)
+	require.NoError(t, err)
+
+	// Try to validate with wrong issuer - should fail
+	_, err = mgr2.ValidateAccessToken(pair.AccessToken)
+	require.Error(t, err)
+}
+
+// ---- Manager fields test ----
+
+func TestManagerFields(t *testing.T) {
+	store := NewMockStore()
+	secret := base64.StdEncoding.EncodeToString([]byte("test-secret-must-be-at-least-32-bytes-long!"))
+	accessTTL := 30 * time.Minute
+	refreshTTL := 14 * 24 * time.Hour
+
+	mgr, err := NewManager(store, secret, "test-issuer", accessTTL, refreshTTL)
+	require.NoError(t, err)
+	require.NotNil(t, mgr)
+
+	// Verify fields are set correctly
+	require.Equal(t, "test-issuer", mgr.issuer)
+	require.Equal(t, accessTTL, mgr.accessTTL)
+	require.Equal(t, refreshTTL, mgr.refreshTTL)
+	require.NotNil(t, mgr.now)
+	require.NotNil(t, mgr.secret)
 }

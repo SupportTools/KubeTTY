@@ -82,7 +82,7 @@ jobs:
             exit 1
           fi
 
-  # Server tests with coverage
+  # Server tests with coverage (unit tests only)
   test-server:
     name: Server Tests
     runs-on: ubuntu-latest
@@ -101,6 +101,70 @@ jobs:
         working-directory: server
         run: |
           go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+  # Integration tests with PostgreSQL
+  test-integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: validate
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: kubetty_test
+          POSTGRES_PASSWORD: kubetty_test
+          POSTGRES_DB: kubetty_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: server/go.sum
+
+      - name: Initialize test database
+        run: |
+          PGPASSWORD=kubetty_test psql -h localhost -U kubetty_test -d kubetty_test -f server/scripts/init-test-db.sql
+
+      - name: Run integration tests
+        working-directory: server
+        env:
+          CNPG_HOST: localhost
+          CNPG_PORT: 5432
+          CNPG_USER: kubetty_test
+          CNPG_PASSWORD: kubetty_test
+          CNPG_DATABASE: kubetty_test
+          KUBETTY_TEST_DB: "true"
+        run: |
+          go test -v -race -run Integration ./...
+
+      - name: Run all tests with database
+        working-directory: server
+        env:
+          CNPG_HOST: localhost
+          CNPG_PORT: 5432
+          CNPG_USER: kubetty_test
+          CNPG_PASSWORD: kubetty_test
+          CNPG_DATABASE: kubetty_test
+          KUBETTY_TEST_DB: "true"
+        run: |
+          go test -v -race -coverprofile=coverage-integration.out -covermode=atomic ./...
+
+      - name: Upload integration coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-coverage
+          path: server/coverage-integration.out
+          retention-days: 7
 
       - name: Check test coverage
         working-directory: server
@@ -260,7 +324,7 @@ jobs:
   pr-validation-summary:
     name: PR Validation Summary
     runs-on: ubuntu-latest
-    needs: [validate, test-server, test-web, helm-validate]
+    needs: [validate, test-server, test-integration, test-web, helm-validate]
     if: always()
     steps:
       - name: Check validation results
@@ -270,6 +334,7 @@ jobs:
 
           if [ "${{ needs.validate.result }}" == "success" ] && \
              [ "${{ needs.test-server.result }}" == "success" ] && \
+             [ "${{ needs.test-integration.result }}" == "success" ] && \
              [ "${{ needs.test-web.result }}" == "success" ] && \
              [ "${{ needs.helm-validate.result }}" == "success" ]; then
             echo "✅ All validation checks passed!" >> $GITHUB_STEP_SUMMARY
@@ -281,13 +346,14 @@ jobs:
             echo "**Failed Jobs:**" >> $GITHUB_STEP_SUMMARY
             [ "${{ needs.validate.result }}" != "success" ] && echo "- Validation" >> $GITHUB_STEP_SUMMARY
             [ "${{ needs.test-server.result }}" != "success" ] && echo "- Server Tests" >> $GITHUB_STEP_SUMMARY
+            [ "${{ needs.test-integration.result }}" != "success" ] && echo "- Integration Tests" >> $GITHUB_STEP_SUMMARY
             [ "${{ needs.test-web.result }}" != "success" ] && echo "- Web Tests" >> $GITHUB_STEP_SUMMARY
             [ "${{ needs.helm-validate.result }}" != "success" ] && echo "- Helm Validation" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
 
       - name: Update PR status
-        if: github.event_name == 'pull_request' && needs.validate.result == 'success' && needs.test-server.result == 'success' && needs.test-web.result == 'success' && needs.helm-validate.result == 'success'
+        if: github.event_name == 'pull_request' && needs.validate.result == 'success' && needs.test-server.result == 'success' && needs.test-integration.result == 'success' && needs.test-web.result == 'success' && needs.helm-validate.result == 'success'
         uses: actions/github-script@v7
         with:
           script: |
@@ -299,6 +365,7 @@ jobs:
                     '**Completed Checks:**\n' +
                     '- ✅ Go formatting and linting\n' +
                     '- ✅ Server tests with race detection\n' +
+                    '- ✅ Integration tests with PostgreSQL\n' +
                     '- ✅ Web tests and build\n' +
                     '- ✅ Helm chart validation\n\n' +
                     '**Note:** Full Docker build and security scan will run after merge.'

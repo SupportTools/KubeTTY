@@ -15,6 +15,13 @@ type appMetrics struct {
 	sessionAttached prometheus.Counter
 	sessionDetached prometheus.Counter
 	ptyExit         *prometheus.CounterVec
+
+	// WebSocket connection metrics
+	wsConnectionsTotal  prometheus.Counter
+	wsConnectionsActive prometheus.Gauge
+	wsDisconnectsTotal  *prometheus.CounterVec
+	wsWriteErrorsTotal  prometheus.Counter
+	wsFlowControlPauses prometheus.Counter
 }
 
 func newAppMetrics() *appMetrics {
@@ -38,6 +45,39 @@ func newAppMetrics() *appMetrics {
 				Help: "Total number of PTY exits by exit code",
 			},
 			[]string{"exit_code"},
+		),
+
+		// WebSocket connection metrics
+		wsConnectionsTotal: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "kubetty_websocket_connections_total",
+				Help: "Total number of WebSocket connection attempts",
+			},
+		),
+		wsConnectionsActive: promauto.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "kubetty_websocket_connections_active",
+				Help: "Number of currently active WebSocket connections",
+			},
+		),
+		wsDisconnectsTotal: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kubetty_websocket_disconnects_total",
+				Help: "Total number of WebSocket disconnections by reason",
+			},
+			[]string{"reason"},
+		),
+		wsWriteErrorsTotal: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "kubetty_websocket_write_errors_total",
+				Help: "Total number of WebSocket write errors",
+			},
+		),
+		wsFlowControlPauses: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "kubetty_websocket_flow_control_pauses_total",
+				Help: "Total number of flow control pause events",
+			},
 		),
 	}
 }
@@ -69,4 +109,48 @@ func (m *appMetrics) observeWSBytes(typ string, n int) {
 		return
 	}
 	m.ObserveWSBytes(typ, n)
+}
+
+// WebSocket connection metrics observers
+
+func (m *appMetrics) observeWSConnectionAttempt() {
+	if m == nil {
+		return
+	}
+	m.wsConnectionsTotal.Inc()
+}
+
+func (m *appMetrics) observeWSConnectionOpened() {
+	if m == nil {
+		return
+	}
+	m.wsConnectionsActive.Inc()
+}
+
+func (m *appMetrics) observeWSConnectionClosed() {
+	if m == nil {
+		return
+	}
+	m.wsConnectionsActive.Dec()
+}
+
+func (m *appMetrics) observeWSDisconnect(reason string) {
+	if m == nil {
+		return
+	}
+	m.wsDisconnectsTotal.WithLabelValues(reason).Inc()
+}
+
+func (m *appMetrics) observeWSWriteError() {
+	if m == nil {
+		return
+	}
+	m.wsWriteErrorsTotal.Inc()
+}
+
+func (m *appMetrics) observeWSFlowControlPause() {
+	if m == nil {
+		return
+	}
+	m.wsFlowControlPauses.Inc()
 }

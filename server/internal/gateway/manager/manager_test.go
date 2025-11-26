@@ -3,12 +3,15 @@ package manager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	gatewayconfig "github.com/supporttools/KubeTTY/server/internal/gateway/config"
+	"github.com/supporttools/KubeTTY/server/internal/gateway/metrics"
+	"github.com/supporttools/KubeTTY/server/internal/gateway/relay"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
 )
 
@@ -38,6 +41,34 @@ func (f *fakeStore) CountByClientAndProject(ctx context.Context, clientID, proje
 	return f.tabCounts[key], nil
 }
 func (f *fakeStore) UpdateClientID(context.Context, string, string) error { return nil }
+func (f *fakeStore) GetActiveCountByProject(context.Context) (map[string]int, error) {
+	counts := make(map[string]int)
+	for _, tab := range f.allTabs {
+		if tab.Status == tabs.StatusConnected {
+			counts[tab.ProjectID]++
+		}
+	}
+	return counts, nil
+}
+func (f *fakeStore) GetStatusCounts(context.Context) (map[string]int, error) {
+	counts := make(map[string]int)
+	for _, tab := range f.allTabs {
+		counts[string(tab.Status)]++
+	}
+	return counts, nil
+}
+func (f *fakeStore) GetRecentErrors(ctx context.Context, limit int) ([]tabs.Tab, error) {
+	var result []tabs.Tab
+	for _, tab := range f.allTabs {
+		if tab.LastError != nil && *tab.LastError != "" {
+			result = append(result, tab)
+		}
+	}
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
 
 func TestNewManager(t *testing.T) {
 	cat := gatewayconfig.Catalog{Projects: []gatewayconfig.Project{{ID: "proj", Namespace: "ns", Service: "svc", Port: 8080}}}
@@ -134,12 +165,31 @@ func TestCreateTab_LimitEnforcement(t *testing.T) {
 					},
 				}},
 			}
+
+			// Build allTabs to simulate existing tabs in database
+			var existingTabs []tabs.Tab
+			for i := 0; i < tt.existingTabs; i++ {
+				existingTabs = append(existingTabs, tabs.Tab{
+					TabID:     fmt.Sprintf("tab-%d", i),
+					ProjectID: "proj",
+					ClientID:  "client1",
+					Status:    tabs.StatusConnected,
+					CreatedAt: time.Now(),
+				})
+			}
+
 			store := &fakeStore{
+				allTabs: existingTabs,
 				tabCounts: map[string]int{
 					"client1:proj": tt.existingTabs,
 				},
 			}
 			mgr := New(cat, store, 2*time.Hour)
+
+			// Restore tabs to populate in-memory map (simulates startup)
+			if err := mgr.RestoreTabs(context.Background()); err != nil {
+				t.Fatalf("RestoreTabs failed: %v", err)
+			}
 
 			_, err := mgr.CreateTab(context.Background(), "proj", "client1")
 
@@ -174,13 +224,29 @@ func TestCreateTab_DifferentProjects(t *testing.T) {
 			},
 		},
 	}
+	// Simulate 1 existing tab for proj-a
+	existingTabs := []tabs.Tab{
+		{
+			TabID:     "existing-tab-1",
+			ProjectID: "proj-a",
+			ClientID:  "client1",
+			Status:    tabs.StatusConnected,
+			CreatedAt: time.Now(),
+		},
+	}
 	store := &fakeStore{
+		allTabs: existingTabs,
 		tabCounts: map[string]int{
 			"client1:proj-a": 1, // Client already has 1 tab on proj-a
 			"client1:proj-b": 0, // No tabs on proj-b
 		},
 	}
 	mgr := New(cat, store, 2*time.Hour)
+
+	// Restore tabs to populate in-memory map (simulates startup)
+	if err := mgr.RestoreTabs(context.Background()); err != nil {
+		t.Fatalf("RestoreTabs failed: %v", err)
+	}
 
 	// Should fail for proj-a (at limit)
 	_, err := mgr.CreateTab(context.Background(), "proj-a", "client1")
@@ -192,5 +258,257 @@ func TestCreateTab_DifferentProjects(t *testing.T) {
 	_, err = mgr.CreateTab(context.Background(), "proj-b", "client1")
 	if err != nil {
 		t.Fatalf("unexpected error for proj-b: %v", err)
+	}
+}
+
+// TestTabLimitExceededError_Error verifies error message formatting.
+func TestTabLimitExceededError_Error(t *testing.T) {
+	err := &TabLimitExceededError{
+		ProjectID: "test-project",
+		Limit:     5,
+	}
+	expected := "tab limit exceeded for project test-project: maximum 5 tabs per client"
+	if err.Error() != expected {
+		t.Errorf("Error() = %q, want %q", err.Error(), expected)
+	}
+}
+
+// TestDefaultManagerConfig verifies default configuration values.
+func TestDefaultManagerConfig(t *testing.T) {
+	cfg := DefaultManagerConfig()
+
+	if cfg.IdleTimeout != 2*time.Hour {
+		t.Errorf("IdleTimeout = %v, want 2h", cfg.IdleTimeout)
+	}
+	if !cfg.MetricsEnabled {
+		t.Error("MetricsEnabled should be true by default")
+	}
+	if cfg.MetricsInterval != 15*time.Second {
+		t.Errorf("MetricsInterval = %v, want 15s", cfg.MetricsInterval)
+	}
+}
+
+// TestNewWithConfig verifies full configuration constructor.
+func TestNewWithConfig(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{{ID: "proj", Namespace: "ns", Service: "svc", Port: 8080}},
+	}
+	store := &fakeStore{}
+	cfg := ManagerConfig{
+		IdleTimeout:     30 * time.Minute,
+		MetricsEnabled:  false,
+		MetricsInterval: 30 * time.Second,
+	}
+
+	mgr := NewWithConfig(cat, store, cfg)
+	if mgr == nil {
+		t.Fatal("NewWithConfig returned nil")
+	}
+	if len(mgr.ListProjects()) != 1 {
+		t.Errorf("expected 1 project, got %d", len(mgr.ListProjects()))
+	}
+}
+
+// TestNewWithConfig_MinimumTimeout verifies minimum timeout enforcement.
+func TestNewWithConfig_MinimumTimeout(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{{ID: "proj", Namespace: "ns", Service: "svc", Port: 8080}},
+	}
+	store := &fakeStore{}
+	cfg := ManagerConfig{
+		IdleTimeout: 5 * time.Minute, // Below 10 minute minimum
+	}
+
+	mgr := NewWithConfig(cat, store, cfg)
+	if mgr.idleTimeout != 10*time.Minute {
+		t.Errorf("idleTimeout = %v, want 10m (minimum)", mgr.idleTimeout)
+	}
+}
+
+// TestRegisterProject verifies dynamic project registration.
+func TestRegisterProject(t *testing.T) {
+	cat := gatewayconfig.Catalog{}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	// Initially empty
+	if len(mgr.ListProjects()) != 0 {
+		t.Errorf("expected 0 projects, got %d", len(mgr.ListProjects()))
+	}
+
+	// Register a project
+	project := gatewayconfig.Project{
+		ID:        "new-project",
+		Namespace: "ns",
+		Service:   "svc",
+		Port:      8080,
+	}
+	mgr.RegisterProject(project)
+
+	// Should now have 1 project
+	if len(mgr.ListProjects()) != 1 {
+		t.Errorf("expected 1 project after registration, got %d", len(mgr.ListProjects()))
+	}
+
+	// Verify HasProject
+	if !mgr.HasProject("new-project") {
+		t.Error("HasProject should return true for registered project")
+	}
+}
+
+// TestUnregisterProject verifies dynamic project removal.
+func TestUnregisterProject(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{{ID: "proj", Namespace: "ns", Service: "svc", Port: 8080}},
+	}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	// Initially 1 project
+	if len(mgr.ListProjects()) != 1 {
+		t.Errorf("expected 1 project, got %d", len(mgr.ListProjects()))
+	}
+
+	// Unregister the project
+	mgr.UnregisterProject("proj")
+
+	// Should now be empty
+	if len(mgr.ListProjects()) != 0 {
+		t.Errorf("expected 0 projects after unregistration, got %d", len(mgr.ListProjects()))
+	}
+
+	// Verify HasProject
+	if mgr.HasProject("proj") {
+		t.Error("HasProject should return false for unregistered project")
+	}
+}
+
+// TestHasProject verifies project existence checking.
+func TestHasProject(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{{ID: "proj", Namespace: "ns", Service: "svc", Port: 8080}},
+	}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	if !mgr.HasProject("proj") {
+		t.Error("HasProject should return true for existing project")
+	}
+	if mgr.HasProject("missing") {
+		t.Error("HasProject should return false for non-existent project")
+	}
+}
+
+// TestListProjectsWithStatus verifies projects listing with health status.
+func TestListProjectsWithStatus(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{
+			{ID: "proj-a", Namespace: "ns", Service: "svc", Port: 8080},
+			{ID: "proj-b", Namespace: "ns", Service: "svc", Port: 8080},
+		},
+	}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	result := mgr.ListProjectsWithStatus()
+	if len(result) != 2 {
+		t.Errorf("expected 2 projects, got %d", len(result))
+	}
+
+	// Verify each project has status
+	for _, p := range result {
+		if p.Status == "" {
+			t.Errorf("project %s has empty status", p.ID)
+		}
+	}
+}
+
+// TestSetStatusCallback verifies status callback setter.
+func TestSetStatusCallback(t *testing.T) {
+	cat := gatewayconfig.Catalog{}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	mgr.SetStatusCallback(func(tab tabs.Tab) {
+		// callback set
+	})
+
+	if mgr.statusCb == nil {
+		t.Error("statusCb should not be nil after SetStatusCallback")
+	}
+}
+
+// TestSetMetricsCallback verifies metrics callback setter.
+func TestSetMetricsCallback(t *testing.T) {
+	cat := gatewayconfig.Catalog{}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	mgr.SetMetricsCallback(func(tabID string, m metrics.TabMetrics) {
+		// callback set
+	})
+
+	if mgr.metricsCb == nil {
+		t.Error("metricsCb should not be nil after SetMetricsCallback")
+	}
+}
+
+// TestCloseTabNotFound verifies closing a non-existent tab.
+func TestCloseTabNotFound(t *testing.T) {
+	store := &fakeStore{}
+	mgr := New(gatewayconfig.Catalog{}, store, 2*time.Hour)
+
+	// Should not error (no-op for non-existent tab in memory)
+	err := mgr.CloseTab(context.Background(), "missing-tab")
+	if err != nil {
+		// This depends on store behavior - fakeStore returns nil
+		t.Logf("CloseTab error: %v", err)
+	}
+}
+
+// TestToTabStatus verifies status conversion.
+func TestToTabStatus(t *testing.T) {
+	tests := []struct {
+		input    relay.Status
+		expected tabs.Status
+	}{
+		{relay.StatusConnecting, tabs.StatusConnecting},
+		{relay.StatusIdle, tabs.StatusConnecting},
+		{relay.StatusConnected, tabs.StatusConnected},
+		{relay.StatusReconnecting, tabs.StatusReconnecting},
+		{relay.StatusClosed, tabs.StatusClosed},
+		{relay.Status("unknown"), ""},
+	}
+
+	for _, tt := range tests {
+		result := toTabStatus(tt.input)
+		if result != tt.expected {
+			t.Errorf("toTabStatus(%q) = %q, want %q", tt.input, result, tt.expected)
+		}
+	}
+}
+
+// TestProjectWithStatus_Fields verifies ProjectWithStatus struct.
+func TestProjectWithStatus_Fields(t *testing.T) {
+	now := time.Now()
+	pws := ProjectWithStatus{
+		Project: gatewayconfig.Project{
+			ID:        "test-proj",
+			Namespace: "test-ns",
+			Service:   "test-svc",
+			Port:      8080,
+		},
+		Status:        "healthy",
+		LastCheckedAt: &now,
+	}
+
+	if pws.ID != "test-proj" {
+		t.Errorf("ID = %q, want %q", pws.ID, "test-proj")
+	}
+	if pws.Status != "healthy" {
+		t.Errorf("Status = %q, want %q", pws.Status, "healthy")
+	}
+	if pws.LastCheckedAt == nil {
+		t.Error("LastCheckedAt should not be nil")
 	}
 }

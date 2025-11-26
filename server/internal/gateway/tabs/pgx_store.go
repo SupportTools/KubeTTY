@@ -170,3 +170,86 @@ WHERE client_id = $1 AND project_id = $2`
 	}
 	return count, nil
 }
+
+// GetStatusCounts returns a count of tabs grouped by status.
+func (s *PGXStore) GetStatusCounts(ctx context.Context) (map[string]int, error) {
+	const stmt = `
+SELECT status, COUNT(*) as count
+FROM gateway_tabs
+GROUP BY status`
+
+	rows, err := s.pool.Query(ctx, stmt)
+	if err != nil {
+		return nil, fmt.Errorf("get status counts: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, fmt.Errorf("scan status count: %w", err)
+		}
+		counts[status] = count
+	}
+
+	return counts, rows.Err()
+}
+
+// GetRecentErrors returns tabs with errors, ordered by most recent.
+func (s *PGXStore) GetRecentErrors(ctx context.Context, limit int) ([]Tab, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	const stmt = `
+SELECT tab_id, project_id, client_id, status, created_at, updated_at, last_error, downstream_uri
+FROM gateway_tabs
+WHERE last_error IS NOT NULL AND last_error != ''
+ORDER BY updated_at DESC
+LIMIT $1`
+
+	rows, err := s.pool.Query(ctx, stmt, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get recent errors: %w", err)
+	}
+	defer rows.Close()
+
+	var result []Tab
+	for rows.Next() {
+		var tab Tab
+		if err := rows.Scan(&tab.TabID, &tab.ProjectID, &tab.ClientID, &tab.Status, &tab.CreatedAt, &tab.UpdatedAt, &tab.LastError, &tab.DownstreamURI); err != nil {
+			return nil, fmt.Errorf("scan tab: %w", err)
+		}
+		result = append(result, tab)
+	}
+	return result, rows.Err()
+}
+
+// GetActiveCountByProject returns the count of active tabs per project.
+func (s *PGXStore) GetActiveCountByProject(ctx context.Context) (map[string]int, error) {
+	const stmt = `
+SELECT project_id, COUNT(*) as count
+FROM gateway_tabs
+WHERE status IN ('connecting', 'connected', 'reconnecting')
+GROUP BY project_id`
+
+	rows, err := s.pool.Query(ctx, stmt)
+	if err != nil {
+		return nil, fmt.Errorf("get active count by project: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var projectID string
+		var count int
+		if err := rows.Scan(&projectID, &count); err != nil {
+			return nil, fmt.Errorf("scan project count: %w", err)
+		}
+		counts[projectID] = count
+	}
+
+	return counts, rows.Err()
+}

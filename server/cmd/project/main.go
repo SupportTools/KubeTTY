@@ -37,12 +37,26 @@ const (
 	maxPTYRows = 200
 )
 
+// WebSocket heartbeat configuration
+const (
+	// How often the server sends ping frames to clients
+	wsPingInterval = 15 * time.Second
+	// How long to wait for pong response before considering connection dead
+	wsPongTimeout = 5 * time.Second
+	// Read deadline extension on each pong (pingInterval + pongTimeout + buffer)
+	wsReadDeadline = wsPingInterval + wsPongTimeout + 2*time.Second
+)
+
 // wsClient wraps a websocket connection with a write mutex to prevent concurrent writes.
 // The gorilla/websocket library does not support concurrent writers.
 type wsClient struct {
 	conn    *websocket.Conn
 	writeMu sync.Mutex
 	paused  atomic.Bool // Flow control: true when client cannot accept more data
+
+	// Heartbeat tracking
+	lastPongAt atomic.Int64 // Unix timestamp of last pong received
+	stopPing   chan struct{}
 }
 
 // writeMessage safely writes a message to the websocket with mutex protection.
@@ -59,6 +73,82 @@ func (c *wsClient) writeControl(messageType int, data []byte, deadline time.Time
 	return c.conn.WriteControl(messageType, data, deadline)
 }
 
+// startHeartbeat starts a goroutine that sends ping frames and monitors for pong responses.
+// Returns a channel that will be closed when heartbeat detects a dead connection.
+func (c *wsClient) startHeartbeat(sessionUUID, connID string) <-chan struct{} {
+	deadConn := make(chan struct{})
+	c.stopPing = make(chan struct{})
+
+	// Initialize lastPongAt to now (assume connection is alive)
+	c.lastPongAt.Store(time.Now().Unix())
+
+	// Set pong handler to update lastPongAt timestamp
+	c.conn.SetPongHandler(func(appData string) error {
+		c.lastPongAt.Store(time.Now().Unix())
+		log.WithFields(log.Fields{
+			"session_uuid": sessionUUID,
+			"conn_id":      connID,
+		}).Debug("project/ws: Pong received")
+		// Extend read deadline on pong
+		return c.conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
+	})
+
+	// Set initial read deadline
+	_ = c.conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
+
+	go func() {
+		ticker := time.NewTicker(wsPingInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-c.stopPing:
+				return
+			case <-ticker.C:
+				// Check if last pong is too old
+				lastPong := time.Unix(c.lastPongAt.Load(), 0)
+				sincePong := time.Since(lastPong)
+
+				if sincePong > wsPingInterval+wsPongTimeout {
+					log.WithFields(log.Fields{
+						"session_uuid": sessionUUID,
+						"conn_id":      connID,
+						"since_pong":   sincePong.String(),
+						"pong_timeout": (wsPingInterval + wsPongTimeout).String(),
+					}).Warn("project/ws: Pong timeout - connection appears dead")
+					close(deadConn)
+					return
+				}
+
+				// Send ping frame
+				if err := c.writeControl(websocket.PingMessage, []byte{}, time.Now().Add(wsPongTimeout)); err != nil {
+					log.WithFields(log.Fields{
+						"session_uuid": sessionUUID,
+						"conn_id":      connID,
+						"error":        err.Error(),
+					}).Warn("project/ws: Ping write failed")
+					close(deadConn)
+					return
+				}
+
+				log.WithFields(log.Fields{
+					"session_uuid": sessionUUID,
+					"conn_id":      connID,
+				}).Debug("project/ws: Ping sent")
+			}
+		}
+	}()
+
+	return deadConn
+}
+
+// stopHeartbeat stops the heartbeat goroutine.
+func (c *wsClient) stopHeartbeat() {
+	if c.stopPing != nil {
+		close(c.stopPing)
+	}
+}
+
 type ptySession struct {
 	cmd       *exec.Cmd
 	ptmx      *os.File
@@ -68,6 +158,9 @@ type ptySession struct {
 	clients       map[*websocket.Conn]*wsClient
 	outputBuffer  []byte // Buffer for initial output (MOTD, etc.)
 	bufferMaxSize int    // Maximum buffer size (64KB)
+
+	// Metrics reference for broadcast error tracking
+	appMetrics *appMetrics
 }
 
 type server struct {
@@ -183,19 +276,27 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	remoteAddr := r.RemoteAddr
 	connID := fmt.Sprintf("%s-%d", remoteAddr, time.Now().UnixNano())
+	sessionUUID := s.cfg.SessionID
+
+	// Record connection attempt metric
+	if s.appMetrics != nil {
+		s.appMetrics.observeWSConnectionAttempt()
+	}
 
 	log.WithFields(log.Fields{
-		"conn_id":     connID,
-		"remote_addr": remoteAddr,
-		"user_agent":  r.UserAgent(),
-		"path":        r.URL.Path,
+		"session_uuid": sessionUUID,
+		"conn_id":      connID,
+		"remote_addr":  remoteAddr,
+		"user_agent":   r.UserAgent(),
+		"path":         r.URL.Path,
 	}).Debug("project/ws: WebSocket connection attempt")
 
 	// Ensure PTY exists
 	if err := s.initPTY(ctx); err != nil {
 		log.WithFields(log.Fields{
-			"conn_id": connID,
-			"error":   err.Error(),
+			"session_uuid": sessionUUID,
+			"conn_id":      connID,
+			"error":        err.Error(),
 		}).Error("project/ws: PTY initialization failed")
 		apierrors.WriteError(w, apierrors.InternalServerError("PTY unavailable", ""))
 		return
@@ -207,42 +308,79 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	if ps == nil {
-		log.WithField("conn_id", connID).Error("project/ws: PTY not initialized after init")
+		log.WithFields(log.Fields{
+			"session_uuid": sessionUUID,
+			"conn_id":      connID,
+		}).Error("project/ws: PTY not initialized after init")
 		apierrors.WriteError(w, apierrors.InternalServerError("PTY not initialized", ""))
 		return
 	}
 
 	// Enforce single client per session
+	// Support ?force=true to disconnect existing client and take over
+	forceParam := r.URL.Query().Get("force")
+	forceConnect := forceParam == "true" || forceParam == "1"
+
 	if ps.hasClients() {
-		log.WithFields(log.Fields{
-			"conn_id":      connID,
-			"remote_addr":  remoteAddr,
-			"client_count": ps.getClientCount(),
-		}).Warn("project/ws: Rejected - another client is already connected (single-client enforcement)")
-		apierrors.WriteError(w, apierrors.Conflict("session already attached", "only one client allowed"))
-		return
+		if forceConnect {
+			// Force takeover: disconnect existing clients with explanation
+			log.WithFields(log.Fields{
+				"session_uuid": sessionUUID,
+				"conn_id":      connID,
+				"remote_addr":  remoteAddr,
+				"client_count": ps.getClientCount(),
+			}).Info("project/ws: Force takeover requested - disconnecting existing client(s)")
+			ps.disconnectAllClients("session taken over by another client")
+		} else {
+			log.WithFields(log.Fields{
+				"session_uuid": sessionUUID,
+				"conn_id":      connID,
+				"remote_addr":  remoteAddr,
+				"client_count": ps.getClientCount(),
+			}).Warn("project/ws: Rejected - another client is already connected (single-client enforcement)")
+			apierrors.WriteError(w, apierrors.Conflict("session already attached", "only one client allowed; use ?force=true to take over"))
+			return
+		}
 	}
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.WithFields(log.Fields{
-			"conn_id": connID,
-			"error":   err.Error(),
+			"session_uuid": sessionUUID,
+			"conn_id":      connID,
+			"error":        err.Error(),
 		}).Error("project/ws: WebSocket upgrade failed")
 		apierrors.WriteError(w, apierrors.InternalServerError("WebSocket upgrade failed", ""))
 		return
 	}
+
+	// Track active connection
+	if s.appMetrics != nil {
+		s.appMetrics.observeWSConnectionOpened()
+	}
+
+	// Track disconnect reason for metrics
+	disconnectReason := "unknown"
+	connectedAt := time.Now()
 	defer func() {
 		conn.Close()
+		if s.appMetrics != nil {
+			s.appMetrics.observeWSConnectionClosed()
+			s.appMetrics.observeWSDisconnect(disconnectReason)
+		}
 		log.WithFields(log.Fields{
-			"conn_id":     connID,
-			"remote_addr": remoteAddr,
+			"session_uuid":      sessionUUID,
+			"conn_id":           connID,
+			"remote_addr":       remoteAddr,
+			"disconnect_reason": disconnectReason,
+			"connection_dur":    time.Since(connectedAt).String(),
 		}).Info("project/ws: Connection closed")
 	}()
 
 	log.WithFields(log.Fields{
-		"conn_id":     connID,
-		"remote_addr": remoteAddr,
+		"session_uuid": sessionUUID,
+		"conn_id":      connID,
+		"remote_addr":  remoteAddr,
 	}).Info("project/ws: WebSocket connection established")
 
 	// Register this client and get the wsClient wrapper for safe writes
@@ -254,21 +392,44 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		defer s.appMetrics.observeSessionDetached()
 	}
 
+	// Start server-initiated heartbeat (ping/pong)
+	deadConn := wsClient.startHeartbeat(sessionUUID, connID)
+	defer wsClient.stopHeartbeat()
+
+	// Monitor for dead connection detected by heartbeat
+	go func() {
+		<-deadConn
+		disconnectReason = "heartbeat_timeout"
+		log.WithFields(log.Fields{
+			"session_uuid": sessionUUID,
+			"conn_id":      connID,
+		}).Info("project/ws: Closing connection due to heartbeat timeout")
+		conn.Close()
+	}()
+
 	// WS -> PTY (input)
 	for {
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				disconnectReason = "normal_closure"
 				log.WithFields(log.Fields{
-					"conn_id":    connID,
-					"close_code": "normal/going_away",
+					"session_uuid": sessionUUID,
+					"conn_id":      connID,
+					"close_code":   "normal/going_away",
 				}).Info("project/ws: Client closed connection normally")
 			} else if errors.Is(err, io.EOF) {
-				log.WithField("conn_id", connID).Info("project/ws: Connection EOF")
-			} else {
+				disconnectReason = "eof"
 				log.WithFields(log.Fields{
-					"conn_id": connID,
-					"error":   err.Error(),
+					"session_uuid": sessionUUID,
+					"conn_id":      connID,
+				}).Info("project/ws: Connection EOF")
+			} else {
+				disconnectReason = "read_error"
+				log.WithFields(log.Fields{
+					"session_uuid": sessionUUID,
+					"conn_id":      connID,
+					"error":        err.Error(),
 				}).Warn("project/ws: Read error - disconnecting client")
 			}
 			return
@@ -282,9 +443,10 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := json.Unmarshal(data, &msg); err != nil {
 				log.WithFields(log.Fields{
-					"conn_id": connID,
-					"error":   err.Error(),
-					"data":    string(data),
+					"session_uuid": sessionUUID,
+					"conn_id":      connID,
+					"error":        err.Error(),
+					"data":         string(data),
 				}).Warn("project/ws: Invalid JSON message")
 				continue
 			}
@@ -292,62 +454,77 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			case "resize":
 				if msg.Cols == 0 || msg.Rows == 0 {
 					log.WithFields(log.Fields{
-						"conn_id": connID,
-						"cols":    msg.Cols,
-						"rows":    msg.Rows,
+						"session_uuid": sessionUUID,
+						"conn_id":      connID,
+						"cols":         msg.Cols,
+						"rows":         msg.Rows,
 					}).Warn("project/ws: Invalid resize - cols and rows must be > 0")
 					continue
 				}
 				if msg.Cols > maxPTYCols {
 					log.WithFields(log.Fields{
-						"conn_id": connID,
-						"cols":    msg.Cols,
-						"max":     maxPTYCols,
+						"session_uuid": sessionUUID,
+						"conn_id":      connID,
+						"cols":         msg.Cols,
+						"max":          maxPTYCols,
 					}).Warn("project/ws: Invalid resize - cols exceeds max")
 					continue
 				}
 				if msg.Rows > maxPTYRows {
 					log.WithFields(log.Fields{
-						"conn_id": connID,
-						"rows":    msg.Rows,
-						"max":     maxPTYRows,
+						"session_uuid": sessionUUID,
+						"conn_id":      connID,
+						"rows":         msg.Rows,
+						"max":          maxPTYRows,
 					}).Warn("project/ws: Invalid resize - rows exceeds max")
 					continue
 				}
 				if err := pty.Setsize(ps.ptmx, &pty.Winsize{Cols: msg.Cols, Rows: msg.Rows}); err != nil {
 					log.WithFields(log.Fields{
-						"conn_id": connID,
-						"cols":    msg.Cols,
-						"rows":    msg.Rows,
-						"error":   err.Error(),
+						"session_uuid": sessionUUID,
+						"conn_id":      connID,
+						"cols":         msg.Cols,
+						"rows":         msg.Rows,
+						"error":        err.Error(),
 					}).Error("project/ws: PTY resize failed")
 				} else {
 					log.WithFields(log.Fields{
-						"conn_id": connID,
-						"cols":    msg.Cols,
-						"rows":    msg.Rows,
+						"session_uuid": sessionUUID,
+						"conn_id":      connID,
+						"cols":         msg.Cols,
+						"rows":         msg.Rows,
 					}).Debug("project/ws: PTY resized")
 				}
 			case "ping":
 				// Send pong response to keep connection alive (use safe write)
 				if err := wsClient.writeMessage(websocket.TextMessage, []byte(`{"type":"pong"}`)); err != nil {
 					log.WithFields(log.Fields{
-						"conn_id": connID,
-						"error":   err.Error(),
+						"session_uuid": sessionUUID,
+						"conn_id":      connID,
+						"error":        err.Error(),
 					}).Warn("project/ws: Pong write error")
-				} else {
-					log.WithField("conn_id", connID).Debug("project/ws: Pong sent")
 				}
+				// Note: pong sent is Debug level noise, omitted for cleaner logs
 			case "pause":
 				// Client is requesting to pause PTY output (flow control)
 				wsClient.paused.Store(true)
-				log.WithField("conn_id", connID).Info("project/ws: Client paused (flow control enabled)")
+				if s.appMetrics != nil {
+					s.appMetrics.observeWSFlowControlPause()
+				}
+				log.WithFields(log.Fields{
+					"session_uuid": sessionUUID,
+					"conn_id":      connID,
+				}).Info("project/ws: Client paused (flow control enabled)")
 			case "resume":
 				// Client is ready to receive PTY output again (flow control)
 				wsClient.paused.Store(false)
-				log.WithField("conn_id", connID).Info("project/ws: Client resumed (flow control disabled)")
+				log.WithFields(log.Fields{
+					"session_uuid": sessionUUID,
+					"conn_id":      connID,
+				}).Info("project/ws: Client resumed (flow control disabled)")
 			default:
 				log.WithFields(log.Fields{
+					"session_uuid": sessionUUID,
 					"conn_id":      connID,
 					"message_type": msg.Type,
 				}).Debug("project/ws: Received unknown message type")
@@ -366,9 +543,11 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if _, err := ps.ptmx.Write(data); err != nil {
+			disconnectReason = "pty_write_error"
 			log.WithFields(log.Fields{
-				"conn_id": connID,
-				"error":   err.Error(),
+				"session_uuid": sessionUUID,
+				"conn_id":      connID,
+				"error":        err.Error(),
 			}).Error("project/ws: PTY write error - disconnecting")
 			return
 		}
@@ -439,6 +618,7 @@ func (s *server) initPTY(ctx context.Context) error {
 		clients:       make(map[*websocket.Conn]*wsClient),
 		outputBuffer:  make([]byte, 0, 65536), // Pre-allocate 64KB capacity
 		bufferMaxSize: 65536,                  // 64KB max buffer size
+		appMetrics:    s.appMetrics,           // For broadcast error tracking
 	}
 
 	log.WithFields(log.Fields{
@@ -618,6 +798,9 @@ func (ps *ptySession) broadcast(data []byte) {
 
 		if err := client.writeMessage(websocket.BinaryMessage, data); err != nil {
 			errorCount++
+			if ps.appMetrics != nil {
+				ps.appMetrics.observeWSWriteError()
+			}
 			log.WithFields(log.Fields{
 				"error":     err.Error(),
 				"data_size": len(data),
@@ -652,6 +835,32 @@ func (ps *ptySession) broadcastClose() {
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "PTY exited"),
 			time.Now().Add(time.Second))
 		conn.Close()
+	}
+}
+
+// disconnectAllClients forcefully disconnects all connected clients with a reason message.
+// This is used for force takeover when a new client connects with ?force=true.
+func (ps *ptySession) disconnectAllClients(reason string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	clientCount := len(ps.clients)
+	if clientCount == 0 {
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"client_count": clientCount,
+		"reason":       reason,
+	}).Info("project/pty: Forcefully disconnecting all clients")
+
+	for conn, client := range ps.clients {
+		// Send close message with reason (use code 4000 for custom application close)
+		_ = client.writeControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4000, reason),
+			time.Now().Add(time.Second))
+		conn.Close()
+		delete(ps.clients, conn)
 	}
 }
 
@@ -695,10 +904,11 @@ type networkMetric struct {
 	TxRate  int64 `json:"txRate"` // Calculated by gateway
 }
 
-// getDiskMetrics returns disk usage for the root filesystem.
+// getDiskMetrics returns disk usage for the PVC mounted at /home.
+// This reports total usage for the entire PVC volume, not just the /home subPath.
 func getDiskMetrics() resourceMetric {
 	var stat syscall.Statfs_t
-	if err := syscall.Statfs("/", &stat); err != nil {
+	if err := syscall.Statfs("/home", &stat); err != nil {
 		log.WithError(err).Debug("Failed to get disk stats")
 		return resourceMetric{}
 	}

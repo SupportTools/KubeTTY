@@ -143,6 +143,38 @@ func TestLoadProjectConfig(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "PTY logging defaults",
+			envVars: map[string]string{
+				"SESSION_ID": "test-session-pty",
+			},
+			wantErr: false,
+			validate: func(t *testing.T, cfg ProjectConfig) {
+				if cfg.PTYLogEnabled {
+					t.Error("PTYLogEnabled = true, want false (default)")
+				}
+				if cfg.PTYLogMaxLineLen != 4096 {
+					t.Errorf("PTYLogMaxLineLen = %d, want 4096 (default)", cfg.PTYLogMaxLineLen)
+				}
+			},
+		},
+		{
+			name: "PTY logging enabled with custom max line",
+			envVars: map[string]string{
+				"SESSION_ID":       "test-session-pty-custom",
+				"PTY_LOG_ENABLED":  "true",
+				"PTY_LOG_MAX_LINE": "8192",
+			},
+			wantErr: false,
+			validate: func(t *testing.T, cfg ProjectConfig) {
+				if !cfg.PTYLogEnabled {
+					t.Error("PTYLogEnabled = false, want true")
+				}
+				if cfg.PTYLogMaxLineLen != 8192 {
+					t.Errorf("PTYLogMaxLineLen = %d, want 8192", cfg.PTYLogMaxLineLen)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

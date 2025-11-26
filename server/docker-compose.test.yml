@@ -1,0 +1,25 @@
+# Docker Compose for local and CI PostgreSQL testing
+# Usage:
+#   make test-db-up    # Start PostgreSQL
+#   make test-db-down  # Stop and remove
+#   make test-with-db  # Run integration tests with DB
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kubetty-test-db
+    environment:
+      POSTGRES_USER: kubetty_test
+      POSTGRES_PASSWORD: kubetty_test
+      POSTGRES_DB: kubetty_test
+    ports:
+      - "5433:5432"  # Use 5433 to avoid conflicts with local PostgreSQL
+    volumes:
+      - ./scripts/init-test-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kubetty_test -d kubetty_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /var/lib/postgresql/data  # Use tmpfs for faster tests

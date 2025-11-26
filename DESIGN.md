@@ -571,6 +571,94 @@ server/internal/gateway/
         collector.go  # Background collection, K8s client, HTTP fetcher
 ```
 
+### 5.19 Kubectl Exec Mode (Alternative Connection Method)
+
+The gateway supports two modes for connecting to project pods: the default WebSocket relay and an alternative kubectl exec mode that uses the Kubernetes `remotecommand` API.
+
+#### 5.19.1 Motivation
+
+While WebSocket relay is the default and works well for most scenarios, some environments experience stability issues when managing multiple concurrent WebSocket connections. The kubectl exec mode provides an alternative that:
+
+* Uses the stable Kubernetes `remotecommand` (SPDY) protocol
+* Avoids maintaining long-lived WebSocket connections between gateway and project pods
+* Leverages proven Kubernetes infrastructure for terminal streaming
+
+#### 5.19.2 Configuration
+
+Set the `KUBETTY_EXEC_MODE` environment variable:
+
+| Value | Description |
+|-------|-------------|
+| `websocket` (default) | Use WebSocket relay to project pods (legacy) |
+| `exec` or `kubectl` | Use kubectl exec via Kubernetes `remotecommand` API |
+
+```bash
+# Enable exec mode
+export KUBETTY_EXEC_MODE=exec
+```
+
+#### 5.19.3 Architecture
+
+```
+Browser (tabbed UI)
+     |
+     | wss://kubetty.support.tools/ws?tab=<id>
+     v
+Gateway Pod
+     |
+     | kubectl exec (SPDY/remotecommand)
+     v
+Project Pods (target container via Kubernetes API)
+```
+
+**Key Components:**
+
+1. **ExecRelay** (`internal/gateway/exec/relay.go`): Manages the kubectl exec session lifecycle
+2. **Session** (`internal/gateway/exec/exec.go`): Wraps the Kubernetes `remotecommand` executor
+3. **OutputBuffer** (`internal/gateway/exec/buffer.go`): Circular buffer for terminal replay on reconnect
+4. **Proxier Interface** (`internal/gateway/relay/interface.go`): Common interface for both relay types
+
+#### 5.19.4 Session Persistence
+
+Unlike WebSocket relay where the project pod maintains the PTY, exec mode keeps the session alive in the gateway:
+
+1. **Session Creation**: When a tab is opened, the gateway creates a kubectl exec session to the project pod's shell
+2. **Output Buffering**: All terminal output is buffered (default 64KB) for replay when clients reconnect
+3. **Multi-Client Support**: Multiple browser tabs can connect to the same exec session; output is broadcast to all
+4. **Client Disconnection**: The exec session persists even when all browser clients disconnect
+5. **Reconnection**: New clients receive buffered output replay and join the live output stream
+
+#### 5.19.5 RBAC Requirements
+
+Gateway ServiceAccount needs additional permissions for exec mode:
+
+```yaml
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create", "get"]
+```
+
+#### 5.19.6 Trade-offs
+
+| Aspect | WebSocket Mode | Exec Mode |
+|--------|---------------|-----------|
+| **Connection** | Direct WS to project pod | Via Kubernetes API |
+| **Session location** | Project pod | Gateway pod |
+| **Reconnect** | Project pod buffers output | Gateway buffers output |
+| **Stability** | May have issues with many connections | Uses proven K8s infrastructure |
+| **Latency** | Direct, lower latency | Slightly higher (via API server) |
+| **Dependencies** | Project pod must expose /ws | Only needs exec permissions |
+
+#### 5.19.7 Implementation Details
+
+The exec relay uses a single-reader, multiple-writer pattern:
+
+* **Single Reader**: One goroutine reads from the kubectl exec stdout and writes to a channel
+* **Broadcaster**: Reads from the channel and sends to all connected WebSocket clients
+* **Client Handlers**: Each client connection handles input (stdin) independently
+
+This design prevents race conditions when multiple clients connect to the same session.
+
 ---
 
 ## 6. Single-Namespace Project Controller

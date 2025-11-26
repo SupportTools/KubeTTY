@@ -41,6 +41,11 @@ type Store interface {
 	ListByClient(ctx context.Context, clientID string, limit int) ([]Tab, error)
 	ListAll(ctx context.Context) ([]Tab, error)
 	CountByClientAndProject(ctx context.Context, clientID, projectID string) (int, error)
+
+	// Dashboard methods
+	GetStatusCounts(ctx context.Context) (map[string]int, error)
+	GetRecentErrors(ctx context.Context, limit int) ([]Tab, error)
+	GetActiveCountByProject(ctx context.Context) (map[string]int, error)
 }
 
 // ErrNotFound is returned when a tab does not exist.

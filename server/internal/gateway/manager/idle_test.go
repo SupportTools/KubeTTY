@@ -110,6 +110,43 @@ func (m *mockTabStore) UpdateClientID(ctx context.Context, tabID, clientID strin
 	return nil
 }
 
+func (m *mockTabStore) GetActiveCountByProject(ctx context.Context) (map[string]int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	counts := make(map[string]int)
+	for _, tab := range m.tabs {
+		if tab.Status == tabs.StatusConnected {
+			counts[tab.ProjectID]++
+		}
+	}
+	return counts, nil
+}
+
+func (m *mockTabStore) GetStatusCounts(ctx context.Context) (map[string]int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	counts := make(map[string]int)
+	for _, tab := range m.tabs {
+		counts[string(tab.Status)]++
+	}
+	return counts, nil
+}
+
+func (m *mockTabStore) GetRecentErrors(ctx context.Context, limit int) ([]tabs.Tab, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var result []tabs.Tab
+	for _, tab := range m.tabs {
+		if tab.LastError != nil && *tab.LastError != "" {
+			result = append(result, tab)
+		}
+	}
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
 func TestManager_IdleTimeout_MinimumValidation(t *testing.T) {
 	catalog := gatewayconfig.Catalog{
 		Projects: []gatewayconfig.Project{

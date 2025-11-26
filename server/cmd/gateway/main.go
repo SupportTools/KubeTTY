@@ -202,6 +202,7 @@ func main() {
 				Prefix:           cfg.Controller.ResourcePrefix,
 				Env:              cfg.Controller.ParseEnvironment(),
 				ImagePullSecrets: cfg.Controller.ImagePullSecrets,
+				TemplatePVCName:  cfg.Controller.TemplatePVCName,
 			},
 		}
 		projCtrl, err = controller.New(ctrlCfg, projectStore)

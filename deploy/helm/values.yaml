@@ -311,6 +311,38 @@ prometheus:
     errorFor: 5m
     annotations: {}
 
+# Project controller configuration
+# Controls the single-namespace project controller that manages K8s resources for projects
+controller:
+  # Enable project controller (requires gateway mode)
+  enabled: false
+
+  # Target namespace for all project resources
+  # Example: "kubetty-projects-dev" or "kubetty-projects-prd"
+  projectsNamespace: ""
+
+  # Prefix for all project resource names (PVCs, Deployments, Services)
+  # Example: with prefix "kubetty-project-" and project "alpha", creates "kubetty-project-alpha"
+  resourcePrefix: "kubetty-project-"
+
+  # Reconciliation interval for checking project state
+  reconcileInterval: "30s"
+
+  # Health check interval for running projects
+  healthCheckInterval: "60s"
+
+  # Default name for per-project environment secrets
+  envSecretName: "env-secrets"
+
+  # Image pull secrets for project pods (comma-separated list)
+  imagePullSecrets: "harbor-supporttools"
+
+  # Template PVC name for base file synchronization
+  # If set, new projects will sync files from this PVC via an init container
+  # The template PVC must exist in the same namespace as the projects
+  # Leave empty to disable template sync
+  templatePVCName: ""
+
 # Pipeline configuration
 pipelines:
   # Docker-in-Docker support

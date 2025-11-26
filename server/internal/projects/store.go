@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -42,6 +43,10 @@ type Store interface {
 
 	// List projects by status for controller reconciliation
 	ListByStatuses(ctx context.Context, statuses []ProjectStatus) ([]Project, error)
+
+	// Dashboard methods
+	GetStatusCounts(ctx context.Context) (map[ProjectStatus]int, error)
+	GetRecentlyFailed(ctx context.Context, since time.Time, limit int) ([]Project, error)
 }
 
 // PGStore is a pgx-backed Store implementation.
@@ -621,4 +626,66 @@ func joinStrings(strs []string, sep string) string {
 		result += sep + strs[i]
 	}
 	return result
+}
+
+// GetStatusCounts returns a count of projects grouped by status.
+func (s *PGStore) GetStatusCounts(ctx context.Context) (map[ProjectStatus]int, error) {
+	const stmt = `
+SELECT status, COUNT(*) as count
+FROM kubetty_projects
+WHERE deleted_at IS NULL
+GROUP BY status`
+
+	rows, err := s.pool.Query(ctx, stmt)
+	if err != nil {
+		return nil, fmt.Errorf("get status counts: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[ProjectStatus]int)
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, fmt.Errorf("scan status count: %w", err)
+		}
+		counts[ProjectStatus(status)] = count
+	}
+
+	return counts, rows.Err()
+}
+
+// GetRecentlyFailed returns projects that changed to failed status since the given time.
+func (s *PGStore) GetRecentlyFailed(ctx context.Context, since time.Time, limit int) ([]Project, error) {
+	const stmt = `
+SELECT id, name, display_name, description, icon,
+    target_namespace, service_name, session_id, user_name,
+    cpu_request, cpu_limit, memory_request, memory_limit,
+    storage_size, storage_class,
+    admin_namespaces, read_namespaces,
+    max_tabs_per_client, max_tabs_total,
+    dind_enabled, env_vars,
+    image_repository, image_tag,
+    status, status_message, last_health_check, last_activity, pod_ip,
+    created_at, updated_at, deleted_at
+FROM kubetty_projects
+WHERE status = 'failed' AND updated_at >= $1 AND deleted_at IS NULL
+ORDER BY updated_at DESC
+LIMIT $2`
+
+	rows, err := s.pool.Query(ctx, stmt, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get recently failed: %w", err)
+	}
+	defer rows.Close()
+
+	var projects []Project
+	for rows.Next() {
+		project, err := scanProjectRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		projects = append(projects, *project)
+	}
+	return projects, rows.Err()
 }

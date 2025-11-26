@@ -320,6 +320,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 | `AUTH_ISSUER` | JWT issuer | No | kubetty |
 | `AUTH_COOKIE_DOMAIN` | Cookie domain | No | - |
 | `AUTH_COOKIE_SECURE` | Cookie secure flag | No | true |
+| `KUBETTY_EXEC_MODE` | Connection mode: `websocket` (legacy) or `exec` (kubectl exec) | No | websocket |
 
 ### Project-Specific
 | Variable | Description | Required | Default |

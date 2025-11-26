@@ -2,6 +2,8 @@ package sessions
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -10,14 +12,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const testConnString = "postgres://postgres:postgres@localhost:5432/kubetty_test?sslmode=disable"
+// getTestConnString builds a connection string from environment variables.
+func getTestConnString() string {
+	host := os.Getenv("CNPG_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	port := os.Getenv("CNPG_PORT")
+	if port == "" {
+		port = "5432"
+	}
+	user := os.Getenv("CNPG_USER")
+	if user == "" {
+		user = "kubetty_test"
+	}
+	password := os.Getenv("CNPG_PASSWORD")
+	if password == "" {
+		password = "kubetty_test"
+	}
+	database := os.Getenv("CNPG_DATABASE")
+	if database == "" {
+		database = "kubetty_test"
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, database)
+}
 
 // newTestStore creates a PGXStore connected to the test database.
 // Skips the test if the database is not available or tables don't exist.
 func newTestStore(t *testing.T) *PGXStore {
 	t.Helper()
 	ctx := context.Background()
-	config, err := pgxpool.ParseConfig(testConnString)
+	config, err := pgxpool.ParseConfig(getTestConnString())
 	if err != nil {
 		t.Skipf("Skipping database test: failed to parse connection string: %v", err)
 	}

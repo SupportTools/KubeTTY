@@ -185,6 +185,31 @@ func (m *mockStore) ListByStatuses(ctx context.Context, statuses []projects.Proj
 	return result, nil
 }
 
+func (m *mockStore) GetStatusCounts(ctx context.Context) (map[projects.ProjectStatus]int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	counts := make(map[projects.ProjectStatus]int)
+	for _, p := range m.projects {
+		counts[p.Status]++
+	}
+	return counts, nil
+}
+
+func (m *mockStore) GetRecentlyFailed(ctx context.Context, since time.Time, limit int) ([]projects.Project, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []projects.Project
+	for _, p := range m.projects {
+		if p.Status == projects.StatusFailed && p.UpdatedAt.After(since) {
+			result = append(result, *p)
+		}
+	}
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
 func (m *mockStore) addProject(p *projects.Project) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -712,3 +737,483 @@ func TestNewWithClient(t *testing.T) {
 
 // Ensure mockStore implements projects.Store interface at compile time
 var _ projects.Store = (*mockStore)(nil)
+
+// TestDefaultConfig verifies default configuration values.
+func TestDefaultConfig(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.ReconcileInterval != 30*time.Second {
+		t.Errorf("ReconcileInterval = %v, want 30s", cfg.ReconcileInterval)
+	}
+	if cfg.HealthCheckInterval != 60*time.Second {
+		t.Errorf("HealthCheckInterval = %v, want 60s", cfg.HealthCheckInterval)
+	}
+	if cfg.EnvSecretName != "env-secrets" {
+		t.Errorf("EnvSecretName = %q, want %q", cfg.EnvSecretName, "env-secrets")
+	}
+	if cfg.ResourceConfig.Namespace != "kubetty-projects" {
+		t.Errorf("ResourceConfig.Namespace = %q, want %q", cfg.ResourceConfig.Namespace, "kubetty-projects")
+	}
+	if cfg.ResourceConfig.Prefix != "kubetty-project-" {
+		t.Errorf("ResourceConfig.Prefix = %q, want %q", cfg.ResourceConfig.Prefix, "kubetty-project-")
+	}
+	if cfg.ResourceConfig.Env != "dev" {
+		t.Errorf("ResourceConfig.Env = %q, want %q", cfg.ResourceConfig.Env, "dev")
+	}
+}
+
+// TestSetStatusCallback verifies the status callback setter.
+func TestSetStatusCallback(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	ctrl.SetStatusCallback(func(project *projects.Project, newStatus projects.ProjectStatus) {
+		// Callback set - verifying it's not nil below
+	})
+
+	if ctrl.statusCallback == nil {
+		t.Error("statusCallback should not be nil after SetStatusCallback")
+	}
+}
+
+// TestController_HandleCreating_DeploymentReady verifies transition to running when deployment is ready.
+func TestController_HandleCreating_DeploymentReady(t *testing.T) {
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	project := newTestProjectWithStatus("creating-ready-test", projects.StatusCreating)
+	store.addProject(project)
+
+	// Create fake clientset with a ready deployment
+	client := fake.NewSimpleClientset()
+	ctrl := NewWithClient(cfg, store, client)
+
+	// First create the project resources
+	ctx := context.Background()
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	// Get the created deployment and update its status to ready
+	resourceName := cfg.ResourceConfig.ResourceName(project.Name)
+	deploy, err := client.AppsV1().Deployments(cfg.ResourceConfig.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get deployment: %v", err)
+	}
+
+	// Update deployment status to ready
+	deploy.Status.ReadyReplicas = 1
+	deploy.Status.AvailableReplicas = 1
+	deploy.Status.Replicas = 1
+	_, err = client.AppsV1().Deployments(cfg.ResourceConfig.Namespace).UpdateStatus(ctx, deploy, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("Failed to update deployment status: %v", err)
+	}
+
+	// Reset status tracking
+	store.statuses = []statusUpdate{}
+
+	// Call handleCreating
+	if err := ctrl.handleCreating(ctx, project); err != nil {
+		t.Fatalf("handleCreating failed: %v", err)
+	}
+
+	// Verify transition to running status
+	statuses := store.getStatuses()
+	found := false
+	for _, s := range statuses {
+		if s.status == projects.StatusRunning {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected project to transition to StatusRunning")
+	}
+}
+
+// TestController_HandleCreating_DeploymentNotReady verifies waiting state when deployment not ready.
+func TestController_HandleCreating_DeploymentNotReady(t *testing.T) {
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	project := newTestProjectWithStatus("creating-waiting-test", projects.StatusCreating)
+	store.addProject(project)
+
+	client := fake.NewSimpleClientset()
+	ctrl := NewWithClient(cfg, store, client)
+
+	// Create the project resources
+	ctx := context.Background()
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	// Deployment status remains 0 replicas (default) - not ready
+	// Reset status tracking
+	store.statuses = []statusUpdate{}
+
+	// Call handleCreating - should not error, should not transition
+	if err := ctrl.handleCreating(ctx, project); err != nil {
+		t.Fatalf("handleCreating failed: %v", err)
+	}
+
+	// Verify no transition (should stay in creating)
+	statuses := store.getStatuses()
+	for _, s := range statuses {
+		if s.status == projects.StatusRunning {
+			t.Error("Should not transition to running when deployment not ready")
+		}
+	}
+}
+
+// TestController_HandleCreating_DeploymentNotFound verifies fallback to pending when deployment missing.
+func TestController_HandleCreating_DeploymentNotFound(t *testing.T) {
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	project := newTestProjectWithStatus("creating-missing-test", projects.StatusCreating)
+	store.addProject(project)
+
+	// Create client WITHOUT creating the deployment
+	client := fake.NewSimpleClientset()
+	ctrl := NewWithClient(cfg, store, client)
+
+	ctx := context.Background()
+
+	// Call handleCreating when deployment doesn't exist
+	if err := ctrl.handleCreating(ctx, project); err != nil {
+		t.Fatalf("handleCreating failed: %v", err)
+	}
+
+	// Verify transition back to pending
+	statuses := store.getStatuses()
+	found := false
+	for _, s := range statuses {
+		if s.status == projects.StatusPending {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected project to transition back to StatusPending when deployment not found")
+	}
+}
+
+// TestController_HandleUpdating_Success verifies deployment update.
+func TestController_HandleUpdating_Success(t *testing.T) {
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	project := newTestProjectWithStatus("update-test", projects.StatusUpdating)
+	store.addProject(project)
+
+	client := fake.NewSimpleClientset()
+	ctrl := NewWithClient(cfg, store, client)
+
+	// First create the project resources
+	ctx := context.Background()
+	project.Status = projects.StatusPending
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	// Now update it
+	project.Status = projects.StatusUpdating
+	store.statuses = []statusUpdate{}
+
+	if err := ctrl.handleUpdating(ctx, project); err != nil {
+		t.Fatalf("handleUpdating failed: %v", err)
+	}
+
+	// Verify transition to creating (waiting for rollout)
+	statuses := store.getStatuses()
+	found := false
+	for _, s := range statuses {
+		if s.status == projects.StatusCreating {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected project to transition to StatusCreating after update")
+	}
+}
+
+// TestController_GetDeploymentStatus verifies deployment status retrieval.
+func TestController_GetDeploymentStatus(t *testing.T) {
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	project := newTestProjectWithStatus("status-get-test", projects.StatusRunning)
+	store.addProject(project)
+
+	client := fake.NewSimpleClientset()
+	ctrl := NewWithClient(cfg, store, client)
+
+	// First create the resources
+	ctx := context.Background()
+	project.Status = projects.StatusPending
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	// Get deployment status
+	status, err := ctrl.GetDeploymentStatus(ctx, project)
+	if err != nil {
+		t.Fatalf("GetDeploymentStatus failed: %v", err)
+	}
+
+	if !status.Exists {
+		t.Error("Expected deployment to exist")
+	}
+}
+
+// TestController_GetDeploymentStatus_NotFound verifies behavior when deployment doesn't exist.
+func TestController_GetDeploymentStatus_NotFound(t *testing.T) {
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	project := newTestProjectWithStatus("status-notfound-test", projects.StatusRunning)
+	store.addProject(project)
+
+	client := fake.NewSimpleClientset()
+	ctrl := NewWithClient(cfg, store, client)
+
+	ctx := context.Background()
+
+	// Get status when deployment doesn't exist
+	status, err := ctrl.GetDeploymentStatus(ctx, project)
+	if err != nil {
+		t.Fatalf("GetDeploymentStatus failed: %v", err)
+	}
+
+	if status.Exists {
+		t.Error("Expected deployment to not exist")
+	}
+}
+
+// TestController_GetProjectSecrets verifies secrets retrieval.
+func TestController_GetProjectSecrets(t *testing.T) {
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	project := newTestProjectWithStatus("secrets-get-test", projects.StatusRunning)
+	store.addProject(project)
+
+	client := fake.NewSimpleClientset()
+	ctrl := NewWithClient(cfg, store, client)
+
+	// First create the resources (which includes the empty env secret)
+	ctx := context.Background()
+	project.Status = projects.StatusPending
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	// Get secrets (should be empty initially)
+	secrets, err := ctrl.GetProjectSecrets(ctx, project)
+	if err != nil {
+		t.Fatalf("GetProjectSecrets failed: %v", err)
+	}
+
+	// Should be empty map since no secrets were added
+	if len(secrets) != 0 {
+		t.Errorf("Expected empty secrets map, got %d entries", len(secrets))
+	}
+}
+
+// TestController_GetProjectSecrets_NotFound verifies behavior when secret doesn't exist.
+func TestController_GetProjectSecrets_NotFound(t *testing.T) {
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	project := newTestProjectWithStatus("secrets-notfound-test", projects.StatusRunning)
+	store.addProject(project)
+
+	client := fake.NewSimpleClientset()
+	ctrl := NewWithClient(cfg, store, client)
+
+	ctx := context.Background()
+
+	// Get secrets when secret doesn't exist
+	secrets, err := ctrl.GetProjectSecrets(ctx, project)
+	if err != nil {
+		t.Fatalf("GetProjectSecrets should not error for missing secret, got: %v", err)
+	}
+
+	// Should return empty map
+	if len(secrets) != 0 {
+		t.Errorf("Expected empty secrets map for missing secret, got %d entries", len(secrets))
+	}
+}
+
+// TestController_RestartProject verifies deployment restart.
+func TestController_RestartProject(t *testing.T) {
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	project := newTestProjectWithStatus("restart-test", projects.StatusRunning)
+	store.addProject(project)
+
+	client := fake.NewSimpleClientset()
+	ctrl := NewWithClient(cfg, store, client)
+
+	// First create the resources
+	ctx := context.Background()
+	project.Status = projects.StatusPending
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	// Restart the project
+	store.statuses = []statusUpdate{}
+	if err := ctrl.RestartProject(ctx, project); err != nil {
+		t.Fatalf("RestartProject failed: %v", err)
+	}
+
+	// Verify transition to creating (waiting for restart)
+	statuses := store.getStatuses()
+	found := false
+	for _, s := range statuses {
+		if s.status == projects.StatusCreating && s.message == "Restarting deployment" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected project to transition to StatusCreating with restart message")
+	}
+}
+
+// TestController_RestartProject_NotFound verifies error when deployment doesn't exist.
+func TestController_RestartProject_NotFound(t *testing.T) {
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	project := newTestProjectWithStatus("restart-notfound-test", projects.StatusRunning)
+	store.addProject(project)
+
+	client := fake.NewSimpleClientset()
+	ctrl := NewWithClient(cfg, store, client)
+
+	ctx := context.Background()
+
+	// Restart when deployment doesn't exist
+	err := ctrl.RestartProject(ctx, project)
+	if err == nil {
+		t.Error("Expected error when restarting non-existent deployment")
+	}
+}
+
+// TestDeploymentStatus_Fields verifies DeploymentStatus struct.
+func TestDeploymentStatus_Fields(t *testing.T) {
+	status := DeploymentStatus{
+		Exists:            true,
+		Replicas:          3,
+		ReadyReplicas:     2,
+		AvailableReplicas: 2,
+		Pods: []PodStatus{
+			{Name: "pod-1", Phase: "Running", PodIP: "10.0.0.1", Ready: true},
+			{Name: "pod-2", Phase: "Pending", PodIP: "", Ready: false, Reason: "ImagePullBackOff"},
+		},
+	}
+
+	if !status.Exists {
+		t.Error("Exists should be true")
+	}
+	if status.Replicas != 3 {
+		t.Errorf("Replicas = %d, want 3", status.Replicas)
+	}
+	if status.ReadyReplicas != 2 {
+		t.Errorf("ReadyReplicas = %d, want 2", status.ReadyReplicas)
+	}
+	if len(status.Pods) != 2 {
+		t.Errorf("Pods count = %d, want 2", len(status.Pods))
+	}
+	if status.Pods[0].Name != "pod-1" {
+		t.Errorf("Pod 0 name = %q, want %q", status.Pods[0].Name, "pod-1")
+	}
+	if status.Pods[1].Reason != "ImagePullBackOff" {
+		t.Errorf("Pod 1 reason = %q, want %q", status.Pods[1].Reason, "ImagePullBackOff")
+	}
+}
+
+// TestPodStatus_Fields verifies PodStatus struct.
+func TestPodStatus_Fields(t *testing.T) {
+	ps := PodStatus{
+		Name:   "test-pod",
+		Phase:  "Running",
+		PodIP:  "10.0.0.5",
+		Ready:  true,
+		Reason: "",
+	}
+
+	if ps.Name != "test-pod" {
+		t.Errorf("Name = %q, want %q", ps.Name, "test-pod")
+	}
+	if ps.Phase != "Running" {
+		t.Errorf("Phase = %q, want %q", ps.Phase, "Running")
+	}
+	if ps.PodIP != "10.0.0.5" {
+		t.Errorf("PodIP = %q, want %q", ps.PodIP, "10.0.0.5")
+	}
+	if !ps.Ready {
+		t.Error("Ready should be true")
+	}
+}
+
+// TestController_HandleCreating_StatusCallback verifies callback is called on status change.
+func TestController_HandleCreating_StatusCallback(t *testing.T) {
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	project := newTestProjectWithStatus("callback-test", projects.StatusCreating)
+	store.addProject(project)
+
+	client := fake.NewSimpleClientset()
+	ctrl := NewWithClient(cfg, store, client)
+
+	// Set up callback
+	var callbackProject *projects.Project
+	var callbackStatus projects.ProjectStatus
+	ctrl.SetStatusCallback(func(p *projects.Project, status projects.ProjectStatus) {
+		callbackProject = p
+		callbackStatus = status
+	})
+
+	// First create the project resources
+	ctx := context.Background()
+	project.Status = projects.StatusPending
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	// Update deployment to ready state
+	resourceName := cfg.ResourceConfig.ResourceName(project.Name)
+	deploy, err := client.AppsV1().Deployments(cfg.ResourceConfig.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get deployment: %v", err)
+	}
+	deploy.Status.ReadyReplicas = 1
+	deploy.Status.AvailableReplicas = 1
+	deploy.Status.Replicas = 1
+	client.AppsV1().Deployments(cfg.ResourceConfig.Namespace).UpdateStatus(ctx, deploy, metav1.UpdateOptions{})
+
+	// Call handleCreating
+	project.Status = projects.StatusCreating
+	if err := ctrl.handleCreating(ctx, project); err != nil {
+		t.Fatalf("handleCreating failed: %v", err)
+	}
+
+	// Verify callback was called
+	if callbackProject == nil {
+		t.Error("Callback should have been called")
+	}
+	if callbackStatus != projects.StatusRunning {
+		t.Errorf("Callback status = %s, want %s", callbackStatus, projects.StatusRunning)
+	}
+}

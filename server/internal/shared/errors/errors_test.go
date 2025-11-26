@@ -349,3 +349,203 @@ func TestSpecialCharactersInMessages(t *testing.T) {
 		})
 	}
 }
+
+// TestWriteError_InvalidStatusCode verifies that WriteError handles invalid
+// status codes by falling back to 500 Internal Server Error.
+func TestWriteError_InvalidStatusCode(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		wantStatus int
+		wantError  string
+	}{
+		{
+			name:       "status code below 100",
+			status:     50,
+			wantStatus: http.StatusInternalServerError,
+			wantError:  CodeInternalServerError,
+		},
+		{
+			name:       "status code above 599",
+			status:     600,
+			wantStatus: http.StatusInternalServerError,
+			wantError:  CodeInternalServerError,
+		},
+		{
+			name:       "status code zero",
+			status:     0,
+			wantStatus: http.StatusInternalServerError,
+			wantError:  CodeInternalServerError,
+		},
+		{
+			name:       "status code negative",
+			status:     -100,
+			wantStatus: http.StatusInternalServerError,
+			wantError:  CodeInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			errResp := ErrorResponse{
+				Status:  tt.status,
+				Error:   "custom_error",
+				Message: "custom message",
+				Details: "custom details",
+			}
+
+			err := WriteError(w, errResp)
+			if err != nil {
+				t.Fatalf("WriteError() error = %v, want nil", err)
+			}
+
+			// Should fallback to 500
+			if w.Code != tt.wantStatus {
+				t.Errorf("HTTP status = %d, want %d", w.Code, tt.wantStatus)
+			}
+
+			var got ErrorResponse
+			if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+				t.Fatalf("Failed to decode response: %v", err)
+			}
+
+			if got.Status != tt.wantStatus {
+				t.Errorf("Response status = %d, want %d", got.Status, tt.wantStatus)
+			}
+			if got.Error != tt.wantError {
+				t.Errorf("Response error = %q, want %q", got.Error, tt.wantError)
+			}
+		})
+	}
+}
+
+// TestWriteError_ContentTypeAlreadySet verifies that WriteError returns an error
+// when Content-Type is already set to a non-JSON value.
+func TestWriteError_ContentTypeAlreadySet(t *testing.T) {
+	w := httptest.NewRecorder()
+	// Set a non-JSON Content-Type first
+	w.Header().Set("Content-Type", "text/html")
+
+	errResp := BadRequest("test message", "")
+
+	err := WriteError(w, errResp)
+	if err == nil {
+		t.Fatal("WriteError() should return error when Content-Type already set to non-JSON")
+	}
+
+	if err.Error() != "response already started with Content-Type: text/html" {
+		t.Errorf("Error message = %q, unexpected error message", err.Error())
+	}
+}
+
+// TestWriteError_ContentTypeAlreadyJSON verifies that WriteError does not error
+// when Content-Type is already set to application/json.
+func TestWriteError_ContentTypeAlreadyJSON(t *testing.T) {
+	w := httptest.NewRecorder()
+	// Set JSON Content-Type first - this should be allowed
+	w.Header().Set("Content-Type", "application/json")
+
+	errResp := BadRequest("test message", "")
+
+	err := WriteError(w, errResp)
+	if err != nil {
+		t.Fatalf("WriteError() should succeed when Content-Type is already JSON, got error = %v", err)
+	}
+}
+
+// TestErrorResponseStruct verifies ErrorResponse struct fields directly.
+func TestErrorResponseStruct(t *testing.T) {
+	resp := ErrorResponse{
+		Status:  400,
+		Error:   "bad_request",
+		Message: "invalid input",
+		Details: "field required",
+	}
+
+	if resp.Status != 400 {
+		t.Errorf("Status = %d, want 400", resp.Status)
+	}
+	if resp.Error != "bad_request" {
+		t.Errorf("Error = %q, want 'bad_request'", resp.Error)
+	}
+	if resp.Message != "invalid input" {
+		t.Errorf("Message = %q, want 'invalid input'", resp.Message)
+	}
+	if resp.Details != "field required" {
+		t.Errorf("Details = %q, want 'field required'", resp.Details)
+	}
+}
+
+// TestErrorResponseZeroValue verifies ErrorResponse zero value behavior.
+func TestErrorResponseZeroValue(t *testing.T) {
+	var resp ErrorResponse
+
+	if resp.Status != 0 {
+		t.Errorf("Zero Status = %d, want 0", resp.Status)
+	}
+	if resp.Error != "" {
+		t.Errorf("Zero Error = %q, want empty", resp.Error)
+	}
+	if resp.Message != "" {
+		t.Errorf("Zero Message = %q, want empty", resp.Message)
+	}
+	if resp.Details != "" {
+		t.Errorf("Zero Details = %q, want empty", resp.Details)
+	}
+}
+
+// TestErrorCodes verifies all error code constants are defined correctly.
+func TestErrorCodes(t *testing.T) {
+	codes := map[string]string{
+		"CodeBadRequest":          CodeBadRequest,
+		"CodeUnauthorized":        CodeUnauthorized,
+		"CodeForbidden":           CodeForbidden,
+		"CodeNotFound":            CodeNotFound,
+		"CodeConflict":            CodeConflict,
+		"CodeValidationError":     CodeValidationError,
+		"CodeRateLimitExceeded":   CodeRateLimitExceeded,
+		"CodeInternalServerError": CodeInternalServerError,
+		"CodeServiceUnavailable":  CodeServiceUnavailable,
+	}
+
+	// Verify all codes are non-empty
+	for name, code := range codes {
+		if code == "" {
+			t.Errorf("%s is empty", name)
+		}
+	}
+
+	// Verify codes are unique
+	seen := make(map[string]string)
+	for name, code := range codes {
+		if prev, exists := seen[code]; exists {
+			t.Errorf("Duplicate code %q: %s and %s", code, prev, name)
+		}
+		seen[code] = name
+	}
+}
+
+// TestErrorCodesSnakeCase verifies all error codes follow snake_case convention.
+func TestErrorCodesSnakeCase(t *testing.T) {
+	codes := []string{
+		CodeBadRequest,
+		CodeUnauthorized,
+		CodeForbidden,
+		CodeNotFound,
+		CodeConflict,
+		CodeValidationError,
+		CodeRateLimitExceeded,
+		CodeInternalServerError,
+		CodeServiceUnavailable,
+	}
+
+	for _, code := range codes {
+		// Snake case should only contain lowercase letters and underscores
+		for _, c := range code {
+			if !((c >= 'a' && c <= 'z') || c == '_') {
+				t.Errorf("Code %q contains invalid character %q (should be snake_case)", code, c)
+			}
+		}
+	}
+}

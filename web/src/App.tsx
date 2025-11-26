@@ -8,6 +8,7 @@ import ProfileModal from "./components/ProfileModal";
 import PasswordChangeModal from "./components/PasswordChangeModal";
 import LogoutConfirmDialog from "./components/LogoutConfirmDialog";
 import AdminProjectList from "./components/AdminProjectList";
+import AdminDashboard from "./components/AdminDashboard";
 import { useAuth } from "./contexts/AuthContext";
 import { GatewayTab, ProjectInfo, ProjectsResponse, TabEvent } from "./types";
 import { parseErrorResponse } from "./utils/errorParser";
@@ -30,6 +31,7 @@ const App = () => {
   const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
   const [logoutDialogOpen, setLogoutDialogOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
+  const [dashboardOpen, setDashboardOpen] = useState(false);
   const [eventRetry, setEventRetry] = useState(0);
   const authenticated = authState === "authenticated";
 
@@ -281,9 +283,14 @@ const App = () => {
       {authenticated && (
         <div className="session-info">
           {showGatewayUI && (
-            <button className="admin-link" onClick={() => setAdminOpen(true)}>
-              Admin
-            </button>
+            <>
+              <button className="admin-link" onClick={() => setDashboardOpen(true)}>
+                Dashboard
+              </button>
+              <button className="admin-link" onClick={() => setAdminOpen(true)}>
+                Projects
+              </button>
+            </>
           )}
           {authUser && (
             <button
@@ -394,6 +401,9 @@ const App = () => {
       )}
       {adminOpen && (
         <AdminProjectList onClose={() => setAdminOpen(false)} />
+      )}
+      {dashboardOpen && (
+        <AdminDashboard onClose={() => setDashboardOpen(false)} />
       )}
     </div>
   );

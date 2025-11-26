@@ -234,3 +234,73 @@ export interface UpgradeInfoResponse {
 export interface UpgradeProjectRequest {
   imageTag: string;
 }
+
+// Dashboard Types
+export interface DashboardSummary {
+  activeConnections: number;
+  projects: {
+    running: number;
+    failed: number;
+    total: number;
+  };
+  tabs: {
+    active: number;
+    total: number;
+  };
+  last24h: {
+    connections: number;
+    disconnects: number;
+    errors: number;
+    errorRate: number;
+  };
+}
+
+export interface ConnectionDataPoint {
+  timestamp: string;
+  active: number;
+  connects: number;
+  disconnects: number;
+}
+
+export interface DashboardMetrics {
+  period: string;
+  connectionTimeseries: ConnectionDataPoint[];
+  disconnectsByReason: Record<string, number>;
+  flowControlPauses: number;
+  writeErrors: number;
+}
+
+export interface DashboardError {
+  type: 'disconnect' | 'project_failed' | 'tab_error';
+  reason: string;
+  projectId: string;
+  projectName: string;
+  tabId?: string;
+  timestamp: string;
+  details?: string;
+}
+
+export interface DashboardErrorsResponse {
+  errors: DashboardError[];
+  total: number;
+}
+
+export interface HourlyCount {
+  hour: string;
+  count: number;
+}
+
+export interface ProjectUsage {
+  projectId: string;
+  name: string;
+  displayName: string;
+  connections: number;
+}
+
+export interface DashboardUsage {
+  period: string;
+  hourlyConnections: HourlyCount[];
+  topProjects: ProjectUsage[];
+  peakHour: string;
+  avgSessionDuration: number;
+}

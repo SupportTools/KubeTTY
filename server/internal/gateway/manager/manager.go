@@ -12,8 +12,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
+	"k8s.io/client-go/rest"
 
+	"github.com/supporttools/KubeTTY/server/internal/config"
 	gatewayconfig "github.com/supporttools/KubeTTY/server/internal/gateway/config"
+	"github.com/supporttools/KubeTTY/server/internal/gateway/exec"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/health"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/metrics"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/relay"
@@ -39,13 +42,15 @@ type Manager struct {
 	idleWarningBefore time.Duration                    // Warning time before idle timeout
 	stopIdleChecker   chan struct{}                    // Signal to stop idle checker goroutine
 	healthChecker     *health.Checker
-	metricsCollector  *metrics.Collector // Resource metrics collector
-	metricsEnabled    bool               // Whether metrics collection is enabled
-	metricsInterval   time.Duration      // Metrics collection interval
+	metricsCollector  *metrics.Collector  // Resource metrics collector
+	metricsEnabled    bool                // Whether metrics collection is enabled
+	metricsInterval   time.Duration       // Metrics collection interval
+	execMode          config.ExecModeType // Exec mode: "websocket" or "exec"
+	restConfig        *rest.Config        // Kubernetes rest config for exec mode
 }
 
 type tabEntry struct {
-	relay         *relay.Relay
+	proxier       relay.Proxier // Can be either *relay.Relay or *exec.ExecRelay
 	clientID      string
 	project       gatewayconfig.Project
 	created       time.Time
@@ -60,6 +65,8 @@ type ManagerConfig struct {
 	IdleTimeout     time.Duration
 	MetricsEnabled  bool
 	MetricsInterval time.Duration
+	ExecMode        config.ExecModeType // "websocket" (default) or "exec"
+	RestConfig      *rest.Config        // Required when ExecMode is "exec"
 }
 
 // DefaultManagerConfig returns default manager configuration.
@@ -96,6 +103,12 @@ func NewWithConfig(cat gatewayconfig.Catalog, store tabs.Store, cfg ManagerConfi
 		cfg.IdleTimeout = 10 * time.Minute
 	}
 
+	// Default to websocket mode if not specified
+	execMode := cfg.ExecMode
+	if execMode == "" {
+		execMode = config.ExecModeWebSocket
+	}
+
 	return &Manager{
 		projects:          projects,
 		store:             store,
@@ -107,6 +120,8 @@ func NewWithConfig(cat gatewayconfig.Catalog, store tabs.Store, cfg ManagerConfi
 		healthChecker:     health.NewChecker(cat.Projects),
 		metricsEnabled:    cfg.MetricsEnabled,
 		metricsInterval:   cfg.MetricsInterval,
+		execMode:          execMode,
+		restConfig:        cfg.RestConfig,
 	}
 }
 
@@ -156,26 +171,21 @@ func (m *Manager) HasProject(projectID string) bool {
 }
 
 // CreateTab allocates metadata and starts a relay (if not already running).
+// Uses mutex to ensure atomic limit check and tab creation, preventing race conditions.
 func (m *Manager) CreateTab(ctx context.Context, projectID, clientID string) (tabs.Tab, error) {
+	m.mu.Lock()
+
 	project, ok := m.projects[projectID]
 	if !ok {
+		m.mu.Unlock()
 		return tabs.Tab{}, fmt.Errorf("unknown project %q", projectID)
 	}
 
-	// Enforce per-client tab limit if configured (0 means unlimited)
-	// Note: There is a small race window between count check and tab creation
-	// where concurrent requests could exceed the limit. This is acceptable given:
-	// - Rare occurrence (same client creating multiple tabs simultaneously)
-	// - Small window (milliseconds)
-	// - Soft limit nature (advisory, not security-critical)
-	// To fully prevent this would require database-level constraints or
-	// SELECT FOR UPDATE transactions, adding complexity for minimal benefit.
+	// Enforce per-client tab limit using in-memory count (atomic with creation)
 	if project.Limits.MaxTabsPerClient > 0 {
-		count, err := m.store.CountByClientAndProject(ctx, clientID, projectID)
-		if err != nil {
-			return tabs.Tab{}, fmt.Errorf("check tab limit: %w", err)
-		}
+		count := m.countTabsForClientProjectLocked(clientID, projectID)
 		if count >= project.Limits.MaxTabsPerClient {
+			m.mu.Unlock()
 			return tabs.Tab{}, &TabLimitExceededError{
 				ProjectID: projectID,
 				Limit:     project.Limits.MaxTabsPerClient,
@@ -185,9 +195,8 @@ func (m *Manager) CreateTab(ctx context.Context, projectID, clientID string) (ta
 
 	id := uuid.NewString()
 	e := m.newEntry(project, clientID, time.Now())
-
-	m.mu.Lock()
 	m.tabs[id] = e
+
 	m.mu.Unlock()
 
 	tab := tabs.Tab{
@@ -199,11 +208,30 @@ func (m *Manager) CreateTab(ctx context.Context, projectID, clientID string) (ta
 		UpdatedAt:     e.created,
 		DownstreamURI: &e.downstreamURI,
 	}
+
+	// Persist to database - if this fails, we need to clean up
 	if err := m.store.Create(ctx, tab); err != nil {
+		// Remove from in-memory map
+		m.mu.Lock()
+		delete(m.tabs, id)
+		m.mu.Unlock()
 		return tabs.Tab{}, err
 	}
+
 	m.startTracking(id, e)
 	return tab, nil
+}
+
+// countTabsForClientProjectLocked counts in-memory tabs for a client/project.
+// MUST be called with mutex held.
+func (m *Manager) countTabsForClientProjectLocked(clientID, projectID string) int {
+	count := 0
+	for _, entry := range m.tabs {
+		if entry.clientID == clientID && entry.project.ID == projectID {
+			count++
+		}
+	}
+	return count
 }
 
 // Attach proxies between the caller WebSocket and the downstream relay.
@@ -246,7 +274,7 @@ func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string,
 	m.mu.Unlock()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	return e.relay.Proxy(ctx, upstream)
+	return e.proxier.Proxy(ctx, upstream)
 }
 
 // CloseTab tears down the relay and removes persisted metadata.
@@ -261,7 +289,7 @@ func (m *Manager) CloseTab(ctx context.Context, tabID string) error {
 		if e.cancel != nil {
 			e.cancel()
 		}
-		_ = e.relay.Close()
+		_ = e.proxier.Close()
 		// Unregister from metrics collection
 		m.unregisterTabForMetrics(tabID)
 	}
@@ -361,9 +389,36 @@ func (m *Manager) newEntry(project gatewayconfig.Project, clientID string, creat
 		Path:   "/ws",
 	}
 	uri := endpoint.String()
-	rel := relay.New(relay.Config{ProjectID: project.ID, Endpoint: endpoint, Dialer: m.dialer, Headers: http.Header{"X-Kubetty-Project": []string{project.ID}}, DownstreamURI: uri})
+
+	var proxier relay.Proxier
+	if m.execMode == config.ExecModeExec && m.restConfig != nil {
+		// Use kubectl exec mode
+		log.WithFields(log.Fields{
+			"project_id": project.ID,
+			"namespace":  project.Namespace,
+			"pod":        project.Service, // In exec mode, service name is treated as pod selector prefix
+		}).Info("gateway/manager: creating exec relay for tab")
+
+		proxier = exec.NewExecRelay(m.restConfig, exec.RelayConfig{
+			Namespace:  project.Namespace,
+			PodName:    project.Service, // Pod name will be resolved based on service
+			Container:  "",              // Use default container
+			Command:    []string{"/bin/bash", "-l"},
+			BufferSize: 64 * 1024,
+		})
+	} else {
+		// Use WebSocket relay mode (default)
+		proxier = relay.New(relay.Config{
+			ProjectID:     project.ID,
+			Endpoint:      endpoint,
+			Dialer:        m.dialer,
+			Headers:       http.Header{"X-Kubetty-Project": []string{project.ID}},
+			DownstreamURI: uri,
+		})
+	}
+
 	return &tabEntry{
-		relay:         rel,
+		proxier:       proxier,
 		clientID:      clientID,
 		project:       project,
 		created:       created,
@@ -376,8 +431,8 @@ func (m *Manager) newEntry(project gatewayconfig.Project, clientID string, creat
 func (m *Manager) startTracking(tabID string, entry *tabEntry) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entry.cancel = cancel
-	go m.watchStatus(ctx, tabID, entry, entry.relay.Subscribe())
-	go m.watchActivity(ctx, tabID, entry, entry.relay.ActivityChan())
+	go m.watchStatus(ctx, tabID, entry, entry.proxier.Subscribe())
+	go m.watchActivity(ctx, tabID, entry, entry.proxier.ActivityChan())
 
 	// Register tab for metrics collection
 	m.registerTabForMetrics(tabID, entry)
@@ -635,12 +690,27 @@ func (m *Manager) StartHealthChecker() {
 }
 
 // checkIdleTabs scans all tabs and handles idle warnings and closures.
+// Uses snapshot approach to avoid map iteration panic when closing tabs.
 func (m *Manager) checkIdleTabs(ctx context.Context) {
+	// Snapshot tab IDs to avoid iterating while modifying
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	tabIDs := make([]string, 0, len(m.tabs))
+	for tabID := range m.tabs {
+		tabIDs = append(tabIDs, tabID)
+	}
+	m.mu.Unlock()
 
 	now := time.Now()
-	for tabID, entry := range m.tabs {
+	for _, tabID := range tabIDs {
+		// Re-acquire lock to check each tab individually
+		m.mu.Lock()
+		entry, exists := m.tabs[tabID]
+		if !exists {
+			// Tab was deleted by another goroutine, skip
+			m.mu.Unlock()
+			continue
+		}
+
 		idleDuration := now.Sub(entry.lastActivity)
 
 		// Tab has exceeded idle timeout - close it
@@ -651,7 +721,9 @@ func (m *Manager) checkIdleTabs(ctx context.Context) {
 				"idle_duration": idleDuration.String(),
 				"timeout":       m.idleTimeout.String(),
 			}).Info("gateway/manager: closing idle tab")
-			m.closeIdleTab(ctx, tabID, entry)
+			// closeIdleTabLocked expects mutex to be held and will handle unlock/relock
+			m.closeIdleTabLocked(ctx, tabID, entry)
+			m.mu.Unlock()
 			continue
 		}
 
@@ -668,21 +740,24 @@ func (m *Manager) checkIdleTabs(ctx context.Context) {
 			m.sendIdleWarning(tabID, entry, remaining)
 			entry.warned = true
 		}
+		m.mu.Unlock()
 	}
 }
 
-// closeIdleTab closes a tab due to idle timeout (called with mutex held).
-// Releases mutex before calling external methods to avoid deadlock.
-func (m *Manager) closeIdleTab(ctx context.Context, tabID string, entry *tabEntry) {
+// closeIdleTabLocked closes a tab due to idle timeout.
+// MUST be called with mutex held. Releases mutex during cleanup to avoid deadlock,
+// but does NOT re-acquire it - caller is responsible for releasing.
+func (m *Manager) closeIdleTabLocked(ctx context.Context, tabID string, entry *tabEntry) {
 	// Extract data needed for cleanup while mutex is held
 	delete(m.tabs, tabID)
 	cancel := entry.cancel
-	relay := entry.relay
+	proxier := entry.proxier
 	project := entry.project
 	clientID := entry.clientID
 	created := entry.created
 	downstreamURI := entry.downstreamURI
 	statusCb := m.statusCb
+	metricsCollector := m.metricsCollector
 
 	// Release mutex before calling external methods to avoid deadlock
 	m.mu.Unlock()
@@ -692,8 +767,13 @@ func (m *Manager) closeIdleTab(ctx context.Context, tabID string, entry *tabEntr
 		cancel()
 	}
 
-	// Close relay (may acquire relay mutex)
-	_ = relay.Close()
+	// Close proxier (may acquire relay mutex)
+	_ = proxier.Close()
+
+	// Unregister from metrics collection
+	if metricsCollector != nil {
+		metricsCollector.UnregisterTab(tabID)
+	}
 
 	// Delete from database (spawn goroutine to avoid blocking)
 	go func() {
@@ -722,7 +802,7 @@ func (m *Manager) closeIdleTab(ctx context.Context, tabID string, entry *tabEntr
 		statusCb(payload)
 	}
 
-	// Re-acquire mutex for caller
+	// Re-acquire mutex so caller can release it uniformly
 	m.mu.Lock()
 }
 

@@ -10,6 +10,16 @@ import (
 	sharedconfig "github.com/supporttools/KubeTTY/server/internal/shared/config"
 )
 
+// ExecModeType defines how the gateway connects to project pods.
+type ExecModeType string
+
+const (
+	// ExecModeWebSocket uses WebSocket relay to project pods (default, legacy)
+	ExecModeWebSocket ExecModeType = "websocket"
+	// ExecModeExec uses kubectl exec via Kubernetes remotecommand API
+	ExecModeExec ExecModeType = "exec"
+)
+
 // GatewayConfig holds configuration specific to the gateway component.
 type GatewayConfig struct {
 	CommonConfig
@@ -30,6 +40,10 @@ type GatewayConfig struct {
 	Controller ControllerConfig
 	// Recommended image tag for project upgrades (default: "latest")
 	RecommendedImageTag string
+	// ExecMode controls how the gateway connects to project pods (default: "websocket")
+	// - "websocket": relay WebSocket connections to project pods (legacy)
+	// - "exec": use kubectl exec via Kubernetes remotecommand API (more stable)
+	ExecMode ExecModeType
 }
 
 // ControllerConfig holds configuration for the single-namespace project controller.
@@ -94,6 +108,7 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 			ImagePullSecrets:    parseImagePullSecrets(sharedconfig.GetEnv("IMAGE_PULL_SECRETS", "harbor-supporttools")),
 		},
 		RecommendedImageTag: sharedconfig.GetEnv("RECOMMENDED_IMAGE_TAG", "latest"),
+		ExecMode:            parseExecMode(sharedconfig.GetEnv("KUBETTY_EXEC_MODE", "websocket")),
 	}
 
 	// Load project catalog if path is provided
@@ -162,4 +177,17 @@ func parseImagePullSecrets(s string) []string {
 		}
 	}
 	return result
+}
+
+// parseExecMode parses the exec mode string and returns the appropriate ExecModeType.
+// Defaults to ExecModeWebSocket for unrecognized values.
+func parseExecMode(s string) ExecModeType {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "exec", "kubectl":
+		return ExecModeExec
+	case "websocket", "ws", "":
+		return ExecModeWebSocket
+	default:
+		return ExecModeWebSocket
+	}
 }

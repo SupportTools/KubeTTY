@@ -545,3 +545,436 @@ func TestControllerConfig_ParseEnvironment(t *testing.T) {
 		})
 	}
 }
+
+// ---- ExecMode tests ----
+
+func TestExecModeConstants(t *testing.T) {
+	if ExecModeWebSocket != "websocket" {
+		t.Errorf("ExecModeWebSocket = %q, want %q", ExecModeWebSocket, "websocket")
+	}
+	if ExecModeExec != "exec" {
+		t.Errorf("ExecModeExec = %q, want %q", ExecModeExec, "exec")
+	}
+}
+
+func TestParseExecMode(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected ExecModeType
+	}{
+		{"exec", ExecModeExec},
+		{"EXEC", ExecModeExec},
+		{"Exec", ExecModeExec},
+		{"kubectl", ExecModeExec},
+		{"KUBECTL", ExecModeExec},
+		{"websocket", ExecModeWebSocket},
+		{"WEBSOCKET", ExecModeWebSocket},
+		{"ws", ExecModeWebSocket},
+		{"WS", ExecModeWebSocket},
+		{"", ExecModeWebSocket},
+		{"unknown", ExecModeWebSocket},
+		{"  exec  ", ExecModeExec},
+		{"  websocket  ", ExecModeWebSocket},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := parseExecMode(tt.input)
+			if result != tt.expected {
+				t.Errorf("parseExecMode(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+// ---- parseImagePullSecrets tests ----
+
+func TestParseImagePullSecrets(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "empty string",
+			input:    "",
+			expected: nil,
+		},
+		{
+			name:     "single secret",
+			input:    "harbor-supporttools",
+			expected: []string{"harbor-supporttools"},
+		},
+		{
+			name:     "multiple secrets",
+			input:    "harbor-supporttools,docker-registry,gcr-secret",
+			expected: []string{"harbor-supporttools", "docker-registry", "gcr-secret"},
+		},
+		{
+			name:     "secrets with spaces",
+			input:    "  secret1  ,  secret2  ,  secret3  ",
+			expected: []string{"secret1", "secret2", "secret3"},
+		},
+		{
+			name:     "empty entries filtered",
+			input:    "secret1,,secret2,",
+			expected: []string{"secret1", "secret2"},
+		},
+		{
+			name:     "only commas",
+			input:    ",,,",
+			expected: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseImagePullSecrets(tt.input)
+			if tt.expected == nil {
+				if result != nil {
+					t.Errorf("parseImagePullSecrets(%q) = %v, want nil", tt.input, result)
+				}
+				return
+			}
+			if len(result) != len(tt.expected) {
+				t.Errorf("parseImagePullSecrets(%q) length = %d, want %d", tt.input, len(result), len(tt.expected))
+				return
+			}
+			for i, v := range result {
+				if v != tt.expected[i] {
+					t.Errorf("parseImagePullSecrets(%q)[%d] = %q, want %q", tt.input, i, v, tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+// ---- Metrics config tests ----
+
+func TestLoadGatewayConfig_MetricsConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		envVars  map[string]string
+		wantErr  bool
+		validate func(*testing.T, GatewayConfig)
+	}{
+		{
+			name: "metrics enabled by default",
+			envVars: map[string]string{
+				"SESSION_ID":    "test-session",
+				"CNPG_HOST":     "localhost",
+				"CNPG_DATABASE": "kubetty",
+				"CNPG_USER":     "user",
+				"CNPG_PASSWORD": "pass",
+			},
+			wantErr: false,
+			validate: func(t *testing.T, cfg GatewayConfig) {
+				if !cfg.MetricsEnabled {
+					t.Error("MetricsEnabled = false, want true (default)")
+				}
+				if cfg.MetricsInterval != 15*time.Second {
+					t.Errorf("MetricsInterval = %v, want 15s (default)", cfg.MetricsInterval)
+				}
+			},
+		},
+		{
+			name: "metrics disabled explicitly",
+			envVars: map[string]string{
+				"SESSION_ID":      "test-session",
+				"CNPG_HOST":       "localhost",
+				"CNPG_DATABASE":   "kubetty",
+				"CNPG_USER":       "user",
+				"CNPG_PASSWORD":   "pass",
+				"METRICS_ENABLED": "false",
+			},
+			wantErr: false,
+			validate: func(t *testing.T, cfg GatewayConfig) {
+				if cfg.MetricsEnabled {
+					t.Error("MetricsEnabled = true, want false")
+				}
+			},
+		},
+		{
+			name: "custom metrics interval",
+			envVars: map[string]string{
+				"SESSION_ID":       "test-session",
+				"CNPG_HOST":        "localhost",
+				"CNPG_DATABASE":    "kubetty",
+				"CNPG_USER":        "user",
+				"CNPG_PASSWORD":    "pass",
+				"METRICS_INTERVAL": "30s",
+			},
+			wantErr: false,
+			validate: func(t *testing.T, cfg GatewayConfig) {
+				if cfg.MetricsInterval != 30*time.Second {
+					t.Errorf("MetricsInterval = %v, want 30s", cfg.MetricsInterval)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Clearenv()
+
+			for key, val := range tt.envVars {
+				os.Setenv(key, val)
+			}
+
+			cfg, err := LoadGatewayConfig()
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("LoadGatewayConfig() expected error, got nil")
+					return
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("LoadGatewayConfig() unexpected error = %v", err)
+				return
+			}
+
+			if tt.validate != nil {
+				tt.validate(t, cfg)
+			}
+		})
+	}
+}
+
+// ---- ExecMode config tests ----
+
+func TestLoadGatewayConfig_ExecMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		envVars  map[string]string
+		wantMode ExecModeType
+	}{
+		{
+			name: "default is websocket",
+			envVars: map[string]string{
+				"SESSION_ID":    "test-session",
+				"CNPG_HOST":     "localhost",
+				"CNPG_DATABASE": "kubetty",
+				"CNPG_USER":     "user",
+				"CNPG_PASSWORD": "pass",
+			},
+			wantMode: ExecModeWebSocket,
+		},
+		{
+			name: "explicit websocket",
+			envVars: map[string]string{
+				"SESSION_ID":        "test-session",
+				"CNPG_HOST":         "localhost",
+				"CNPG_DATABASE":     "kubetty",
+				"CNPG_USER":         "user",
+				"CNPG_PASSWORD":     "pass",
+				"KUBETTY_EXEC_MODE": "websocket",
+			},
+			wantMode: ExecModeWebSocket,
+		},
+		{
+			name: "exec mode",
+			envVars: map[string]string{
+				"SESSION_ID":        "test-session",
+				"CNPG_HOST":         "localhost",
+				"CNPG_DATABASE":     "kubetty",
+				"CNPG_USER":         "user",
+				"CNPG_PASSWORD":     "pass",
+				"KUBETTY_EXEC_MODE": "exec",
+			},
+			wantMode: ExecModeExec,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Clearenv()
+
+			for key, val := range tt.envVars {
+				os.Setenv(key, val)
+			}
+
+			cfg, err := LoadGatewayConfig()
+			if err != nil {
+				t.Fatalf("LoadGatewayConfig() error = %v", err)
+			}
+
+			if cfg.ExecMode != tt.wantMode {
+				t.Errorf("ExecMode = %q, want %q", cfg.ExecMode, tt.wantMode)
+			}
+		})
+	}
+}
+
+// ---- RecommendedImageTag tests ----
+
+func TestLoadGatewayConfig_RecommendedImageTag(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVars map[string]string
+		want    string
+	}{
+		{
+			name: "default is latest",
+			envVars: map[string]string{
+				"SESSION_ID":    "test-session",
+				"CNPG_HOST":     "localhost",
+				"CNPG_DATABASE": "kubetty",
+				"CNPG_USER":     "user",
+				"CNPG_PASSWORD": "pass",
+			},
+			want: "latest",
+		},
+		{
+			name: "custom tag",
+			envVars: map[string]string{
+				"SESSION_ID":            "test-session",
+				"CNPG_HOST":             "localhost",
+				"CNPG_DATABASE":         "kubetty",
+				"CNPG_USER":             "user",
+				"CNPG_PASSWORD":         "pass",
+				"RECOMMENDED_IMAGE_TAG": "v1.2.3",
+			},
+			want: "v1.2.3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Clearenv()
+
+			for key, val := range tt.envVars {
+				os.Setenv(key, val)
+			}
+
+			cfg, err := LoadGatewayConfig()
+			if err != nil {
+				t.Fatalf("LoadGatewayConfig() error = %v", err)
+			}
+
+			if cfg.RecommendedImageTag != tt.want {
+				t.Errorf("RecommendedImageTag = %q, want %q", cfg.RecommendedImageTag, tt.want)
+			}
+		})
+	}
+}
+
+// ---- ControllerConfig ImagePullSecrets and EnvSecretName tests ----
+
+func TestLoadGatewayConfig_ControllerImagePullSecrets(t *testing.T) {
+	tests := []struct {
+		name     string
+		envVars  map[string]string
+		expected []string
+	}{
+		{
+			name: "default image pull secrets",
+			envVars: map[string]string{
+				"SESSION_ID":         "test-session",
+				"CNPG_HOST":          "localhost",
+				"CNPG_DATABASE":      "kubetty",
+				"CNPG_USER":          "user",
+				"CNPG_PASSWORD":      "pass",
+				"CONTROLLER_ENABLED": "true",
+				"PROJECTS_NAMESPACE": "kubetty-projects-dev",
+			},
+			expected: []string{"harbor-supporttools"},
+		},
+		{
+			name: "custom image pull secrets",
+			envVars: map[string]string{
+				"SESSION_ID":         "test-session",
+				"CNPG_HOST":          "localhost",
+				"CNPG_DATABASE":      "kubetty",
+				"CNPG_USER":          "user",
+				"CNPG_PASSWORD":      "pass",
+				"CONTROLLER_ENABLED": "true",
+				"PROJECTS_NAMESPACE": "kubetty-projects-dev",
+				"IMAGE_PULL_SECRETS": "secret1,secret2",
+			},
+			expected: []string{"secret1", "secret2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Clearenv()
+
+			for key, val := range tt.envVars {
+				os.Setenv(key, val)
+			}
+
+			cfg, err := LoadGatewayConfig()
+			if err != nil {
+				t.Fatalf("LoadGatewayConfig() error = %v", err)
+			}
+
+			if len(cfg.Controller.ImagePullSecrets) != len(tt.expected) {
+				t.Errorf("ImagePullSecrets length = %d, want %d", len(cfg.Controller.ImagePullSecrets), len(tt.expected))
+				return
+			}
+			for i, v := range cfg.Controller.ImagePullSecrets {
+				if v != tt.expected[i] {
+					t.Errorf("ImagePullSecrets[%d] = %q, want %q", i, v, tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestLoadGatewayConfig_ControllerEnvSecretName(t *testing.T) {
+	tests := []struct {
+		name     string
+		envVars  map[string]string
+		expected string
+	}{
+		{
+			name: "default env secret name",
+			envVars: map[string]string{
+				"SESSION_ID":         "test-session",
+				"CNPG_HOST":          "localhost",
+				"CNPG_DATABASE":      "kubetty",
+				"CNPG_USER":          "user",
+				"CNPG_PASSWORD":      "pass",
+				"CONTROLLER_ENABLED": "true",
+				"PROJECTS_NAMESPACE": "kubetty-projects-dev",
+			},
+			expected: "env-secrets",
+		},
+		{
+			name: "custom env secret name",
+			envVars: map[string]string{
+				"SESSION_ID":         "test-session",
+				"CNPG_HOST":          "localhost",
+				"CNPG_DATABASE":      "kubetty",
+				"CNPG_USER":          "user",
+				"CNPG_PASSWORD":      "pass",
+				"CONTROLLER_ENABLED": "true",
+				"PROJECTS_NAMESPACE": "kubetty-projects-dev",
+				"ENV_SECRET_NAME":    "my-env-secrets",
+			},
+			expected: "my-env-secrets",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Clearenv()
+
+			for key, val := range tt.envVars {
+				os.Setenv(key, val)
+			}
+
+			cfg, err := LoadGatewayConfig()
+			if err != nil {
+				t.Fatalf("LoadGatewayConfig() error = %v", err)
+			}
+
+			if cfg.Controller.EnvSecretName != tt.expected {
+				t.Errorf("EnvSecretName = %q, want %q", cfg.Controller.EnvSecretName, tt.expected)
+			}
+		})
+	}
+}

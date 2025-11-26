@@ -4,6 +4,18 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import HealthIndicator from './HealthIndicator';
 
+// Dev-mode logging helper
+const isDev = import.meta.env.DEV;
+const devLog = (message: string, data?: Record<string, unknown>) => {
+  if (isDev) {
+    if (data) {
+      console.debug(`[TerminalView] ${message}`, data);
+    } else {
+      console.debug(`[TerminalView] ${message}`);
+    }
+  }
+};
+
 type Props = {
   onReconnect?: () => void;
   wsUrl?: string;
@@ -19,8 +31,26 @@ const MAX_PTY_ROWS = 200;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const FORCE_RECONNECT_THRESHOLD = 3; // Show force button after this many failed attempts
+const FORCE_RECONNECT_THRESHOLD = 2; // Show force button after this many failed attempts
 const HIGH_WATERMARK = 5; // Max pending writes before pausing server output
+const QUICK_DISCONNECT_MS = 500; // If disconnected this fast, likely a 409 rejection
+const MAX_RECONNECT_ATTEMPTS = 10; // Circuit breaker: stop after this many attempts
+const JITTER_FACTOR = 0.25; // ±25% random jitter on reconnection delay
+const BASE_RECONNECT_DELAY = 1000; // Base delay in ms (1 second)
+const MAX_RECONNECT_DELAY = 16000; // Maximum delay in ms (16 seconds)
+
+// Heartbeat configuration
+const PING_INTERVAL_MS = 10000; // Send ping every 10 seconds
+const PONG_TIMEOUT_MS = 25000; // Consider connection dead if no pong for 25 seconds
+
+// Calculate reconnection delay with exponential backoff and jitter
+const calculateReconnectDelay = (attempt: number): number => {
+  // Exponential backoff: 1s, 2s, 4s, 8s, max 16s
+  const baseDelay = Math.min(BASE_RECONNECT_DELAY * Math.pow(2, attempt), MAX_RECONNECT_DELAY);
+  // Add random jitter: ±25% to prevent thundering herd
+  const jitter = baseDelay * JITTER_FACTOR * (Math.random() * 2 - 1);
+  return Math.round(baseDelay + jitter);
+};
 
 const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externalStatus }: Props) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -39,11 +69,18 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
   const forceReconnectRef = useRef(false);
   const [pendingWrites, setPendingWrites] = useState(0);
   const pausedRef = useRef(false);
+  const connectTimeRef = useRef<number>(0);
+  const [takenOverMessage, setTakenOverMessage] = useState<string | null>(null);
+  const [circuitBreakerTripped, setCircuitBreakerTripped] = useState(false);
+  const [reconnectCountdown, setReconnectCountdown] = useState<number | null>(null);
+  const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastPongAt = useRef<number>(0); // Timestamp of last pong received
 
   // Handler for when HTTP health check fails - trigger WebSocket reconnect
   const handleHealthUnhealthy = useCallback(() => {
     // Only trigger reconnect if WebSocket is currently open
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      devLog('Health check failed, closing WebSocket to trigger reconnect');
       // Close the WebSocket to trigger reconnection logic
       socketRef.current.close();
     }
@@ -51,9 +88,13 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
 
   // Handler for force reconnect button - takes over session from another client
   const handleForceReconnect = useCallback(() => {
+    devLog('Force reconnect triggered');
     forceReconnectRef.current = true;
     setShowForceButton(false);
     reconnectAttempts.current = 0;
+    setCircuitBreakerTripped(false); // Reset circuit breaker
+    setReconnectCountdown(null); // Clear countdown
+    countdownTimer.current && clearInterval(countdownTimer.current);
     // Trigger reconnect
     setRetrySignal((prev) => prev + 1);
   }, []);
@@ -88,6 +129,7 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
       socketRef.current?.close();
       reconnectTimer.current && clearTimeout(reconnectTimer.current);
       pingTimer.current && clearInterval(pingTimer.current);
+      countdownTimer.current && clearInterval(countdownTimer.current);
     };
   }, []);
 
@@ -113,14 +155,24 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
     socket.binaryType = 'arraybuffer';
     socketRef.current = socket;
     setStatus('Connecting…');
+    setTakenOverMessage(null);
     closingRef.current = false;
+    connectTimeRef.current = Date.now();
 
     socket.onopen = () => {
       const wasReconnecting = connectedOnceRef.current;
       connectedOnceRef.current = true;
       reconnectAttempts.current = 0; // Reset on successful connection
       setShowForceButton(false); // Hide force button on successful connection
+      setCircuitBreakerTripped(false); // Reset circuit breaker
+      setReconnectCountdown(null); // Clear countdown
+      countdownTimer.current && clearInterval(countdownTimer.current);
+      lastPongAt.current = Date.now(); // Initialize heartbeat timestamp
       setStatus(wasReconnecting ? 'Reconnected' : 'Connected');
+      devLog('WebSocket connected', {
+        wasReconnecting,
+        url: targetUrl,
+      });
       if (wasReconnecting && onReconnect) {
         onReconnect();
       }
@@ -128,26 +180,90 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
       notifyResize();
     };
 
-    socket.onclose = () => {
-      setStatus('Disconnected');
+    socket.onclose = (event) => {
       pingTimer.current && clearInterval(pingTimer.current);
+      const connectionDuration = Date.now() - connectTimeRef.current;
+      const wasQuickDisconnect = connectionDuration < QUICK_DISCONNECT_MS;
+
+      devLog('WebSocket closed', {
+        code: event.code,
+        reason: event.reason,
+        wasClean: event.wasClean,
+        intentional: closingRef.current,
+        connectionDurationMs: connectionDuration,
+        wasQuickDisconnect,
+      });
+
+      // Handle session takeover (custom close code 4000)
+      if (event.code === 4000) {
+        setTakenOverMessage(event.reason || 'Session taken over by another client');
+        setStatus('Disconnected');
+        // Show force button immediately for takeover case
+        setShowForceButton(true);
+        return; // Don't auto-reconnect when taken over
+      }
+
+      setStatus('Disconnected');
+
       if (!closingRef.current) {
-        // Exponential backoff: 1s, 2s, 4s, 8s, max 16s
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 16000);
+        // Increment attempt counter first
         reconnectAttempts.current++;
-        // Show force reconnect button after threshold attempts
-        if (reconnectAttempts.current >= FORCE_RECONNECT_THRESHOLD) {
+
+        // Check circuit breaker
+        if (reconnectAttempts.current >= MAX_RECONNECT_ATTEMPTS) {
+          devLog('Circuit breaker tripped', {
+            attempts: reconnectAttempts.current,
+            maxAttempts: MAX_RECONNECT_ATTEMPTS,
+          });
+          setCircuitBreakerTripped(true);
+          setShowForceButton(true);
+          setStatus('Connection Failed');
+          return;
+        }
+
+        // Calculate delay with exponential backoff and jitter (use 0-based index for delay)
+        const delay = calculateReconnectDelay(reconnectAttempts.current - 1);
+
+        devLog('Scheduling reconnect', {
+          attempt: reconnectAttempts.current,
+          maxAttempts: MAX_RECONNECT_ATTEMPTS,
+          delayMs: delay,
+        });
+
+        // Show force reconnect button after threshold attempts or if quick disconnect (likely 409)
+        if (reconnectAttempts.current >= FORCE_RECONNECT_THRESHOLD || wasQuickDisconnect) {
           setShowForceButton(true);
         }
+
+        // Start countdown timer
+        const countdownEnd = Date.now() + delay;
+        setReconnectCountdown(Math.ceil(delay / 1000));
+
+        // Clear any existing countdown timer
+        countdownTimer.current && clearInterval(countdownTimer.current);
+
+        // Update countdown every second
+        countdownTimer.current = setInterval(() => {
+          const remaining = Math.max(0, Math.ceil((countdownEnd - Date.now()) / 1000));
+          setReconnectCountdown(remaining);
+          if (remaining <= 0) {
+            countdownTimer.current && clearInterval(countdownTimer.current);
+          }
+        }, 1000);
+
         reconnectTimer.current = setTimeout(() => {
+          countdownTimer.current && clearInterval(countdownTimer.current);
+          setReconnectCountdown(null);
           setRetrySignal((prev) => prev + 1);
         }, delay);
+
         setStatus('Reconnecting…');
       }
     };
 
-    socket.onerror = () => {
+    socket.onerror = (event) => {
       setStatus('Error');
+      devLog('WebSocket error', { event: event.type });
     };
 
     socket.onmessage = (event) => {
@@ -157,6 +273,9 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
         try {
           const msg = JSON.parse(payload);
           if (msg.type === 'pong') {
+            // Update last pong timestamp for heartbeat monitoring
+            lastPongAt.current = Date.now();
+            devLog('Pong received');
             return; // Don't write pong to terminal
           }
         } catch {
@@ -171,6 +290,10 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
         // Pause server output if we exceed HIGH_WATERMARK
         if (!pausedRef.current && newCount >= HIGH_WATERMARK) {
           pausedRef.current = true;
+          devLog('Flow control: pausing server output', {
+            pendingWrites: newCount,
+            highWatermark: HIGH_WATERMARK,
+          });
           if (socket.readyState === WebSocket.OPEN) {
             socket.send(JSON.stringify({ type: 'pause' }));
           }
@@ -188,6 +311,10 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
           // Resume if we were paused and now below threshold
           if (pausedRef.current && newCount < HIGH_WATERMARK) {
             pausedRef.current = false;
+            devLog('Flow control: resuming server output', {
+              pendingWrites: newCount,
+              highWatermark: HIGH_WATERMARK,
+            });
             if (socketRef.current?.readyState === WebSocket.OPEN) {
               socketRef.current.send(JSON.stringify({ type: 'resume' }));
             }
@@ -208,9 +335,23 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
     pingTimer.current && clearInterval(pingTimer.current);
     pingTimer.current = setInterval(() => {
       if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+        // Check if we've received a pong recently
+        const sincePong = Date.now() - lastPongAt.current;
+        if (sincePong > PONG_TIMEOUT_MS) {
+          devLog('Pong timeout - connection appears dead', {
+            sincePongMs: sincePong,
+            timeoutMs: PONG_TIMEOUT_MS,
+          });
+          // Close connection to trigger reconnect
+          socketRef.current.close();
+          return;
+        }
+
+        // Send ping
         socketRef.current.send(JSON.stringify({ type: 'ping' }));
+        devLog('Ping sent');
       }
-    }, 10000); // Reduced from 15s to 10s for faster dead connection detection
+    }, PING_INTERVAL_MS);
 
     return () => {
       closingRef.current = true;
@@ -246,23 +387,48 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
   };
 
   const isConnecting = status === 'Connecting…' || status === 'Reconnecting…';
+  const isConnectionFailed = status === 'Connection Failed';
 
   const extOverlay = externalStatus && externalStatus !== 'connected';
   const externalLabel = externalStatus ? externalStatusDisplay(externalStatus) : null;
 
+  const showOverlay = isConnecting || extOverlay || takenOverMessage || isConnectionFailed;
+
+  // Build status message with attempt info and countdown
+  const getStatusMessage = () => {
+    if (takenOverMessage) return takenOverMessage;
+    if (extOverlay && externalLabel) return externalLabel;
+    if (circuitBreakerTripped) {
+      return `Connection failed after ${MAX_RECONNECT_ATTEMPTS} attempts`;
+    }
+    if (status === 'Reconnecting…' && reconnectAttempts.current > 0) {
+      const countdownText = reconnectCountdown !== null ? ` in ${reconnectCountdown}s` : '';
+      return `Reconnecting${countdownText} (attempt ${reconnectAttempts.current}/${MAX_RECONNECT_ATTEMPTS})`;
+    }
+    return status;
+  };
+
   return (
     <div className="terminal-container" ref={containerRef}>
-      {(isConnecting || extOverlay) && (
+      {showOverlay && (
         <div className="connection-overlay">
-          <div className="spinner"></div>
-          <div className="connection-message">{extOverlay && externalLabel ? externalLabel : status}</div>
+          {!takenOverMessage && !circuitBreakerTripped && <div className="spinner"></div>}
+          <div className="connection-message">
+            {getStatusMessage()}
+          </div>
+          {takenOverMessage && (
+            <div className="takeover-hint">Click "Force Reconnect" to reclaim your session</div>
+          )}
+          {circuitBreakerTripped && !takenOverMessage && (
+            <div className="circuit-breaker-hint">Click "Retry Connection" to try again</div>
+          )}
           {showForceButton && (
             <button
               className="force-reconnect-button"
               onClick={handleForceReconnect}
-              title="Force takeover of session from another client"
+              title={circuitBreakerTripped ? "Retry connecting to the server" : "Force takeover of session from another client"}
             >
-              Force Reconnect
+              {circuitBreakerTripped ? 'Retry Connection' : 'Force Reconnect'}
             </button>
           )}
         </div>

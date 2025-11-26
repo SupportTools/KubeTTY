@@ -38,6 +38,7 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
 	handlers_admin "github.com/supporttools/KubeTTY/server/internal/handlers/admin"
 	handlers_auth "github.com/supporttools/KubeTTY/server/internal/handlers/auth"
+	handlers_dashboard "github.com/supporttools/KubeTTY/server/internal/handlers/dashboard"
 	handlers_session "github.com/supporttools/KubeTTY/server/internal/handlers/session"
 	"github.com/supporttools/KubeTTY/server/internal/projects"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
@@ -388,11 +389,12 @@ func main() {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		uiFS:       uiFS,
-		appMetrics: appMetrics,
-		tabManager: tabManager,
-		tabStore:   tabStore,
-		tabSubs:    make(map[string]map[chan []byte]struct{}),
+		uiFS:        uiFS,
+		appMetrics:  appMetrics,
+		tabManager:  tabManager,
+		tabStore:    tabStore,
+		tabSubs:     make(map[string]map[chan []byte]struct{}),
+		shutdownCtx: ctx, // For graceful shutdown signaling to WebSocket handlers
 	}
 	if srv.tabManager != nil {
 		srv.tabManager.SetStatusCallback(srv.handleTabStatusUpdate)
@@ -455,6 +457,20 @@ func main() {
 			mux.HandleFunc("GET /api/admin/projects/{id}/secrets", adminHandlers.GetProjectSecrets)
 			mux.HandleFunc("PUT /api/admin/projects/{id}/secrets", adminHandlers.UpdateProjectSecrets)
 		}
+	}
+
+	// Dashboard API handlers
+	dashboardHandlers := handlers_dashboard.New(srv.projectStore, srv.tabStore, handlers_dashboard.NewNullMetricsCollector())
+	if srv.authEnabled() {
+		mux.Handle("GET /api/admin/dashboard/summary", requireAuth(http.HandlerFunc(dashboardHandlers.GetSummary)))
+		mux.Handle("GET /api/admin/dashboard/metrics", requireAuth(http.HandlerFunc(dashboardHandlers.GetMetrics)))
+		mux.Handle("GET /api/admin/dashboard/errors", requireAuth(http.HandlerFunc(dashboardHandlers.GetErrors)))
+		mux.Handle("GET /api/admin/dashboard/usage", requireAuth(http.HandlerFunc(dashboardHandlers.GetUsage)))
+	} else {
+		mux.HandleFunc("GET /api/admin/dashboard/summary", dashboardHandlers.GetSummary)
+		mux.HandleFunc("GET /api/admin/dashboard/metrics", dashboardHandlers.GetMetrics)
+		mux.HandleFunc("GET /api/admin/dashboard/errors", dashboardHandlers.GetErrors)
+		mux.HandleFunc("GET /api/admin/dashboard/usage", dashboardHandlers.GetUsage)
 	}
 
 	if srv.authEnabled() {
@@ -537,6 +553,7 @@ type server struct {
 	tabStore     tabs.Store
 	tabSubsMu    sync.Mutex
 	tabSubs      map[string]map[chan []byte]struct{}
+	shutdownCtx  context.Context // Context cancelled on graceful shutdown
 }
 
 type contextKey string
@@ -626,9 +643,10 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 		"client_id": clientID,
 	}).Info("gateway/main: WebSocket connection established")
 
-	// Use background context after WebSocket upgrade - the original request context
-	// is no longer valid after hijacking and can cause "invalid Body.Read" panics
-	if err := s.tabManager.AttachWithOptions(context.Background(), tabID, clientID, conn, forceTakeover); err != nil {
+	// Use shutdown context after WebSocket upgrade - the original request context
+	// is no longer valid after hijacking and can cause "invalid Body.Read" panics.
+	// Using shutdownCtx allows graceful shutdown to signal active connections.
+	if err := s.tabManager.AttachWithOptions(s.shutdownCtx, tabID, clientID, conn, forceTakeover); err != nil {
 		log.WithFields(log.Fields{
 			"tab_id": tabID,
 			"error":  err.Error(),

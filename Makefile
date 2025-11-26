@@ -141,6 +141,69 @@ docker-push: push-all-images
 # Testing Targets
 # =============================================================================
 .PHONY: test-server-local test-web-local test-all-local test-coverage npm-audit
+.PHONY: test-db-up test-db-down test-db-logs test-db-reset test-with-db test-integration
+
+# Test database configuration
+TEST_DB_HOST ?= localhost
+TEST_DB_PORT ?= 5433
+TEST_DB_USER ?= kubetty_test
+TEST_DB_PASSWORD ?= kubetty_test
+TEST_DB_NAME ?= kubetty_test
+
+## test-db-up: Start PostgreSQL container for testing
+test-db-up:
+	@echo -e "$(BLUE)==> Starting test database$(NC)"
+	cd server && docker-compose -f docker-compose.test.yml up -d
+	@echo -e "$(BLUE)==> Waiting for database to be ready...$(NC)"
+	@for i in $$(seq 1 30); do \
+		if docker exec kubetty-test-db pg_isready -U $(TEST_DB_USER) -d $(TEST_DB_NAME) >/dev/null 2>&1; then \
+			echo -e "$(GREEN)==> Test database is ready$(NC)"; \
+			exit 0; \
+		fi; \
+		echo "Waiting... ($$i/30)"; \
+		sleep 1; \
+	done; \
+	echo -e "$(RED)==> Database failed to start$(NC)"; \
+	exit 1
+
+## test-db-down: Stop and remove test database container
+test-db-down:
+	@echo -e "$(BLUE)==> Stopping test database$(NC)"
+	cd server && docker-compose -f docker-compose.test.yml down -v
+	@echo -e "$(GREEN)==> Test database stopped$(NC)"
+
+## test-db-logs: Show test database logs
+test-db-logs:
+	docker logs kubetty-test-db
+
+## test-db-reset: Reset test database (down + up)
+test-db-reset: test-db-down test-db-up
+
+## test-with-db: Run tests with real PostgreSQL database
+test-with-db: test-db-up
+	@echo -e "$(BLUE)==> Running tests with database$(NC)"
+	cd server && \
+		CNPG_HOST=$(TEST_DB_HOST) \
+		CNPG_PORT=$(TEST_DB_PORT) \
+		CNPG_USER=$(TEST_DB_USER) \
+		CNPG_PASSWORD=$(TEST_DB_PASSWORD) \
+		CNPG_DATABASE=$(TEST_DB_NAME) \
+		KUBETTY_TEST_DB=true \
+		go test -v -race ./...
+	@echo -e "$(GREEN)==> Tests with database passed$(NC)"
+
+## test-integration: Run only integration tests (requires database)
+test-integration: test-db-up
+	@echo -e "$(BLUE)==> Running integration tests$(NC)"
+	cd server && \
+		CNPG_HOST=$(TEST_DB_HOST) \
+		CNPG_PORT=$(TEST_DB_PORT) \
+		CNPG_USER=$(TEST_DB_USER) \
+		CNPG_PASSWORD=$(TEST_DB_PASSWORD) \
+		CNPG_DATABASE=$(TEST_DB_NAME) \
+		KUBETTY_TEST_DB=true \
+		go test -v -race -run Integration ./...
+	@echo -e "$(GREEN)==> Integration tests passed$(NC)"
 
 ## test-server-local: Run Go tests with race detection
 test-server-local:
@@ -471,7 +534,10 @@ help:
 	@grep -E '^## (build-.*-image|push-)' $(MAKEFILE_LIST) | sed 's/## /  /' | sed 's/: /\t- /'
 	@echo ""
 	@echo -e "$(GREEN)Testing:$(NC)"
-	@grep -E '^## (test-|npm-audit)' $(MAKEFILE_LIST) | sed 's/## /  /' | sed 's/: /\t- /'
+	@grep -E '^## (test-server|test-web|test-all|test-coverage|npm-audit)' $(MAKEFILE_LIST) | sed 's/## /  /' | sed 's/: /\t- /'
+	@echo ""
+	@echo -e "$(GREEN)Test Database:$(NC)"
+	@grep -E '^## test-(db-|with-|integration)' $(MAKEFILE_LIST) | sed 's/## /  /' | sed 's/: /\t- /'
 	@echo ""
 	@echo -e "$(GREEN)Validation:$(NC)"
 	@grep -E '^## (validate-|qa-|fmt|vet|lint)' $(MAKEFILE_LIST) | sed 's/## /  /' | sed 's/: /\t- /'

@@ -7,11 +7,61 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 )
+
+// CircuitBreaker tracks consecutive failures and opens to prevent reconnection storms.
+type CircuitBreaker struct {
+	consecutiveFailures int32
+	lastFailure         atomic.Value // time.Time
+	threshold           int32        // failures before opening
+	resetAfter          time.Duration
+}
+
+// NewCircuitBreaker creates a circuit breaker with the given threshold.
+func NewCircuitBreaker(threshold int, resetAfter time.Duration) *CircuitBreaker {
+	cb := &CircuitBreaker{
+		threshold:  int32(threshold),
+		resetAfter: resetAfter,
+	}
+	cb.lastFailure.Store(time.Time{})
+	return cb
+}
+
+// RecordFailure increments the failure count.
+func (cb *CircuitBreaker) RecordFailure() {
+	atomic.AddInt32(&cb.consecutiveFailures, 1)
+	cb.lastFailure.Store(time.Now())
+}
+
+// RecordSuccess resets the failure count.
+func (cb *CircuitBreaker) RecordSuccess() {
+	atomic.StoreInt32(&cb.consecutiveFailures, 0)
+}
+
+// IsOpen returns true if too many consecutive failures have occurred.
+func (cb *CircuitBreaker) IsOpen() bool {
+	failures := atomic.LoadInt32(&cb.consecutiveFailures)
+	if failures < cb.threshold {
+		return false
+	}
+	// Check if enough time has passed to reset
+	lastFail := cb.lastFailure.Load().(time.Time)
+	if time.Since(lastFail) > cb.resetAfter {
+		// Half-open: allow one attempt
+		return false
+	}
+	return true
+}
+
+// Failures returns the current consecutive failure count.
+func (cb *CircuitBreaker) Failures() int {
+	return int(atomic.LoadInt32(&cb.consecutiveFailures))
+}
 
 // Config describes the downstream target to connect to.
 type Config struct {
@@ -24,13 +74,14 @@ type Config struct {
 
 // Relay manages bidirectional streaming between an upstream client and downstream project /ws.
 type Relay struct {
-	cfg        Config
-	downstream *websocket.Conn
-	mu         sync.RWMutex
-	status     Status
-	lastError  error
-	observers  []chan StatusEvent
-	activityCh chan struct{} // Signals activity (data transfer) for idle timeout tracking
+	cfg            Config
+	downstream     *websocket.Conn
+	mu             sync.RWMutex
+	status         Status
+	lastError      error
+	observers      []chan StatusEvent
+	activityCh     chan struct{}   // Signals activity (data transfer) for idle timeout tracking
+	circuitBreaker *CircuitBreaker // Prevents reconnection storms
 }
 
 // Status represents connection state.
@@ -57,9 +108,10 @@ func New(cfg Config) *Relay {
 		cfg.Dialer = websocket.DefaultDialer
 	}
 	return &Relay{
-		cfg:        cfg,
-		status:     StatusIdle,
-		activityCh: make(chan struct{}, 1), // Buffer size 1 for non-blocking sends
+		cfg:            cfg,
+		status:         StatusIdle,
+		activityCh:     make(chan struct{}, 1),               // Buffer size 1 for non-blocking sends
+		circuitBreaker: NewCircuitBreaker(5, 30*time.Second), // Open after 5 failures, reset after 30s
 	}
 }
 
@@ -248,90 +300,163 @@ func (r *Relay) Close() error {
 	return err
 }
 
-// Proxy pumps data between upstream and downstream.
-// Note: This function does NOT attempt to reconnect on downstream failures because:
-// 1. The upstream goroutine may still be blocked on ReadMessage()
-// 2. We cannot safely interrupt a blocked WebSocket read
-// 3. Starting new goroutines while old ones are blocked causes panics
-// Instead, we return the error and let the client reconnect.
+// Proxy pumps data between upstream and downstream with automatic reconnection.
+// On downstream failure, attempts reconnection up to circuit breaker threshold.
+// On upstream failure (browser disconnected), exits immediately.
 func (r *Relay) Proxy(ctx context.Context, upstream *websocket.Conn) error {
 	log.WithFields(log.Fields{
 		"project_id": r.cfg.ProjectID,
 		"endpoint":   r.cfg.Endpoint.String(),
 	}).Debug("gateway/relay: starting proxy")
 
-	downstream, err := r.Connect(ctx, DefaultBackoff())
-	if err != nil {
-		log.WithFields(log.Fields{
-			"project_id": r.cfg.ProjectID,
-			"endpoint":   r.cfg.Endpoint.String(),
-			"error":      err.Error(),
-		}).Error("gateway/relay: failed to connect downstream")
-		return err
-	}
-	log.WithFields(log.Fields{
-		"project_id": r.cfg.ProjectID,
-		"endpoint":   r.cfg.Endpoint.String(),
-	}).Info("gateway/relay: starting bidirectional pipe")
-
-	pipeCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	errCh := make(chan error, 2)
-	go r.pipe(pipeCtx, "up->down", upstream, downstream, errCh)
-	go r.pipe(pipeCtx, "down->up", downstream, upstream, errCh)
-
-	select {
-	case <-ctx.Done():
-		log.WithFields(log.Fields{
-			"project_id": r.cfg.ProjectID,
-			"error":      ctx.Err().Error(),
-		}).Debug("gateway/relay: context cancelled")
-		return ctx.Err()
-	case err := <-errCh:
-		// Check if this is a pipeError for better logging
-		var pErr *pipeError
-		if errors.As(err, &pErr) {
+	for {
+		// Check circuit breaker before attempting connection
+		if r.circuitBreaker.IsOpen() {
+			err := fmt.Errorf("circuit breaker open after %d consecutive failures", r.circuitBreaker.Failures())
 			log.WithFields(log.Fields{
 				"project_id": r.cfg.ProjectID,
-				"direction":  pErr.direction,
-				"is_read":    pErr.isRead,
-				"error":      pErr.err.Error(),
-			}).Warn("gateway/relay: pipe error")
-		} else {
-			log.WithFields(log.Fields{
-				"project_id": r.cfg.ProjectID,
-				"error":      err.Error(),
-			}).Warn("gateway/relay: pipe error (unknown type)")
+				"failures":   r.circuitBreaker.Failures(),
+			}).Error("gateway/relay: circuit breaker open, giving up")
+			r.setStatus(StatusClosed, err)
+			return err
 		}
 
+		// Connect to downstream
+		downstream, err := r.Connect(ctx, DefaultBackoff())
+		if err != nil {
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"endpoint":   r.cfg.Endpoint.String(),
+				"error":      err.Error(),
+			}).Error("gateway/relay: failed to connect downstream")
+			r.circuitBreaker.RecordFailure()
+			return err
+		}
+
+		// Run the bidirectional pipe
+		pipeErr := r.runPipes(ctx, upstream, downstream)
+
+		// Clean up downstream connection
 		_ = downstream.Close()
 		r.mu.Lock()
 		if r.downstream == downstream {
 			r.downstream = nil
 		}
 		r.mu.Unlock()
-		// drain second error if present
-		select {
-		case <-errCh:
-		default:
-		}
-		if errors.Is(err, context.Canceled) {
+
+		// Check what kind of error we got
+		if pipeErr == nil || errors.Is(pipeErr, context.Canceled) {
 			log.WithFields(log.Fields{
 				"project_id": r.cfg.ProjectID,
-			}).Debug("gateway/relay: pipe cancelled, exiting cleanly")
+			}).Debug("gateway/relay: pipe exited cleanly")
 			return nil
 		}
-		// Return error - client should reconnect
-		// We don't attempt reconnection because the upstream goroutine may still be
-		// blocked on ReadMessage(), and starting new goroutines would cause a panic
+
+		// Check if this is a pipeError to determine if it's upstream or downstream
+		var pErr *pipeError
+		if errors.As(pipeErr, &pErr) {
+			if pErr.direction == "up->down" && pErr.isRead {
+				// Upstream (browser) disconnected - don't reconnect, just exit
+				log.WithFields(log.Fields{
+					"project_id": r.cfg.ProjectID,
+					"error":      pErr.err.Error(),
+				}).Info("gateway/relay: upstream disconnected, exiting")
+				r.setStatus(StatusClosed, pipeErr)
+				return pipeErr
+			}
+
+			// Downstream error - attempt reconnection
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"direction":  pErr.direction,
+				"is_read":    pErr.isRead,
+				"error":      pErr.err.Error(),
+			}).Warn("gateway/relay: downstream error, attempting reconnection")
+		} else {
+			// Unknown error type - attempt reconnection
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"error":      pipeErr.Error(),
+			}).Warn("gateway/relay: pipe error, attempting reconnection")
+		}
+
+		// Record failure and check if we should continue
+		r.circuitBreaker.RecordFailure()
+		r.setStatus(StatusReconnecting, pipeErr)
+
+		// Brief delay before reconnection attempt
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+			// Continue to next iteration
+		}
+	}
+}
+
+// runPipes runs bidirectional pipes and waits for both to complete.
+// Returns the first error encountered.
+func (r *Relay) runPipes(ctx context.Context, upstream, downstream *websocket.Conn) error {
+	log.WithFields(log.Fields{
+		"project_id": r.cfg.ProjectID,
+		"endpoint":   r.cfg.Endpoint.String(),
+	}).Info("gateway/relay: starting bidirectional pipe")
+
+	// Reset circuit breaker on successful connection
+	r.circuitBreaker.RecordSuccess()
+
+	pipeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		r.pipe(pipeCtx, "up->down", upstream, downstream, errCh)
+	}()
+	go func() {
+		defer wg.Done()
+		r.pipe(pipeCtx, "down->up", downstream, upstream, errCh)
+	}()
+
+	// Wait for first error or context cancellation
+	var firstErr error
+	select {
+	case <-ctx.Done():
+		firstErr = ctx.Err()
+	case firstErr = <-errCh:
+	}
+
+	// Cancel context to signal other pipe to exit
+	cancel()
+
+	// Wait for both pipes to complete (with timeout to prevent hanging)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
 		log.WithFields(log.Fields{
 			"project_id": r.cfg.ProjectID,
-			"error":      err.Error(),
-		}).Info("gateway/relay: connection lost, expecting client to reconnect")
-		r.setStatus(StatusClosed, err)
-		return err
+		}).Debug("gateway/relay: both pipes exited cleanly")
+	case <-time.After(5 * time.Second):
+		log.WithFields(log.Fields{
+			"project_id": r.cfg.ProjectID,
+		}).Warn("gateway/relay: timeout waiting for pipes to exit")
 	}
+
+	// Drain any remaining error
+	select {
+	case <-errCh:
+	default:
+	}
+
+	return firstErr
 }
 
 // pipeError wraps errors with direction information for proper error handling

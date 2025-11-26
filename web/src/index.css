@@ -316,6 +316,20 @@ button.secondary {
   background: #fbbf24;
 }
 
+.takeover-hint {
+  margin-top: 0.5rem;
+  color: #f59e0b;
+  font-size: 0.8rem;
+  opacity: 0.9;
+}
+
+.circuit-breaker-hint {
+  margin-top: 0.5rem;
+  color: #ef4444;
+  font-size: 0.8rem;
+  opacity: 0.9;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1889,4 +1903,195 @@ button.danger:hover:not(:disabled) {
 .add-secret-btn {
   padding: 0.75rem 1rem;
   white-space: nowrap;
+}
+
+/* ================================
+   Admin Dashboard Styles
+   ================================ */
+
+.dashboard-modal {
+  width: 900px;
+  max-width: 95vw;
+  max-height: 85vh;
+}
+
+.dashboard-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 1rem;
+  border-bottom: 1px solid #2b2f38;
+  background: #13151a;
+}
+
+.dashboard-tab {
+  padding: 0.75rem 1rem;
+  background: none;
+  border: none;
+  color: #8a8f98;
+  font-size: 0.9rem;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.dashboard-tab:hover {
+  color: #f2f4f8;
+}
+
+.dashboard-tab.active {
+  color: #3f7df4;
+  border-bottom-color: #3f7df4;
+}
+
+.dashboard-body {
+  overflow-y: auto;
+  max-height: 60vh;
+}
+
+/* Summary Cards */
+.dashboard-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.dashboard-card {
+  background: #1a1d24;
+  border: 1px solid #2b2f38;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.card-label {
+  font-size: 0.8rem;
+  color: #8a8f98;
+  text-transform: uppercase;
+  margin-bottom: 0.5rem;
+}
+
+.card-value {
+  font-size: 1.75rem;
+  font-weight: 600;
+  color: #f2f4f8;
+}
+
+.card-subtitle {
+  font-size: 0.75rem;
+  color: #6b7280;
+  margin-top: 0.25rem;
+}
+
+.status-running {
+  color: #10b981;
+}
+
+.status-failed {
+  color: #ef4444;
+}
+
+.status-total {
+  color: #6b7280;
+  font-size: 0.85em;
+}
+
+/* Dashboard Sections */
+.dashboard-section {
+  margin-bottom: 1.5rem;
+}
+
+.dashboard-section h3 {
+  font-size: 1rem;
+  color: #f2f4f8;
+  margin: 0 0 0.75rem 0;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #2b2f38;
+}
+
+/* Disconnect Breakdown */
+.disconnect-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.disconnect-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: #1a1d24;
+  border: 1px solid #2b2f38;
+  border-radius: 6px;
+}
+
+.disconnect-reason {
+  font-size: 0.85rem;
+  color: #b3b6c2;
+}
+
+.disconnect-count {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #f2f4f8;
+}
+
+/* Flow Control Stats */
+.flow-control-stats {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.stat-label {
+  font-size: 0.8rem;
+  color: #8a8f98;
+}
+
+.stat-value {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #f2f4f8;
+}
+
+/* Errors Tab */
+.dashboard-errors .admin-table {
+  width: 100%;
+}
+
+.error-type-badge {
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: white;
+}
+
+.error-details {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  color: #8a8f98;
+}
+
+/* Usage Tab */
+.dashboard-usage .admin-table {
+  width: 100%;
+}
+
+/* Empty state in dashboard */
+.dashboard-overview .empty-state,
+.dashboard-errors .empty-state,
+.dashboard-usage .empty-state {
+  padding: 2rem;
+  text-align: center;
+  color: #8a8f98;
 }

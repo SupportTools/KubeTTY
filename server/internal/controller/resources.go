@@ -47,6 +47,10 @@ type ResourceConfig struct {
 	// ImagePullSecrets lists secret names for pulling container images
 	// (e.g., ["harbor-supporttools"])
 	ImagePullSecrets []string
+
+	// TemplatePVCName is the name of the template PVC to copy base files from.
+	// If empty, template sync is disabled.
+	TemplatePVCName string
 }
 
 // dnsNameRegex validates DNS subdomain names per RFC 1123
@@ -213,6 +217,19 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 		},
 	})
 
+	// Template volume (for base file sync) - only if configured
+	if cfg.TemplatePVCName != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "template",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: cfg.TemplatePVCName,
+					ReadOnly:  true,
+				},
+			},
+		})
+	}
+
 	// DinD sidecar if enabled
 	if p.DinDEnabled {
 		volumes = append(volumes, corev1.Volume{
@@ -322,11 +339,60 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 	groupID := int64(1000)
 	rootID := int64(0)
 
-	initContainers := []corev1.Container{
-		{
-			Name:  "init-permissions",
-			Image: "ubuntu:22.04",
-			Command: []string{"/bin/bash", "-c", `
+	initContainers := []corev1.Container{}
+
+	// Template sync init container - runs FIRST if configured
+	// Copies base files from template PVC to project PVC with retry logic
+	if cfg.TemplatePVCName != "" {
+		initContainers = append(initContainers, corev1.Container{
+			Name:  "init-template",
+			Image: "alpine:3.19",
+			Command: []string{"/bin/sh", "-c", `
+set -euo pipefail
+
+MARKER_FILE="/data/.template-synced"
+MAX_RETRIES=5
+RETRY_DELAY=2
+
+sync_with_retry() {
+    attempt=1
+    while [ $attempt -le $MAX_RETRIES ]; do
+        echo "Syncing template files (attempt $attempt/$MAX_RETRIES)..."
+        if cp -r /template/. /data/; then
+            echo "Template sync completed successfully"
+            # Create marker file with timestamp
+            date -Iseconds > "$MARKER_FILE"
+            return 0
+        fi
+        echo "Sync failed, retrying in ${RETRY_DELAY}s..."
+        sleep $RETRY_DELAY
+        RETRY_DELAY=$((RETRY_DELAY * 2))
+        attempt=$((attempt + 1))
+    done
+    echo "ERROR: Template sync failed after $MAX_RETRIES attempts"
+    return 1
+}
+
+# Only sync if marker file doesn't exist
+if [ ! -f "$MARKER_FILE" ]; then
+    sync_with_retry
+else
+    echo "Template already synced on $(cat $MARKER_FILE), skipping"
+fi
+`},
+			SecurityContext: &corev1.SecurityContext{RunAsUser: &rootID},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "template", MountPath: "/template", ReadOnly: true},
+				{Name: "data", MountPath: "/data"},
+			},
+		})
+	}
+
+	// Permission setup init container
+	initContainers = append(initContainers, corev1.Container{
+		Name:  "init-permissions",
+		Image: "ubuntu:22.04",
+		Command: []string{"/bin/bash", "-c", `
 set -euo pipefail
 if ! getent group mmattox >/dev/null 2>&1; then
   groupadd -g 1000 mmattox
@@ -338,14 +404,16 @@ mkdir -p /data/opt /data/home /data/usr-local-go /data/var-lib-docker
 mkdir -p /data/home/mmattox
 chown -R mmattox:mmattox /data/opt /data/home /data/usr-local-go
 `},
-			SecurityContext: &corev1.SecurityContext{RunAsUser: &rootID},
-			VolumeMounts:    []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
-		},
-		{
-			Name:            "init-home",
-			Image:           fmt.Sprintf("%s:%s", p.ImageRepository, p.ImageTag),
-			ImagePullPolicy: corev1.PullIfNotPresent,
-			Command: []string{"/bin/bash", "-c", `
+		SecurityContext: &corev1.SecurityContext{RunAsUser: &rootID},
+		VolumeMounts:    []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
+	})
+
+	// Home directory setup init container
+	initContainers = append(initContainers, corev1.Container{
+		Name:            "init-home",
+		Image:           fmt.Sprintf("%s:%s", p.ImageRepository, p.ImageTag),
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command: []string{"/bin/bash", "-c", `
 set -euo pipefail
 if [ ! -f /pvc-home/mmattox/.bash_profile ]; then
   echo "Copying home directory files from image to PVC..."
@@ -355,15 +423,14 @@ else
   echo "Home directory already initialized, skipping copy"
 fi
 `},
-			SecurityContext: &corev1.SecurityContext{
-				RunAsUser:  &userID,
-				RunAsGroup: &groupID,
-			},
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: "data", MountPath: "/pvc-home", SubPath: "home"},
-			},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:  &userID,
+			RunAsGroup: &groupID,
 		},
-	}
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "data", MountPath: "/pvc-home", SubPath: "home"},
+		},
+	})
 
 	return &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{

@@ -219,6 +219,27 @@ spec:
               value: {{ default "" .Values.auth.cookieDomain | quote }}
             - name: AUTH_COOKIE_SECURE
               value: {{ ternary "true" "false" (default true .Values.auth.cookieSecure) | quote }}
+{{- /* Controller configuration for project lifecycle management */}}
+{{- if .Values.controller.enabled }}
+            - name: CONTROLLER_ENABLED
+              value: "true"
+            - name: PROJECTS_NAMESPACE
+              value: {{ .Values.controller.projectsNamespace | quote }}
+            - name: RESOURCE_PREFIX
+              value: {{ default "kubetty-project-" .Values.controller.resourcePrefix | quote }}
+            - name: RECONCILE_INTERVAL
+              value: {{ default "30s" .Values.controller.reconcileInterval | quote }}
+            - name: HEALTH_CHECK_INTERVAL
+              value: {{ default "60s" .Values.controller.healthCheckInterval | quote }}
+            - name: ENV_SECRET_NAME
+              value: {{ default "env-secrets" .Values.controller.envSecretName | quote }}
+            - name: IMAGE_PULL_SECRETS
+              value: {{ default "harbor-supporttools" .Values.controller.imagePullSecrets | quote }}
+{{- if .Values.controller.templatePVCName }}
+            - name: TEMPLATE_PVC_NAME
+              value: {{ .Values.controller.templatePVCName | quote }}
+{{- end }}
+{{- end }}
 {{- if .Values.pipelines.dind.enabled }}
             - name: DOCKER_HOST
               value: unix:///var/run/docker/docker.sock

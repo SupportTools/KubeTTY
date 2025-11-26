@@ -55,6 +55,7 @@ type ControllerConfig struct {
 	HealthCheckInterval time.Duration // Health check interval (default: 60s)
 	EnvSecretName       string        // Name of secret containing project env vars (default: "env-secrets")
 	ImagePullSecrets    []string      // List of image pull secret names (default: ["harbor-supporttools"])
+	TemplatePVCName     string        // Name of template PVC for base file sync (optional, empty disables sync)
 }
 
 // ParseEnvironment extracts the environment suffix from ProjectsNamespace.
@@ -106,6 +107,7 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 			HealthCheckInterval: sharedconfig.GetEnvDuration("HEALTH_CHECK_INTERVAL", 60*time.Second),
 			EnvSecretName:       sharedconfig.GetEnv("ENV_SECRET_NAME", "env-secrets"),
 			ImagePullSecrets:    parseImagePullSecrets(sharedconfig.GetEnv("IMAGE_PULL_SECRETS", "harbor-supporttools")),
+			TemplatePVCName:     os.Getenv("TEMPLATE_PVC_NAME"),
 		},
 		RecommendedImageTag: sharedconfig.GetEnv("RECOMMENDED_IMAGE_TAG", "latest"),
 		ExecMode:            parseExecMode(sharedconfig.GetEnv("KUBETTY_EXEC_MODE", "websocket")),

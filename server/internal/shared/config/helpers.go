@@ -119,6 +119,31 @@ func GetEnvBool(key string, def bool) bool {
 	return parsed
 }
 
+// GetEnvFloat64 retrieves a float64 environment variable with a default fallback.
+// The environment variable should be a string parseable by strconv.ParseFloat
+// (e.g., "0.70", "1.5", "0.8").
+//
+// If the environment variable is not set, empty, or cannot be parsed as a float,
+// the default value is returned and a warning is logged.
+//
+// Example:
+//
+//	threshold := config.GetEnvFloat64("STORAGE_EXPAND_THRESHOLD", 0.70)
+//	// Returns 0.70 if STORAGE_EXPAND_THRESHOLD is not set or invalid
+func GetEnvFloat64(key string, def float64) float64 {
+	val := os.Getenv(key)
+	if val == "" {
+		return def
+	}
+	parsed, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		log.WithFields(log.Fields{"key": key, "value": val, "default": def}).
+			Warn("Invalid float64 environment variable, using default")
+		return def
+	}
+	return parsed
+}
+
 // BuildPostgresConnString constructs a PostgreSQL connection string from individual
 // components. This is used to connect to CloudNativePG (CNPG) databases.
 //

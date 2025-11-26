@@ -1,3 +1,4 @@
+import { useState, useMemo } from 'react';
 import { ProjectInfo, ProjectHealthStatus } from '../types';
 
 type Props = {
@@ -5,6 +6,11 @@ type Props = {
   onSelect: (projectId: string) => void;
   onClose: () => void;
 };
+
+type SortField = 'name' | 'namespace' | 'status';
+type SortDirection = 'asc' | 'desc';
+
+const ITEMS_PER_PAGE = 5;
 
 const getStatusClass = (status?: ProjectHealthStatus): string => {
   switch (status) {
@@ -32,21 +38,137 @@ const getStatusLabel = (status?: ProjectHealthStatus): string => {
   }
 };
 
+const getStatusPriority = (status?: ProjectHealthStatus): number => {
+  switch (status) {
+    case 'online':
+      return 1;
+    case 'degraded':
+      return 2;
+    case 'offline':
+      return 3;
+    default:
+      return 4;
+  }
+};
+
 const ProjectPicker = ({ projects, onSelect, onClose }: Props) => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortField, setSortField] = useState<SortField>('name');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
+  const [currentPage, setCurrentPage] = useState(1);
+
+  // Filter projects based on search query
+  const filteredProjects = useMemo(() => {
+    if (!searchQuery.trim()) return projects;
+    const query = searchQuery.toLowerCase();
+    return projects.filter(
+      (project) =>
+        (project.displayName || project.id).toLowerCase().includes(query) ||
+        project.namespace?.toLowerCase().includes(query) ||
+        project.description?.toLowerCase().includes(query)
+    );
+  }, [projects, searchQuery]);
+
+  // Sort filtered projects
+  const sortedProjects = useMemo(() => {
+    const sorted = [...filteredProjects].sort((a, b) => {
+      let comparison = 0;
+      switch (sortField) {
+        case 'name':
+          comparison = (a.displayName || a.id).localeCompare(b.displayName || b.id);
+          break;
+        case 'namespace':
+          comparison = (a.namespace || '').localeCompare(b.namespace || '');
+          break;
+        case 'status':
+          comparison = getStatusPriority(a.status) - getStatusPriority(b.status);
+          break;
+      }
+      return sortDirection === 'asc' ? comparison : -comparison;
+    });
+    return sorted;
+  }, [filteredProjects, sortField, sortDirection]);
+
+  // Paginate sorted projects
+  const totalPages = Math.ceil(sortedProjects.length / ITEMS_PER_PAGE);
+  const paginatedProjects = useMemo(() => {
+    const start = (currentPage - 1) * ITEMS_PER_PAGE;
+    return sortedProjects.slice(start, start + ITEMS_PER_PAGE);
+  }, [sortedProjects, currentPage]);
+
+  // Reset to page 1 when search or sort changes
+  const handleSearchChange = (value: string) => {
+    setSearchQuery(value);
+    setCurrentPage(1);
+  };
+
+  const handleSortChange = (field: SortField) => {
+    if (field === sortField) {
+      setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+    setCurrentPage(1);
+  };
+
+  const getSortIcon = (field: SortField) => {
+    if (sortField !== field) return '';
+    return sortDirection === 'asc' ? ' ▲' : ' ▼';
+  };
+
   return (
     <div className="project-picker-backdrop">
       <div className="project-picker">
         <div className="picker-header">
           <h3>Select Project</h3>
           <button onClick={onClose} aria-label="Close picker">
-            ×
+            &times;
           </button>
         </div>
-        {projects.length === 0 ? (
-          <p className="picker-empty">No projects available.</p>
+
+        {/* Search input */}
+        <div className="picker-search">
+          <input
+            type="text"
+            placeholder="Search projects..."
+            value={searchQuery}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            autoFocus
+          />
+        </div>
+
+        {/* Sort controls */}
+        <div className="picker-sort">
+          <span className="sort-label">Sort by:</span>
+          <button
+            className={`sort-btn ${sortField === 'name' ? 'active' : ''}`}
+            onClick={() => handleSortChange('name')}
+          >
+            Name{getSortIcon('name')}
+          </button>
+          <button
+            className={`sort-btn ${sortField === 'namespace' ? 'active' : ''}`}
+            onClick={() => handleSortChange('namespace')}
+          >
+            Namespace{getSortIcon('namespace')}
+          </button>
+          <button
+            className={`sort-btn ${sortField === 'status' ? 'active' : ''}`}
+            onClick={() => handleSortChange('status')}
+          >
+            Status{getSortIcon('status')}
+          </button>
+        </div>
+
+        {/* Project list */}
+        {paginatedProjects.length === 0 ? (
+          <p className="picker-empty">
+            {searchQuery ? 'No projects match your search.' : 'No projects available.'}
+          </p>
         ) : (
           <ul>
-            {projects.map((project) => (
+            {paginatedProjects.map((project) => (
               <li key={project.id}>
                 <button className="project-option" onClick={() => onSelect(project.id)}>
                   <div className="project-info">
@@ -65,6 +187,34 @@ const ProjectPicker = ({ projects, onSelect, onClose }: Props) => {
             ))}
           </ul>
         )}
+
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <div className="picker-pagination">
+            <button
+              className="page-btn"
+              disabled={currentPage === 1}
+              onClick={() => setCurrentPage((p) => p - 1)}
+            >
+              &laquo; Prev
+            </button>
+            <span className="page-info">
+              Page {currentPage} of {totalPages}
+            </span>
+            <button
+              className="page-btn"
+              disabled={currentPage === totalPages}
+              onClick={() => setCurrentPage((p) => p + 1)}
+            >
+              Next &raquo;
+            </button>
+          </div>
+        )}
+
+        {/* Results count */}
+        <div className="picker-results-count">
+          {filteredProjects.length} project{filteredProjects.length !== 1 ? 's' : ''} found
+        </div>
       </div>
     </div>
   );

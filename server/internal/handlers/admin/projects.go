@@ -243,6 +243,53 @@ func (h *ProjectHandlers) DeleteProject(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ResyncProject handles POST /api/admin/projects/{id}/resync
+// This triggers a full resync of project resources, recreating any missing
+// resources while preserving existing ones (especially PVCs with data).
+func (h *ProjectHandlers) ResyncProject(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	projectID, err := extractProjectID(r)
+	if err != nil {
+		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid project ID", ""))
+		return
+	}
+
+	project, err := h.store.Get(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, projects.ErrProjectNotFound) {
+			_ = apierrors.WriteError(w, apierrors.NotFound("project not found", ""))
+			return
+		}
+		log.WithError(err).Error("admin/projects: failed to get project for resync")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to resync project", ""))
+		return
+	}
+
+	// Only allow resync for failed or running projects
+	if project.Status != projects.StatusRunning && project.Status != projects.StatusFailed {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(
+			"project must be running or failed to resync (current status: "+string(project.Status)+")", ""))
+		return
+	}
+
+	if err := h.controller.ResyncProject(ctx, project); err != nil {
+		log.WithError(err).Error("admin/projects: failed to resync project")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to resync project", ""))
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"project_id":      project.ID.String(),
+		"project_name":    project.Name,
+		"previous_status": project.Status,
+	}).Info("admin/projects: project resync triggered")
+
+	_ = util.WriteJSON(w, http.StatusOK, map[string]string{
+		"message": "project resync triggered, missing resources will be recreated",
+	})
+}
+
 // RestartProject handles POST /api/admin/projects/{id}/restart
 func (h *ProjectHandlers) RestartProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -508,6 +555,7 @@ func (h *ProjectHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/admin/projects/{id}", h.UpdateProject)
 	mux.HandleFunc("DELETE /api/admin/projects/{id}", h.DeleteProject)
 	mux.HandleFunc("POST /api/admin/projects/{id}/restart", h.RestartProject)
+	mux.HandleFunc("POST /api/admin/projects/{id}/resync", h.ResyncProject)
 	mux.HandleFunc("GET /api/admin/projects/{id}/status", h.GetProjectStatus)
 	mux.HandleFunc("GET /api/admin/projects/{id}/upgrade-info", h.GetUpgradeInfo)
 	mux.HandleFunc("POST /api/admin/projects/{id}/upgrade", h.UpgradeProject)

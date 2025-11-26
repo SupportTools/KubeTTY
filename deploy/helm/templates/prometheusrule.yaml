@@ -40,4 +40,58 @@ spec:
           annotations:
             summary: {{ default "KubeTTY log cleanup errors" (index $ann "errorSummary") | quote }}
             description: {{ default (printf "Log cleanup has thrown errors within the past %d minutes for release %s." $windowMinutes .Release.Name) (index $ann "errorDescription") | quote }}
+    - name: kubetty-storage
+      rules:
+        # Alert when PVC expansion fails
+        - alert: KubeTTYPVCExpansionFailed
+          expr: increase(kubetty_pvc_expansion_failed_total[5m]) > 0
+          for: 1m
+          labels:
+            release: {{ .Release.Name }}
+            severity: warning
+          annotations:
+            summary: "PVC expansion failed for project {{ "{{" }} $labels.project {{ "}}" }}"
+            description: "PVC {{ "{{" }} $labels.pvc {{ "}}" }} expansion failed with reason: {{ "{{" }} $labels.reason {{ "}}" }}"
+        # Alert when disk usage is critical (90%+) despite expansion attempts
+        - alert: KubeTTYPVCUsageCritical
+          expr: kubetty_pvc_usage_percent >= 90
+          for: 5m
+          labels:
+            release: {{ .Release.Name }}
+            severity: critical
+          annotations:
+            summary: "Critical disk usage for project {{ "{{" }} $labels.project {{ "}}" }}"
+            description: "PVC {{ "{{" }} $labels.pvc {{ "}}" }} is at {{ "{{" }} $value | printf \"%.1f\" {{ "}}" }}% capacity. Immediate action required."
+        # Alert when disk usage is high (80%+) - expansion should have triggered at 70%
+        - alert: KubeTTYPVCUsageHigh
+          expr: kubetty_pvc_usage_percent >= 80
+          for: 10m
+          labels:
+            release: {{ .Release.Name }}
+            severity: warning
+          annotations:
+            summary: "High disk usage for project {{ "{{" }} $labels.project {{ "}}" }}"
+            description: "PVC {{ "{{" }} $labels.pvc {{ "}}" }} is at {{ "{{" }} $value | printf \"%.1f\" {{ "}}" }}% capacity. Auto-expansion may not be keeping up with growth rate."
+    - name: kubetty-leader-election
+      rules:
+        # Alert when no gateway has acquired leadership (controller is not running)
+        - alert: KubeTTYNoLeader
+          expr: sum(kubetty_gateway_leader_status) == 0 or absent(kubetty_gateway_leader_status) == 1
+          for: 2m
+          labels:
+            release: {{ .Release.Name }}
+            severity: critical
+          annotations:
+            summary: "No KubeTTY gateway leader elected"
+            description: "No gateway instance has acquired leadership. The project controller is not running, which means project lifecycle management is paused."
+        # Alert when leader transitions happen too frequently (potential flapping)
+        - alert: KubeTTYLeaderFlapping
+          expr: increase(kubetty_gateway_leader_transitions_total[5m]) > 3
+          for: 2m
+          labels:
+            release: {{ .Release.Name }}
+            severity: warning
+          annotations:
+            summary: "KubeTTY leader election flapping"
+            description: "Leader transitions are happening frequently ({{ "{{" }} $value | printf \"%.0f\" {{ "}}" }} in 5 minutes). This may indicate network issues or unstable pods."
 {{- end }}

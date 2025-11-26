@@ -11,6 +11,7 @@ type ProjectStatus string
 
 const (
 	StatusPending  ProjectStatus = "pending"
+	StatusSyncing  ProjectStatus = "syncing" // Template sync Job is running
 	StatusCreating ProjectStatus = "creating"
 	StatusRunning  ProjectStatus = "running"
 	StatusUpdating ProjectStatus = "updating"

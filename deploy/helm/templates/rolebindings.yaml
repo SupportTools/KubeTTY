@@ -1,5 +1,6 @@
 {{- if .Values.rbac.create }}
 {{- $sa := include "kubetty.serviceAccountName" . -}}
+{{- $suffix := .Values.rbac.clusterResourceSuffix | default "" -}}
 {{- $adminNS := .Values.rbac.projectNamespaces | default .Values.rbac.adminNamespaces -}}
 {{- range $ns := $adminNS }}
 apiVersion: rbac.authorization.k8s.io/v1
@@ -13,7 +14,7 @@ subjects:
     namespace: {{ $.Release.Namespace }}
 roleRef:
   kind: ClusterRole
-  name: {{ include "kubetty.fullname" $ }}-admin
+  name: {{ include "kubetty.fullname" $ }}-admin{{ $suffix }}
   apiGroup: rbac.authorization.k8s.io
 ---
 {{- end }}
@@ -29,7 +30,7 @@ subjects:
     namespace: {{ $.Release.Namespace }}
 roleRef:
   kind: ClusterRole
-  name: {{ include "kubetty.fullname" $ }}-read
+  name: {{ include "kubetty.fullname" $ }}-read{{ $suffix }}
   apiGroup: rbac.authorization.k8s.io
 ---
 {{- end }}

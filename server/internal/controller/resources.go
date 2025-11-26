@@ -7,6 +7,7 @@ import (
 
 	"github.com/supporttools/KubeTTY/server/internal/projects"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -141,6 +142,117 @@ func BuildPVC(p *projects.Project, cfg ResourceConfig) *corev1.PersistentVolumeC
 	}
 }
 
+// TemplateSyncJobName returns the name for the template sync Job.
+// Name format: {prefix}{project-name}-sync
+func (c ResourceConfig) TemplateSyncJobName(projectName string) string {
+	return fmt.Sprintf("%s-sync", c.ResourceName(projectName))
+}
+
+// BuildTemplateSyncJob creates a Job that syncs template files to the project's PVC.
+// This Job runs once before the Deployment is created, copies files from the template
+// PVC to the project's data PVC, and then completes. This approach avoids keeping
+// the template PVC attached to a running pod, which would block other projects.
+// Name format: {prefix}{project-name}-sync
+func BuildTemplateSyncJob(p *projects.Project, cfg ResourceConfig) *batchv1.Job {
+	resourceName := cfg.ResourceName(p.Name)
+	jobName := cfg.TemplateSyncJobName(p.Name)
+	pvcName := fmt.Sprintf("%s-data", resourceName)
+
+	// Job configuration
+	backoffLimit := int32(3)
+	ttlSecondsAfterFinished := int32(300) // Clean up Job 5 min after completion
+	rootID := int64(0)
+
+	return &batchv1.Job{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "batch/v1",
+			Kind:       "Job",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: cfg.Namespace,
+			Labels:    projectLabels(p, cfg),
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit:            &backoffLimit,
+			TTLSecondsAfterFinished: &ttlSecondsAfterFinished,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: projectLabels(p, cfg),
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy:    corev1.RestartPolicyOnFailure,
+					ImagePullSecrets: buildImagePullSecrets(cfg.ImagePullSecrets),
+					Containers: []corev1.Container{
+						{
+							Name:  "template-sync",
+							Image: "alpine:3.19",
+							Command: []string{"/bin/sh", "-c", `
+set -euo pipefail
+
+MARKER_FILE="/data/.template-synced"
+MAX_RETRIES=5
+RETRY_DELAY=2
+
+sync_with_retry() {
+    attempt=1
+    while [ $attempt -le $MAX_RETRIES ]; do
+        echo "Syncing template files (attempt $attempt/$MAX_RETRIES)..."
+        if cp -r /template/. /data/; then
+            echo "Template sync completed successfully"
+            # Create marker file with timestamp
+            date -Iseconds > "$MARKER_FILE"
+            return 0
+        fi
+        echo "Sync failed, retrying in ${RETRY_DELAY}s..."
+        sleep $RETRY_DELAY
+        RETRY_DELAY=$((RETRY_DELAY * 2))
+        attempt=$((attempt + 1))
+    done
+    echo "ERROR: Template sync failed after $MAX_RETRIES attempts"
+    return 1
+}
+
+# Only sync if marker file doesn't exist
+if [ ! -f "$MARKER_FILE" ]; then
+    sync_with_retry
+else
+    echo "Template already synced on $(cat $MARKER_FILE), skipping"
+fi
+echo "Template sync job completed"
+`},
+							SecurityContext: &corev1.SecurityContext{RunAsUser: &rootID},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "template", MountPath: "/template", ReadOnly: true},
+								{Name: "data", MountPath: "/data"},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "template",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: cfg.TemplatePVCName,
+									ReadOnly:  true,
+								},
+							},
+						},
+						{
+							Name: "data",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: pvcName,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 // BuildServiceAccount creates a ServiceAccount for the project pod.
 // Name format: {prefix}{project-name}-sa
 func BuildServiceAccount(p *projects.Project, cfg ResourceConfig) *corev1.ServiceAccount {
@@ -217,18 +329,9 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 		},
 	})
 
-	// Template volume (for base file sync) - only if configured
-	if cfg.TemplatePVCName != "" {
-		volumes = append(volumes, corev1.Volume{
-			Name: "template",
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: cfg.TemplatePVCName,
-					ReadOnly:  true,
-				},
-			},
-		})
-	}
+	// Note: Template volume is no longer needed here - template sync is handled
+	// by a separate Job (BuildTemplateSyncJob) that runs before the Deployment.
+	// This avoids keeping the template PVC attached to running project pods.
 
 	// DinD sidecar if enabled
 	if p.DinDEnabled {
@@ -341,52 +444,9 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 
 	initContainers := []corev1.Container{}
 
-	// Template sync init container - runs FIRST if configured
-	// Copies base files from template PVC to project PVC with retry logic
-	if cfg.TemplatePVCName != "" {
-		initContainers = append(initContainers, corev1.Container{
-			Name:  "init-template",
-			Image: "alpine:3.19",
-			Command: []string{"/bin/sh", "-c", `
-set -euo pipefail
-
-MARKER_FILE="/data/.template-synced"
-MAX_RETRIES=5
-RETRY_DELAY=2
-
-sync_with_retry() {
-    attempt=1
-    while [ $attempt -le $MAX_RETRIES ]; do
-        echo "Syncing template files (attempt $attempt/$MAX_RETRIES)..."
-        if cp -r /template/. /data/; then
-            echo "Template sync completed successfully"
-            # Create marker file with timestamp
-            date -Iseconds > "$MARKER_FILE"
-            return 0
-        fi
-        echo "Sync failed, retrying in ${RETRY_DELAY}s..."
-        sleep $RETRY_DELAY
-        RETRY_DELAY=$((RETRY_DELAY * 2))
-        attempt=$((attempt + 1))
-    done
-    echo "ERROR: Template sync failed after $MAX_RETRIES attempts"
-    return 1
-}
-
-# Only sync if marker file doesn't exist
-if [ ! -f "$MARKER_FILE" ]; then
-    sync_with_retry
-else
-    echo "Template already synced on $(cat $MARKER_FILE), skipping"
-fi
-`},
-			SecurityContext: &corev1.SecurityContext{RunAsUser: &rootID},
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: "template", MountPath: "/template", ReadOnly: true},
-				{Name: "data", MountPath: "/data"},
-			},
-		})
-	}
+	// Note: Template sync is now handled by a separate Job (BuildTemplateSyncJob)
+	// that runs before the Deployment. This avoids keeping the template PVC
+	// attached to running project pods, which blocked other projects on RWO storage.
 
 	// Permission setup init container
 	initContainers = append(initContainers, corev1.Container{

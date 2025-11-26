@@ -10,6 +10,12 @@
 //   - kubetty_store_errors_total: Database operation error counts
 //   - kubetty_http_duration_seconds: HTTP request latency histograms
 //   - kubetty_http_requests_total: HTTP request counts by route/method/status
+//   - kubetty_pvc_usage_bytes: Current PVC usage in bytes
+//   - kubetty_pvc_limit_bytes: PVC capacity limit in bytes
+//   - kubetty_pvc_usage_percent: PVC usage as percentage (0-100)
+//   - kubetty_pvc_expansions_total: Total number of PVC expansions triggered
+//   - kubetty_pvc_expansion_failed_total: Total number of failed PVC expansions
+//   - kubetty_pvc_current_size_bytes: Current PVC requested size in bytes
 //
 // All metrics are automatically registered with Prometheus default registry via promauto
 // and follow Prometheus naming conventions for consistency with Kubernetes ecosystem monitoring.
@@ -22,6 +28,92 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+// Leader election metrics (package-level for access from gateway)
+var (
+	// LeaderStatus indicates whether this instance is the leader (1) or not (0).
+	LeaderStatus = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "kubetty_gateway_leader_status",
+			Help: "Whether this gateway instance is the leader (1) or not (0)",
+		},
+	)
+
+	// LeaderTransitionsTotal counts total leader transitions.
+	LeaderTransitionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kubetty_gateway_leader_transitions_total",
+			Help: "Total number of leader transitions",
+		},
+		[]string{"type"}, // "acquired" or "lost"
+	)
+
+	// LeaderIdentity stores the current leader identity as an info metric.
+	LeaderIdentity = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kubetty_gateway_leader_identity",
+			Help: "Current leader identity (value is always 1, labels contain identity info)",
+		},
+		[]string{"identity", "is_self"},
+	)
+)
+
+// PVC storage monitoring metrics (package-level for access from controller)
+var (
+	// PVCUsageBytes tracks current PVC disk usage in bytes per project.
+	PVCUsageBytes = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kubetty_pvc_usage_bytes",
+			Help: "Current PVC disk usage in bytes",
+		},
+		[]string{"project", "pvc"},
+	)
+
+	// PVCLimitBytes tracks PVC capacity limit in bytes per project.
+	PVCLimitBytes = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kubetty_pvc_limit_bytes",
+			Help: "PVC capacity limit in bytes",
+		},
+		[]string{"project", "pvc"},
+	)
+
+	// PVCUsagePercent tracks PVC usage as percentage (0-100) per project.
+	PVCUsagePercent = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kubetty_pvc_usage_percent",
+			Help: "PVC usage as percentage (0-100)",
+		},
+		[]string{"project", "pvc"},
+	)
+
+	// PVCExpansionsTotal counts total PVC expansions by status (success/failed).
+	PVCExpansionsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kubetty_pvc_expansions_total",
+			Help: "Total number of PVC expansions triggered",
+		},
+		[]string{"project", "pvc", "status"},
+	)
+
+	// PVCExpansionFailedTotal counts failed PVC expansions by reason (for alerting).
+	PVCExpansionFailedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kubetty_pvc_expansion_failed_total",
+			Help: "Total number of failed PVC expansions (for alerting)",
+		},
+		[]string{"project", "pvc", "reason"},
+	)
+
+	// PVCCurrentSizeBytes tracks current PVC requested size in bytes.
+	PVCCurrentSizeBytes = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kubetty_pvc_current_size_bytes",
+			Help: "Current PVC requested size in bytes",
+		},
+		[]string{"project", "pvc"},
+	)
 )
 
 // AppMetrics holds all Prometheus metrics for the application.

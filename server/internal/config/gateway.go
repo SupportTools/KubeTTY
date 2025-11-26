@@ -38,12 +38,23 @@ type GatewayConfig struct {
 	MetricsInterval time.Duration // Metrics collection interval (default: 15s)
 	// Controller configuration for single-namespace project management
 	Controller ControllerConfig
+	// Leader election configuration for multi-replica deployments
+	LeaderElection LeaderElectionConfig
 	// Recommended image tag for project upgrades (default: "latest")
 	RecommendedImageTag string
 	// ExecMode controls how the gateway connects to project pods (default: "websocket")
 	// - "websocket": relay WebSocket connections to project pods (legacy)
 	// - "exec": use kubectl exec via Kubernetes remotecommand API (more stable)
 	ExecMode ExecModeType
+}
+
+// LeaderElectionConfig holds configuration for leader election.
+type LeaderElectionConfig struct {
+	Enabled       bool          // Enable leader election (default: true when controller is enabled)
+	LeaseName     string        // Name of the Lease resource (default: "kubetty-gateway-leader")
+	LeaseDuration time.Duration // Duration that non-leaders wait before acquiring leadership (default: 15s)
+	RenewDeadline time.Duration // Duration leader retries refreshing leadership (default: 10s)
+	RetryPeriod   time.Duration // Duration between leadership acquire/renew attempts (default: 2s)
 }
 
 // ControllerConfig holds configuration for the single-namespace project controller.
@@ -56,6 +67,13 @@ type ControllerConfig struct {
 	EnvSecretName       string        // Name of secret containing project env vars (default: "env-secrets")
 	ImagePullSecrets    []string      // List of image pull secret names (default: ["harbor-supporttools"])
 	TemplatePVCName     string        // Name of template PVC for base file sync (optional, empty disables sync)
+
+	// Storage monitoring configuration
+	StorageMonitorEnabled  bool          // Enable automatic PVC expansion when storage is low (default: true)
+	StorageMonitorInterval time.Duration // How often to check storage usage (default: 60s)
+	StorageExpandThreshold float64       // Expand PVC when usage >= this fraction (default: 0.70)
+	StorageExpandAmount    string        // Fixed amount to expand by (default: "10Gi")
+	StorageExpandCooldown  time.Duration // Minimum time between expansions (default: 5m)
 }
 
 // ParseEnvironment extracts the environment suffix from ProjectsNamespace.
@@ -100,14 +118,26 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 		MetricsEnabled:     sharedconfig.GetEnvBool("METRICS_ENABLED", true),
 		MetricsInterval:    sharedconfig.GetEnvDuration("METRICS_INTERVAL", 15*time.Second),
 		Controller: ControllerConfig{
-			Enabled:             sharedconfig.GetEnvBool("CONTROLLER_ENABLED", false),
-			ProjectsNamespace:   os.Getenv("PROJECTS_NAMESPACE"),
-			ResourcePrefix:      sharedconfig.GetEnv("RESOURCE_PREFIX", "kubetty-project-"),
-			ReconcileInterval:   sharedconfig.GetEnvDuration("RECONCILE_INTERVAL", 30*time.Second),
-			HealthCheckInterval: sharedconfig.GetEnvDuration("HEALTH_CHECK_INTERVAL", 60*time.Second),
-			EnvSecretName:       sharedconfig.GetEnv("ENV_SECRET_NAME", "env-secrets"),
-			ImagePullSecrets:    parseImagePullSecrets(sharedconfig.GetEnv("IMAGE_PULL_SECRETS", "harbor-supporttools")),
-			TemplatePVCName:     os.Getenv("TEMPLATE_PVC_NAME"),
+			Enabled:                sharedconfig.GetEnvBool("CONTROLLER_ENABLED", false),
+			ProjectsNamespace:      os.Getenv("PROJECTS_NAMESPACE"),
+			ResourcePrefix:         sharedconfig.GetEnv("RESOURCE_PREFIX", "kubetty-project-"),
+			ReconcileInterval:      sharedconfig.GetEnvDuration("RECONCILE_INTERVAL", 30*time.Second),
+			HealthCheckInterval:    sharedconfig.GetEnvDuration("HEALTH_CHECK_INTERVAL", 60*time.Second),
+			EnvSecretName:          sharedconfig.GetEnv("ENV_SECRET_NAME", "env-secrets"),
+			ImagePullSecrets:       parseImagePullSecrets(sharedconfig.GetEnv("IMAGE_PULL_SECRETS", "harbor-supporttools")),
+			TemplatePVCName:        os.Getenv("TEMPLATE_PVC_NAME"),
+			StorageMonitorEnabled:  sharedconfig.GetEnvBool("STORAGE_MONITOR_ENABLED", true),
+			StorageMonitorInterval: sharedconfig.GetEnvDuration("STORAGE_MONITOR_INTERVAL", 60*time.Second),
+			StorageExpandThreshold: sharedconfig.GetEnvFloat64("STORAGE_EXPAND_THRESHOLD", 0.70),
+			StorageExpandAmount:    sharedconfig.GetEnv("STORAGE_EXPAND_AMOUNT", "10Gi"),
+			StorageExpandCooldown:  sharedconfig.GetEnvDuration("STORAGE_EXPAND_COOLDOWN", 5*time.Minute),
+		},
+		LeaderElection: LeaderElectionConfig{
+			Enabled:       sharedconfig.GetEnvBool("LEADER_ELECTION_ENABLED", true),
+			LeaseName:     sharedconfig.GetEnv("LEADER_ELECTION_LEASE_NAME", "kubetty-gateway-leader"),
+			LeaseDuration: sharedconfig.GetEnvDuration("LEADER_ELECTION_LEASE_DURATION", 15*time.Second),
+			RenewDeadline: sharedconfig.GetEnvDuration("LEADER_ELECTION_RENEW_DEADLINE", 10*time.Second),
+			RetryPeriod:   sharedconfig.GetEnvDuration("LEADER_ELECTION_RETRY_PERIOD", 2*time.Second),
 		},
 		RecommendedImageTag: sharedconfig.GetEnv("RECOMMENDED_IMAGE_TAG", "latest"),
 		ExecMode:            parseExecMode(sharedconfig.GetEnv("KUBETTY_EXEC_MODE", "websocket")),

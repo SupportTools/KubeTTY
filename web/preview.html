@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KubeTTY - UI Preview</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="src/index.css">
+  <style>
+    /* Preview-specific overrides */
+    .preview-nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      padding: 0.5rem 1rem;
+      display: flex;
+      gap: 1rem;
+      z-index: 10000;
+      font-family: var(--font-sans);
+    }
+    .preview-nav button {
+      padding: 0.5rem 1rem;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.2s;
+    }
+    .preview-nav button:hover {
+      border-color: var(--blue);
+      color: var(--blue);
+    }
+    .preview-nav button.active {
+      background: var(--blue);
+      color: var(--navy);
+      border-color: var(--blue);
+    }
+    .preview-container {
+      padding-top: 50px;
+    }
+    .preview-section {
+      display: none;
+    }
+    .preview-section.active {
+      display: block;
+    }
+    /* Mock terminal content */
+    .mock-terminal {
+      font-family: var(--font-mono);
+      font-size: 14px;
+      line-height: 1.5;
+      padding: 1rem;
+      color: var(--text-primary);
+      flex: 1;
+    }
+    .mock-terminal .prompt {
+      color: var(--success);
+    }
+    .mock-terminal .command {
+      color: var(--blue);
+    }
+    .mock-terminal .output {
+      color: var(--text-secondary);
+    }
+  </style>
+</head>
+<body>
+  <!-- Preview Navigation -->
+  <nav class="preview-nav">
+    <button class="active" onclick="showSection('main')">Main App</button>
+    <button onclick="showSection('login')">Login</button>
+    <button onclick="showSection('admin')">Admin Panel</button>
+    <button onclick="showSection('dashboard')">Dashboard</button>
+    <button onclick="showSection('settings')">Settings</button>
+    <span style="margin-left: auto; color: var(--text-muted);">|</span>
+    <button id="sidebar-toggle" onclick="toggleSidebar()">Show Sidebar</button>
+  </nav>
+
+  <div class="preview-container">
+    <!-- Main Application View -->
+    <section id="main" class="preview-section active">
+      <div class="app-shell layout-modern">
+        <!-- Global Rail -->
+        <nav class="global-rail">
+          <div class="rail-logo">
+            <svg width="32" height="32" viewBox="0 0 64 64" fill="none">
+              <rect width="64" height="64" rx="12" fill="#0d1626"/>
+              <path d="M17 46V18h6v10l10-10h8l-11.7 12.4L42 46h-7.6l-8.3-11-3.1 3.4V46h-6z" fill="#f5f7fb"/>
+              <path d="M36 18h21v6h-7.3v22h-6.5V24H36v-6z" fill="#64b5ff"/>
+            </svg>
+          </div>
+          <div class="rail-actions">
+            <button class="rail-btn active" title="Terminal">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="4,17 10,11 4,5"/>
+                <line x1="12" y1="19" x2="20" y2="19"/>
+              </svg>
+            </button>
+            <button class="rail-btn" title="Projects">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="7" height="7"/>
+                <rect x="14" y="3" width="7" height="7"/>
+                <rect x="3" y="14" width="7" height="7"/>
+                <rect x="14" y="14" width="7" height="7"/>
+              </svg>
+            </button>
+            <button class="rail-btn" title="Settings">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+              </svg>
+            </button>
+          </div>
+        </nav>
+
+        <!-- Project Panel -->
+        <aside class="project-panel">
+          <div class="project-panel-header">
+            <div>
+              <p class="panel-label">Gateway</p>
+              <p class="gateway-state state-enabled">
+                <span class="state-dot"></span>
+                Ready for sessions
+              </p>
+            </div>
+            <div class="panel-actions">
+              <button class="panel-link">Dashboard</button>
+              <button class="panel-link">Projects</button>
+            </div>
+          </div>
+
+          <div class="project-panel-search">
+            <input type="search" placeholder="Search projects">
+          </div>
+
+          <div class="project-panel-filters">
+            <button class="filter-pill active">All (12)</button>
+            <button class="filter-pill">Failing (2)</button>
+            <button class="filter-pill">Paused (1)</button>
+          </div>
+
+          <div class="project-list">
+            <!-- Online Project -->
+            <button class="project-card status-online active">
+              <div class="project-card-header">
+                <div>
+                  <p class="project-name">production-api</p>
+                  <p class="project-namespace">prod-services</p>
+                </div>
+                <span class="status-pill status-online">Online</span>
+              </div>
+              <p class="project-description">Main production API cluster running customer-facing services.</p>
+              <div class="project-meta">
+                <span>2m ago</span>
+              </div>
+            </button>
+
+            <!-- Degraded Project -->
+            <button class="project-card status-degraded">
+              <div class="project-card-header">
+                <div>
+                  <p class="project-name">staging-workers</p>
+                  <p class="project-namespace">staging</p>
+                </div>
+                <span class="status-pill status-degraded">Degraded</span>
+              </div>
+              <p class="project-description">Background job processing workers for staging environment.</p>
+              <div class="project-meta">
+                <span>5m ago</span>
+                <span class="project-reason">High memory usage</span>
+              </div>
+            </button>
+
+            <!-- Offline Project -->
+            <button class="project-card status-offline">
+              <div class="project-card-header">
+                <div>
+                  <p class="project-name">dev-database</p>
+                  <p class="project-namespace">development</p>
+                </div>
+                <span class="status-pill status-offline">Offline</span>
+              </div>
+              <p class="project-description">Development PostgreSQL database cluster.</p>
+              <div class="project-meta">
+                <span>1h ago</span>
+                <span class="project-reason">Connection refused</span>
+              </div>
+            </button>
+
+            <!-- Paused Project -->
+            <button class="project-card status-paused" disabled>
+              <div class="project-card-header">
+                <div>
+                  <p class="project-name">legacy-migration</p>
+                  <p class="project-namespace">migrations</p>
+                </div>
+                <span class="status-pill status-paused">Paused</span>
+              </div>
+              <p class="project-description">Legacy data migration service - temporarily paused.</p>
+              <div class="project-meta">
+                <span>3d ago</span>
+                <span class="project-reason">Paused by admin</span>
+              </div>
+            </button>
+
+            <!-- Pending Project -->
+            <button class="project-card status-pending" disabled>
+              <div class="project-card-header">
+                <div>
+                  <p class="project-name">new-service</p>
+                  <p class="project-namespace">development</p>
+                </div>
+                <span class="status-pill status-pending">Creating</span>
+              </div>
+              <p class="project-description">New microservice being provisioned.</p>
+              <div class="project-meta">
+                <span>Now</span>
+                <span class="project-reason">Creating resources</span>
+              </div>
+            </button>
+          </div>
+        </aside>
+
+        <!-- Workspace Shell -->
+        <div class="workspace-shell">
+          <!-- Tab Bar - Simple compact tabs -->
+          <div class="tab-bar enhanced">
+            <div class="tab-list">
+              <div class="tab-card active">
+                <p class="tab-project-label">production-api</p>
+                <span class="status-pill status-pill-connected">Connected</span>
+                <button class="tab-close" aria-label="Close production-api">×</button>
+              </div>
+
+              <div class="tab-card">
+                <p class="tab-project-label">staging-workers</p>
+                <span class="status-pill status-pill-reconnecting">Reconnecting</span>
+                <button class="tab-close" aria-label="Close staging-workers">×</button>
+              </div>
+
+              <div class="tab-card">
+                <p class="tab-project-label">dev-database</p>
+                <span class="status-pill status-pill-closed">Closed</span>
+                <button class="tab-close" aria-label="Close dev-database">×</button>
+              </div>
+
+              <button class="tab-card add">+ New session</button>
+            </div>
+          </div>
+
+          <!-- Session HUD - Shows metrics for active tab -->
+          <div class="status-bar session-hud">
+            <div class="session-overview">
+              <div class="session-heading">
+                <span class="status-bar-label">production-api</span>
+                <span class="status-pill status-pill-connected">Connected</span>
+                <span class="session-namespace">prod-services</span>
+                <span class="session-age">Age 23m</span>
+              </div>
+            </div>
+            <div class="session-metrics">
+              <div class="metric-bar-container">
+                <span class="metric-bar-label">CPU</span>
+                <div class="metric-bar">
+                  <div class="metric-bar-fill" style="width: 34%"></div>
+                </div>
+                <span class="metric-bar-value">34%</span>
+              </div>
+              <div class="metric-bar-container">
+                <span class="metric-bar-label">MEM</span>
+                <div class="metric-bar">
+                  <div class="metric-bar-fill warning" style="width: 67%"></div>
+                </div>
+                <span class="metric-bar-value">67%</span>
+              </div>
+              <div class="metric-bar-container">
+                <span class="metric-bar-label">DISK</span>
+                <div class="metric-bar">
+                  <div class="metric-bar-fill" style="width: 45%"></div>
+                </div>
+                <span class="metric-bar-value">45%</span>
+              </div>
+              <div class="network-display">
+                <span class="network-label">NET</span>
+                <span class="network-value">
+                  <span class="network-down">↓1.2 KB/s</span>
+                  <span class="network-up">↑1.2 KB/s</span>
+                </span>
+              </div>
+              <div class="metadata-display">
+                <span class="metadata-label">NODE</span>
+                <span class="metadata-value">node-pool-a-xyz123</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Terminal Pane -->
+          <div class="terminal-pane">
+            <div class="mock-terminal">
+              <div><span class="prompt">root@production-api-7d8f9c6b4-x2k9m:~#</span> <span class="command">kubectl get pods -n prod-services</span></div>
+              <div class="output">NAME                              READY   STATUS    RESTARTS   AGE</div>
+              <div class="output">api-gateway-5f7d8c9b6-abc12       1/1     Running   0          2d</div>
+              <div class="output">auth-service-6f8e9d0c7-def34      1/1     Running   0          2d</div>
+              <div class="output">user-service-7g9f0e1d8-ghi56      1/1     Running   0          2d</div>
+              <div class="output">payment-service-8h0g1f2e9-jkl78   1/1     Running   0          2d</div>
+              <br>
+              <div><span class="prompt">root@production-api-7d8f9c6b4-x2k9m:~#</span> <span class="command">top -bn1 | head -5</span></div>
+              <div class="output">top - 14:32:15 up 45 days,  3:22,  0 users,  load average: 0.42, 0.38, 0.35</div>
+              <div class="output">Tasks:  12 total,   1 running,  11 sleeping,   0 stopped,   0 zombie</div>
+              <div class="output">%Cpu(s):  3.2 us,  1.1 sy,  0.0 ni, 95.4 id,  0.2 wa,  0.0 hi,  0.1 si</div>
+              <div class="output">MiB Mem :   7982.4 total,   1234.5 free,   4567.8 used,   2180.1 buff/cache</div>
+              <br>
+              <div><span class="prompt">root@production-api-7d8f9c6b4-x2k9m:~#</span> <span class="command">_</span></div>
+            </div>
+            <div class="terminal-status">
+              <div class="terminal-status-left">
+                <span class="status-indicator online"></span>
+                <span>Connected</span>
+                <span class="status-separator">|</span>
+                <span>Session: a1b2c3d4-e5f6-7890</span>
+              </div>
+              <div class="terminal-status-right">
+                <span>PTY: 120×30</span>
+                <span class="status-separator">|</span>
+                <span>Latency: 12ms</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Login View -->
+    <section id="login" class="preview-section">
+      <div class="app-shell">
+        <header class="header">
+          <div class="brand">
+            <svg class="logo" width="40" height="40" viewBox="0 0 64 64" fill="none">
+              <rect width="64" height="64" rx="12" fill="#0d1626"/>
+              <path d="M17 46V18h6v10l10-10h8l-11.7 12.4L42 46h-7.6l-8.3-11-3.1 3.4V46h-6z" fill="#f5f7fb"/>
+              <path d="M36 18h21v6h-7.3v22h-6.5V24H36v-6z" fill="#64b5ff"/>
+            </svg>
+            <h1>KubeTTY</h1>
+          </div>
+        </header>
+        <section class="main full-width auth">
+          <form class="auth-card" onsubmit="event.preventDefault()">
+            <h2>Sign in</h2>
+            <label>
+              Username
+              <input type="text" placeholder="Enter username" value="admin">
+            </label>
+            <label>
+              Password
+              <input type="password" placeholder="Enter password" value="••••••••">
+            </label>
+            <button type="submit">Sign in</button>
+          </form>
+        </section>
+      </div>
+    </section>
+
+    <!-- Admin Panel View -->
+    <section id="admin" class="preview-section">
+      <div class="app-shell">
+        <header class="header">
+          <div class="brand">
+            <svg class="logo" width="40" height="40" viewBox="0 0 64 64" fill="none">
+              <rect width="64" height="64" rx="12" fill="#0d1626"/>
+              <path d="M17 46V18h6v10l10-10h8l-11.7 12.4L42 46h-7.6l-8.3-11-3.1 3.4V46h-6z" fill="#f5f7fb"/>
+              <path d="M36 18h21v6h-7.3v22h-6.5V24H36v-6z" fill="#64b5ff"/>
+            </svg>
+            <h1>KubeTTY</h1>
+          </div>
+          <nav class="nav">
+            <button class="nav-link">Terminal</button>
+            <button class="nav-link">Dashboard</button>
+            <button class="nav-link active">Admin</button>
+          </nav>
+        </header>
+        <section class="main full-width">
+          <div class="admin-container">
+            <div class="admin-header">
+              <h2>Project Management</h2>
+              <button class="btn btn-primary">+ New Project</button>
+            </div>
+            <div class="admin-toolbar">
+              <input type="search" placeholder="Search projects..." class="admin-search">
+              <select class="admin-filter">
+                <option>All Status</option>
+                <option>Online</option>
+                <option>Degraded</option>
+                <option>Offline</option>
+                <option>Paused</option>
+              </select>
+            </div>
+            <table class="admin-table">
+              <thead>
+                <tr>
+                  <th>Project</th>
+                  <th>Namespace</th>
+                  <th>Status</th>
+                  <th>Health</th>
+                  <th>Last Check</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <div class="project-cell">
+                      <span class="project-name">production-api</span>
+                      <span class="project-id">proj-001</span>
+                    </div>
+                  </td>
+                  <td><code>prod-services</code></td>
+                  <td><span class="status-badge status-online">Running</span></td>
+                  <td><span class="health-badge health-online">Online</span></td>
+                  <td>2 minutes ago</td>
+                  <td>
+                    <div class="action-buttons">
+                      <button class="btn btn-sm">Edit</button>
+                      <button class="btn btn-sm btn-warning">Pause</button>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td>
+                    <div class="project-cell">
+                      <span class="project-name">staging-workers</span>
+                      <span class="project-id">proj-002</span>
+                    </div>
+                  </td>
+                  <td><code>staging</code></td>
+                  <td><span class="status-badge status-online">Running</span></td>
+                  <td><span class="health-badge health-degraded">Degraded</span></td>
+                  <td>5 minutes ago</td>
+                  <td>
+                    <div class="action-buttons">
+                      <button class="btn btn-sm">Edit</button>
+                      <button class="btn btn-sm btn-warning">Pause</button>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td>
+                    <div class="project-cell">
+                      <span class="project-name">dev-database</span>
+                      <span class="project-id">proj-003</span>
+                    </div>
+                  </td>
+                  <td><code>development</code></td>
+                  <td><span class="status-badge status-offline">Failed</span></td>
+                  <td><span class="health-badge health-offline">Offline</span></td>
+                  <td>1 hour ago</td>
+                  <td>
+                    <div class="action-buttons">
+                      <button class="btn btn-sm">Edit</button>
+                      <button class="btn btn-sm btn-primary">Retry</button>
+                    </div>
+                  </td>
+                </tr>
+                <tr class="row-paused">
+                  <td>
+                    <div class="project-cell">
+                      <span class="project-name">legacy-migration</span>
+                      <span class="project-id">proj-004</span>
+                    </div>
+                  </td>
+                  <td><code>migrations</code></td>
+                  <td><span class="status-badge status-paused">Paused</span></td>
+                  <td><span class="health-badge health-unknown">Unknown</span></td>
+                  <td>3 days ago</td>
+                  <td>
+                    <div class="action-buttons">
+                      <button class="btn btn-sm">Edit</button>
+                      <button class="btn btn-sm btn-success">Resume</button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- Dashboard View -->
+    <section id="dashboard" class="preview-section">
+      <div class="app-shell">
+        <header class="header">
+          <div class="brand">
+            <svg class="logo" width="40" height="40" viewBox="0 0 64 64" fill="none">
+              <rect width="64" height="64" rx="12" fill="#0d1626"/>
+              <path d="M17 46V18h6v10l10-10h8l-11.7 12.4L42 46h-7.6l-8.3-11-3.1 3.4V46h-6z" fill="#f5f7fb"/>
+              <path d="M36 18h21v6h-7.3v22h-6.5V24H36v-6z" fill="#64b5ff"/>
+            </svg>
+            <h1>KubeTTY</h1>
+          </div>
+          <nav class="nav">
+            <button class="nav-link">Terminal</button>
+            <button class="nav-link active">Dashboard</button>
+            <button class="nav-link">Admin</button>
+          </nav>
+        </header>
+        <section class="main full-width">
+          <div class="dashboard-container">
+            <h2 class="dashboard-title">System Overview</h2>
+            <div class="dashboard-grid">
+              <div class="dashboard-card">
+                <div class="dashboard-card-header">
+                  <h3>Active Sessions</h3>
+                  <span class="dashboard-badge">Live</span>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="stat-value">24</span>
+                  <span class="stat-label">Connected users</span>
+                </div>
+                <div class="dashboard-trend positive">
+                  <span>↑ 12%</span> from last hour
+                </div>
+              </div>
+
+              <div class="dashboard-card">
+                <div class="dashboard-card-header">
+                  <h3>Projects</h3>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="stat-value">12</span>
+                  <span class="stat-label">Total projects</span>
+                </div>
+                <div class="dashboard-breakdown">
+                  <div class="breakdown-item">
+                    <span class="breakdown-dot online"></span>
+                    <span>8 Online</span>
+                  </div>
+                  <div class="breakdown-item">
+                    <span class="breakdown-dot degraded"></span>
+                    <span>2 Degraded</span>
+                  </div>
+                  <div class="breakdown-item">
+                    <span class="breakdown-dot offline"></span>
+                    <span>1 Offline</span>
+                  </div>
+                  <div class="breakdown-item">
+                    <span class="breakdown-dot paused"></span>
+                    <span>1 Paused</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="dashboard-card">
+                <div class="dashboard-card-header">
+                  <h3>Gateway Status</h3>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="stat-value online">Healthy</span>
+                  <span class="stat-label">All systems operational</span>
+                </div>
+                <div class="dashboard-metrics">
+                  <div class="metric-row">
+                    <span>Uptime</span>
+                    <span>45d 3h 22m</span>
+                  </div>
+                  <div class="metric-row">
+                    <span>Requests/min</span>
+                    <span>1,247</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="dashboard-card">
+                <div class="dashboard-card-header">
+                  <h3>Resource Usage</h3>
+                </div>
+                <div class="dashboard-resources">
+                  <div class="resource-bar">
+                    <div class="resource-header">
+                      <span>CPU</span>
+                      <span>34%</span>
+                    </div>
+                    <div class="resource-track">
+                      <div class="resource-fill" style="width: 34%"></div>
+                    </div>
+                  </div>
+                  <div class="resource-bar">
+                    <div class="resource-header">
+                      <span>Memory</span>
+                      <span>67%</span>
+                    </div>
+                    <div class="resource-track">
+                      <div class="resource-fill warning" style="width: 67%"></div>
+                    </div>
+                  </div>
+                  <div class="resource-bar">
+                    <div class="resource-header">
+                      <span>Storage</span>
+                      <span>45%</span>
+                    </div>
+                    <div class="resource-track">
+                      <div class="resource-fill" style="width: 45%"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- Settings View -->
+    <section id="settings" class="preview-section">
+      <div class="app-shell">
+        <header class="header">
+          <div class="brand">
+            <svg class="logo" width="40" height="40" viewBox="0 0 64 64" fill="none">
+              <rect width="64" height="64" rx="12" fill="#0d1626"/>
+              <path d="M17 46V18h6v10l10-10h8l-11.7 12.4L42 46h-7.6l-8.3-11-3.1 3.4V46h-6z" fill="#f5f7fb"/>
+              <path d="M36 18h21v6h-7.3v22h-6.5V24H36v-6z" fill="#64b5ff"/>
+            </svg>
+            <h1>KubeTTY</h1>
+          </div>
+          <nav class="nav">
+            <button class="nav-link">Terminal</button>
+            <button class="nav-link">Dashboard</button>
+            <button class="nav-link">Admin</button>
+            <button class="nav-link active">Settings</button>
+          </nav>
+        </header>
+        <section class="main full-width">
+          <div class="settings-container">
+            <h2 class="settings-title">Settings</h2>
+
+            <div class="settings-section">
+              <h3 class="settings-section-title">Gateway Configuration</h3>
+              <div class="settings-form">
+                <div class="form-group">
+                  <label>Tab Idle Timeout</label>
+                  <div class="input-with-unit">
+                    <input type="number" value="120" min="1">
+                    <span class="input-unit">minutes</span>
+                  </div>
+                  <p class="form-hint">Sessions will be closed after this period of inactivity.</p>
+                </div>
+                <div class="form-group">
+                  <label>Max Sessions Per User</label>
+                  <input type="number" value="10" min="1" max="50">
+                  <p class="form-hint">Maximum number of concurrent sessions allowed per user.</p>
+                </div>
+                <div class="form-group">
+                  <label>Default Shell</label>
+                  <select>
+                    <option value="/bin/bash">/bin/bash</option>
+                    <option value="/bin/sh">/bin/sh</option>
+                    <option value="/bin/zsh">/bin/zsh</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h3 class="settings-section-title">Authentication</h3>
+              <div class="settings-form">
+                <div class="form-group">
+                  <label>Auth Mode</label>
+                  <select>
+                    <option value="local">Local</option>
+                    <option value="disabled">Disabled</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Access Token TTL</label>
+                  <div class="input-with-unit">
+                    <input type="number" value="15" min="1">
+                    <span class="input-unit">minutes</span>
+                  </div>
+                </div>
+                <div class="form-group">
+                  <label>Refresh Token TTL</label>
+                  <div class="input-with-unit">
+                    <input type="number" value="720" min="1">
+                    <span class="input-unit">hours</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h3 class="settings-section-title">Logging</h3>
+              <div class="settings-form">
+                <div class="form-group">
+                  <label>Session Log Retention</label>
+                  <div class="input-with-unit">
+                    <input type="number" value="720" min="1">
+                    <span class="input-unit">hours</span>
+                  </div>
+                  <p class="form-hint">How long to retain session logs before automatic cleanup.</p>
+                </div>
+                <div class="form-group">
+                  <label>Max Log Entries Per Session</label>
+                  <input type="number" value="5000" min="100" max="50000">
+                </div>
+                <div class="form-group checkbox-group">
+                  <label>
+                    <input type="checkbox" checked>
+                    Enable verbose logging
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-actions">
+              <button class="btn btn-secondary">Reset to Defaults</button>
+              <button class="btn btn-primary">Save Changes</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    function showSection(sectionId) {
+      // Hide all sections
+      document.querySelectorAll('.preview-section').forEach(section => {
+        section.classList.remove('active');
+      });
+      // Deactivate all nav buttons
+      document.querySelectorAll('.preview-nav button:not(#sidebar-toggle)').forEach(btn => {
+        btn.classList.remove('active');
+      });
+      // Show selected section
+      document.getElementById(sectionId).classList.add('active');
+      // Activate clicked button
+      event.target.classList.add('active');
+    }
+
+    function toggleSidebar() {
+      const appShell = document.querySelector('#main .app-shell');
+      const toggleBtn = document.getElementById('sidebar-toggle');
+      if (appShell) {
+        appShell.classList.toggle('show-panel');
+        const isShowing = appShell.classList.contains('show-panel');
+        toggleBtn.textContent = isShowing ? 'Hide Sidebar' : 'Show Sidebar';
+        toggleBtn.classList.toggle('active', isShowing);
+        // Save preference
+        localStorage.setItem('kubetty:showProjectPanel', isShowing ? 'true' : 'false');
+      }
+    }
+
+    // Initialize sidebar state from localStorage
+    document.addEventListener('DOMContentLoaded', () => {
+      const showPanel = localStorage.getItem('kubetty:showProjectPanel') === 'true';
+      const appShell = document.querySelector('#main .app-shell');
+      const toggleBtn = document.getElementById('sidebar-toggle');
+      if (showPanel && appShell) {
+        appShell.classList.add('show-panel');
+        toggleBtn.textContent = 'Hide Sidebar';
+        toggleBtn.classList.add('active');
+      }
+    });
+  </script>
+</body>
+</html>

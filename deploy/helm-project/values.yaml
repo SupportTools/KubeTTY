@@ -87,6 +87,12 @@ pipelines:
   dind:
     enabled: false
 
+# Browser automation configuration (Playwright/Puppeteer)
+browser:
+  # Shared memory size for headless browser processes
+  # Chrome/Chromium requires adequate /dev/shm for stable operation
+  shmSize: "2Gi"
+
 # Pod annotations
 podAnnotations: {}
 
@@ -96,3 +102,28 @@ prometheus:
     enabled: true
     path: /metrics
     port: 8080
+
+# PTY session file logging for Loki integration
+# When enabled, writes terminal I/O to JSONL files in emptyDir volume
+# A busybox sidecar tails the log file to stdout for cluster Promtail to scrape
+ptyLogging:
+  enabled: false
+  # Maximum log file size before rotation (bytes)
+  maxSize: 104857600  # 100MB
+  # Number of rotated backup files to keep
+  maxBackups: 3
+  # Write buffer size (bytes)
+  bufferSize: 65536  # 64KB
+  # How often to flush buffer to disk
+  flushInterval: "5s"
+  # Include base64-encoded raw bytes in log entries
+  includeRaw: true
+  # Sidecar container resources
+  sidecar:
+    resources:
+      requests:
+        memory: "16Mi"
+        cpu: "10m"
+      limits:
+        memory: "32Mi"
+        cpu: "50m"

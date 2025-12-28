@@ -142,6 +142,14 @@ func (m *mockProjectStore) SetStatus(ctx context.Context, id uuid.UUID, status p
 	return projects.ErrProjectNotFound
 }
 
+func (m *mockProjectStore) SetPaused(ctx context.Context, id uuid.UUID, paused bool) error {
+	if p, ok := m.projects[id]; ok {
+		p.Paused = paused
+		return nil
+	}
+	return projects.ErrProjectNotFound
+}
+
 func (m *mockProjectStore) UpdateHealthCheck(ctx context.Context, id uuid.UUID, podIP string) error {
 	return nil
 }

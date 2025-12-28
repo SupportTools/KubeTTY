@@ -57,6 +57,15 @@ var (
 		},
 		[]string{"identity", "is_self"},
 	)
+
+	// LeaderElectionRetriesTotal counts the number of leader election retry attempts
+	// after losing leadership due to transient failures.
+	LeaderElectionRetriesTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "kubetty_gateway_leader_election_retries_total",
+			Help: "Total number of leader election retry attempts after losing leadership",
+		},
+	)
 )
 
 // PVC storage monitoring metrics (package-level for access from controller)

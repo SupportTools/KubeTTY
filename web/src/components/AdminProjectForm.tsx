@@ -22,9 +22,25 @@ const defaultValues: CreateProjectRequest = {
   maxTabsPerClient: 3,
   maxTabsTotal: 10,
   dindEnabled: true,
+  guiEnabled: false,
+  guiResolution: "1280x720x24",
+  // PTY session logging defaults
+  ptyLoggingEnabled: false,
+  ptyLoggingMaxSize: 104857600,      // 100MB
+  ptyLoggingMaxBackups: 3,
+  ptyLoggingBufferSize: 65536,       // 64KB
+  ptyLoggingFlushInterval: "5s",
+  ptyLoggingIncludeRaw: true,
   imageRepository: "harbor.support.tools/kubetty/kubetty",
   imageTag: "latest",
 };
+
+const GUI_RESOLUTIONS = [
+  { value: "1024x768x24", label: "1024×768 (XGA)" },
+  { value: "1280x720x24", label: "1280×720 (HD)" },
+  { value: "1280x1024x24", label: "1280×1024 (SXGA)" },
+  { value: "1920x1080x24", label: "1920×1080 (Full HD)" },
+];
 
 const AdminProjectForm = ({ onClose, onSuccess }: Props) => {
   const { authFetch, user } = useAuth();
@@ -284,6 +300,120 @@ const AdminProjectForm = ({ onClose, onSuccess }: Props) => {
                       Enable Docker-in-Docker
                     </label>
                   </div>
+                  <div className="form-field checkbox-field">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={form.guiEnabled || false}
+                        disabled={submitting}
+                        onChange={(e) => updateField("guiEnabled", e.target.checked)}
+                      />
+                      Enable GUI Desktop
+                    </label>
+                    <span className="field-hint">
+                      Provides a graphical desktop environment via VNC
+                    </span>
+                  </div>
+                  {form.guiEnabled && (
+                    <div className="form-field">
+                      <label>GUI Resolution</label>
+                      <select
+                        value={form.guiResolution || "1280x720x24"}
+                        disabled={submitting}
+                        onChange={(e) => updateField("guiResolution", e.target.value)}
+                      >
+                        {GUI_RESOLUTIONS.map((res) => (
+                          <option key={res.value} value={res.value}>
+                            {res.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  <h3>PTY Session Logging</h3>
+                  <div className="form-field checkbox-field">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={form.ptyLoggingEnabled || false}
+                        disabled={submitting}
+                        onChange={(e) => updateField("ptyLoggingEnabled", e.target.checked)}
+                      />
+                      Enable PTY Session Logging
+                    </label>
+                    <span className="field-hint">
+                      Captures terminal I/O to JSONL files for Loki/Grafana integration
+                    </span>
+                  </div>
+                  {form.ptyLoggingEnabled && (
+                    <>
+                      <div className="form-row">
+                        <div className="form-field">
+                          <label>Max Log Size (MB)</label>
+                          <input
+                            type="number"
+                            min={10}
+                            max={1000}
+                            value={Math.round((form.ptyLoggingMaxSize || 104857600) / 1048576)}
+                            disabled={submitting}
+                            onChange={(e) => updateField("ptyLoggingMaxSize", parseInt(e.target.value) * 1048576 || 104857600)}
+                          />
+                          <span className="field-hint">File rotates at this size</span>
+                        </div>
+                        <div className="form-field">
+                          <label>Max Backups</label>
+                          <input
+                            type="number"
+                            min={1}
+                            max={10}
+                            value={form.ptyLoggingMaxBackups || 3}
+                            disabled={submitting}
+                            onChange={(e) => updateField("ptyLoggingMaxBackups", parseInt(e.target.value) || 3)}
+                          />
+                          <span className="field-hint">Rotated files to keep</span>
+                        </div>
+                      </div>
+                      <div className="form-row">
+                        <div className="form-field">
+                          <label>Buffer Size (KB)</label>
+                          <input
+                            type="number"
+                            min={8}
+                            max={256}
+                            value={Math.round((form.ptyLoggingBufferSize || 65536) / 1024)}
+                            disabled={submitting}
+                            onChange={(e) => updateField("ptyLoggingBufferSize", parseInt(e.target.value) * 1024 || 65536)}
+                          />
+                          <span className="field-hint">Write buffer size</span>
+                        </div>
+                        <div className="form-field">
+                          <label>Flush Interval</label>
+                          <input
+                            type="text"
+                            value={form.ptyLoggingFlushInterval || "5s"}
+                            disabled={submitting}
+                            onChange={(e) => updateField("ptyLoggingFlushInterval", e.target.value)}
+                          />
+                          <span className="field-hint">e.g., 5s, 10s, 1m</span>
+                        </div>
+                      </div>
+                      <div className="form-field checkbox-field">
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={form.ptyLoggingIncludeRaw !== false}
+                            disabled={submitting}
+                            onChange={(e) => updateField("ptyLoggingIncludeRaw", e.target.checked)}
+                          />
+                          Include Raw Bytes
+                        </label>
+                        <span className="field-hint">
+                          Include base64-encoded raw terminal data (preserves escape sequences)
+                        </span>
+                      </div>
+                    </>
+                  )}
                 </>
               )}
             </div>

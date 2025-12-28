@@ -62,11 +62,17 @@ func TestNewCircuitBreaker(t *testing.T) {
 	if cb.threshold != 5 {
 		t.Errorf("threshold = %d, want 5", cb.threshold)
 	}
-	if cb.resetAfter != 30*time.Second {
-		t.Errorf("resetAfter = %v, want 30s", cb.resetAfter)
+	if cb.baseResetAfter != 30*time.Second {
+		t.Errorf("baseResetAfter = %v, want 30s", cb.baseResetAfter)
+	}
+	if cb.ResetAfter() != 30*time.Second {
+		t.Errorf("ResetAfter() = %v, want 30s (no backoff yet)", cb.ResetAfter())
 	}
 	if cb.Failures() != 0 {
 		t.Errorf("initial failures = %d, want 0", cb.Failures())
+	}
+	if cb.HalfOpenAttempts() != 0 {
+		t.Errorf("initial half-open attempts = %d, want 0", cb.HalfOpenAttempts())
 	}
 	if cb.IsOpen() {
 		t.Error("circuit breaker should not be open initially")
@@ -155,6 +161,103 @@ func TestCircuitBreaker_Failures(t *testing.T) {
 		if cb.Failures() != expected {
 			t.Errorf("failures after %d RecordFailure = %d, want %d", i+1, cb.Failures(), expected)
 		}
+	}
+}
+
+func TestCircuitBreaker_ExponentialBackoff(t *testing.T) {
+	// Use short times for testing
+	baseReset := 10 * time.Millisecond
+	cb := NewCircuitBreakerWithMax(2, baseReset, 100*time.Millisecond)
+
+	// Initial state
+	if cb.HalfOpenAttempts() != 0 {
+		t.Errorf("initial half-open attempts = %d, want 0", cb.HalfOpenAttempts())
+	}
+	if cb.ResetAfter() != baseReset {
+		t.Errorf("initial ResetAfter = %v, want %v", cb.ResetAfter(), baseReset)
+	}
+
+	// Trigger circuit breaker (2 failures at threshold of 2)
+	cb.RecordFailure()
+	cb.RecordFailure()
+	if !cb.IsOpen() {
+		t.Error("circuit breaker should be open after reaching threshold")
+	}
+
+	// Wait for base reset period, then record another failure (simulates half-open failure)
+	time.Sleep(15 * time.Millisecond)
+	if cb.IsOpen() {
+		t.Error("circuit breaker should be half-open after base reset period")
+	}
+
+	// Record failure while at threshold (half-open attempt failed)
+	cb.RecordFailure()
+	if cb.HalfOpenAttempts() != 1 {
+		t.Errorf("half-open attempts after first half-open failure = %d, want 1", cb.HalfOpenAttempts())
+	}
+
+	// Reset time should have doubled (baseReset * 2^1 = 20ms)
+	expectedReset := 20 * time.Millisecond
+	if cb.ResetAfter() != expectedReset {
+		t.Errorf("ResetAfter after 1 half-open failure = %v, want %v", cb.ResetAfter(), expectedReset)
+	}
+
+	// Circuit breaker should still be open (not enough time passed for new backoff)
+	if !cb.IsOpen() {
+		t.Error("circuit breaker should be open (waiting for new backoff period)")
+	}
+
+	// Wait for new reset period
+	time.Sleep(25 * time.Millisecond)
+	if cb.IsOpen() {
+		t.Error("circuit breaker should be half-open after new reset period")
+	}
+
+	// Another half-open failure
+	cb.RecordFailure()
+	if cb.HalfOpenAttempts() != 2 {
+		t.Errorf("half-open attempts after second half-open failure = %d, want 2", cb.HalfOpenAttempts())
+	}
+
+	// Reset time should have doubled again (baseReset * 2^2 = 40ms)
+	expectedReset = 40 * time.Millisecond
+	if cb.ResetAfter() != expectedReset {
+		t.Errorf("ResetAfter after 2 half-open failures = %v, want %v", cb.ResetAfter(), expectedReset)
+	}
+
+	// Test that success resets backoff
+	cb.RecordSuccess()
+	if cb.HalfOpenAttempts() != 0 {
+		t.Errorf("half-open attempts after success = %d, want 0", cb.HalfOpenAttempts())
+	}
+	if cb.ResetAfter() != baseReset {
+		t.Errorf("ResetAfter after success = %v, want %v", cb.ResetAfter(), baseReset)
+	}
+	if cb.Failures() != 0 {
+		t.Errorf("failures after success = %d, want 0", cb.Failures())
+	}
+}
+
+func TestCircuitBreaker_ExponentialBackoff_MaxCap(t *testing.T) {
+	// Test that backoff is capped at maxResetAfter
+	baseReset := 10 * time.Millisecond
+	maxReset := 50 * time.Millisecond
+	cb := NewCircuitBreakerWithMax(1, baseReset, maxReset)
+
+	// Trigger circuit breaker
+	cb.RecordFailure()
+
+	// Simulate multiple half-open failures to hit the cap
+	// 10ms -> 20ms -> 40ms -> 50ms (capped)
+	for i := 0; i < 10; i++ {
+		// Wait for current reset period plus buffer
+		time.Sleep(cb.ResetAfter() + 5*time.Millisecond)
+		cb.RecordFailure() // half-open failure
+	}
+
+	// Should be capped at maxReset
+	if cb.ResetAfter() != maxReset {
+		t.Errorf("ResetAfter should be capped at %v, got %v", maxReset, cb.ResetAfter())
 	}
 }
 
@@ -510,6 +613,118 @@ func TestFixedBackoff_DefaultStruct(t *testing.T) {
 	var fb FixedBackoff
 	if d := fb.Next(1); d != time.Second {
 		t.Errorf("default FixedBackoff.Next(1) = %v, want %v", d, time.Second)
+	}
+}
+
+// TestRelay_CloseWhileProxyRunning tests that Close() during an active Proxy()
+// causes the proxy loop to exit gracefully without panicking.
+// This test catches the "invalid Body.Read call. After hijacked" race condition.
+func TestRelay_CloseWhileProxyRunning(t *testing.T) {
+	// Start downstream server that will disconnect after receiving one message
+	downstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, req, nil)
+		if err != nil {
+			return
+		}
+		// Read one message then close to trigger reconnection attempt
+		_, _, _ = conn.ReadMessage()
+		conn.Close()
+	}))
+	defer downstreamSrv.Close()
+
+	downstreamURL, _ := url.Parse("ws" + strings.TrimPrefix(downstreamSrv.URL, "http"))
+	relay := New(Config{ProjectID: "test", Endpoint: downstreamURL})
+
+	// Start upstream server
+	proxyDone := make(chan error, 1)
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		upstream, err := upgrader.Upgrade(w, req, nil)
+		if err != nil {
+			return
+		}
+		defer upstream.Close()
+
+		ctx := context.Background()
+		proxyDone <- relay.Proxy(ctx, upstream)
+	}))
+	defer upstreamSrv.Close()
+
+	// Connect client to upstream
+	upstreamURL, _ := url.Parse("ws" + strings.TrimPrefix(upstreamSrv.URL, "http"))
+	client, _, err := websocket.DefaultDialer.Dial(upstreamURL.String(), nil)
+	if err != nil {
+		t.Fatalf("dial upstream: %v", err)
+	}
+	defer client.Close()
+
+	// Send a message to trigger downstream read and subsequent close
+	_ = client.WriteMessage(websocket.TextMessage, []byte("trigger"))
+
+	// Give time for downstream to close and relay to detect it
+	time.Sleep(100 * time.Millisecond)
+
+	// Close relay while it might be in reconnection loop
+	// Before the fix, this could cause a panic when Proxy tries to read
+	// from the upstream connection after Close() invalidates it
+	_ = relay.Close()
+
+	// Verify proxy exits without panic
+	select {
+	case err := <-proxyDone:
+		// Proxy should exit (either nil or error is fine, just no panic)
+		t.Logf("Proxy exited with: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Error("Proxy did not exit after Close()")
+	}
+
+	if relay.Status() != StatusClosed {
+		t.Errorf("Status = %v, want %v", relay.Status(), StatusClosed)
+	}
+}
+
+// TestRelay_CloseWhileReconnecting specifically tests closing during reconnection.
+func TestRelay_CloseWhileReconnecting(t *testing.T) {
+	// Use an endpoint that will fail to connect (triggers reconnection loop)
+	endpoint, _ := url.Parse("ws://localhost:1/ws") // Port 1 should refuse connections
+	relay := New(Config{ProjectID: "test", Endpoint: endpoint})
+
+	// Start upstream server
+	proxyDone := make(chan error, 1)
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		upstream, err := upgrader.Upgrade(w, req, nil)
+		if err != nil {
+			return
+		}
+		defer upstream.Close()
+
+		ctx := context.Background()
+		proxyDone <- relay.Proxy(ctx, upstream)
+	}))
+	defer upstreamSrv.Close()
+
+	// Connect client
+	upstreamURL, _ := url.Parse("ws" + strings.TrimPrefix(upstreamSrv.URL, "http"))
+	client, _, err := websocket.DefaultDialer.Dial(upstreamURL.String(), nil)
+	if err != nil {
+		t.Fatalf("dial upstream: %v", err)
+	}
+	defer client.Close()
+
+	// Wait for relay to start connection attempts
+	time.Sleep(200 * time.Millisecond)
+
+	// Close while in reconnection loop
+	_ = relay.Close()
+
+	// Verify proxy exits
+	select {
+	case <-proxyDone:
+		// Success - proxy exited
+	case <-time.After(5 * time.Second):
+		t.Error("Proxy did not exit after Close() during reconnection")
 	}
 }
 

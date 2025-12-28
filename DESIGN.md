@@ -1176,3 +1176,363 @@ This doc and:
 Everything above remains intentionally minimal and focused on single-user pods with one session per deployment.
 
 ---
+
+## 14. GUI Desktop Support (noVNC + XFCE)
+
+KubeTTY supports running graphical applications (Chrome, Firefox, VS Code, etc.) inside project pods with browser-based access via noVNC. This section covers the GUI stack architecture, split-view UI, and integration with the existing terminal system.
+
+### 14.1 Overview
+
+The GUI system provides:
+- **XFCE desktop environment** - Full desktop with panels, file manager, and system tray
+- **noVNC streaming** - Browser-based VNC access via WebSocket
+- **Split-view UI** - Terminal and GUI side-by-side with resizable divider
+- **Unified experience** - Same tab can show terminal, GUI, or both
+
+### 14.2 Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              Browser                                          │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────────┐ │
+│  │  [Terminal] [GUI] [Split ▼]              beacon                   [+]   │ │
+│  ├──────────────────────────────┬──────────────────────────────────────────┤ │
+│  │                              │                                          │ │
+│  │   Terminal (xterm.js)        │        GUI Desktop (noVNC)               │ │
+│  │                              │                                          │ │
+│  │  $ firefox &                 │   [Applications ▼]        🔊 14:32      │ │
+│  │  [1] 12345                   │   ─────────────────────────────────────  │ │
+│  │                              │                                          │ │
+│  │  $ kubectl get pods          │   ┌──────────────────────────────────┐  │ │
+│  │  NAME         READY          │   │ Firefox              [_][□][X]  │  │ │
+│  │  beacon-xxx   1/1            │   │                                  │  │ │
+│  │                              │   │    (web page content)            │  │ │
+│  │  $ █                         │   │                                  │  │ │
+│  │                              │   └──────────────────────────────────┘  │ │
+│  │                              │                                          │ │
+│  └──────────────────────────────┴──────────────────────────────────────────┘ │
+│                              ◀══ drag to resize ══▶                          │
+└──────────────────────────────────────────────────────────────────────────────┘
+         │                                    │
+         │ wss://.../ws?tab=<id>              │ wss://.../vnc?tab=<id>
+         ▼                                    ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           Gateway Pod                                         │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                         Tab Manager                                   │   │
+│  │                                                                       │   │
+│  │   Tab (terminal+gui) ──┬── TerminalRelay ──► Project Pod /ws         │   │
+│  │                        └── VNCRelay ───────► Project Pod :5901       │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────────────┘
+         │                                    │
+         ▼                                    ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          Project Pod                                          │
+│                                                                              │
+│  ┌─────────────────────────────┐  ┌─────────────────────────────────────┐   │
+│  │   kubetty-project (PTY)     │  │        GUI Stack                     │   │
+│  │                             │  │                                      │   │
+│  │  • /ws (WebSocket)          │  │  Xvfb :99 ──► x11vnc :5901          │   │
+│  │  • /api/healthz             │  │       ▲                              │   │
+│  │  • /api/metrics             │  │       │ DISPLAY=:99                  │   │
+│  │                             │  │  XFCE Desktop + Apps                 │   │
+│  │  Port: 8080                 │  │  Port: 5901 (VNC)                   │   │
+│  └─────────────────────────────┘  └─────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 14.3 GUI Stack Components
+
+The GUI stack runs inside the project pod, managed by supervisord:
+
+| Component | Purpose | Port/Display |
+|-----------|---------|--------------|
+| **Xvfb** | Virtual X framebuffer | `:99` |
+| **x11vnc** | VNC server viewing Xvfb | `5901` |
+| **XFCE** | Desktop environment | N/A |
+| **supervisord** | Process manager | N/A |
+
+**Process hierarchy:**
+```
+supervisord (PID 1)
+├── kubetty-project (PTY server, port 8080)
+├── Xvfb :99 -screen 0 1920x1080x24
+├── x11vnc -display :99 -rfbport 5901 -shared -forever -nopw
+└── startxfce4 (XFCE session)
+```
+
+### 14.4 View Modes
+
+The frontend supports four view modes per tab:
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `terminal` | Terminal only (default) | CLI work, no GUI needed |
+| `gui` | GUI desktop only | Full-screen GUI apps |
+| `split-horizontal` | Side-by-side | Monitor GUI while typing commands |
+| `split-vertical` | Stacked (terminal top) | Vertical monitor layouts |
+
+**Keyboard shortcuts:**
+- `Ctrl+Shift+T` - Terminal only
+- `Ctrl+Shift+G` - GUI only
+- `Ctrl+Shift+S` - Toggle split view
+- `Ctrl+Shift+H` - Split horizontal
+- `Ctrl+Shift+V` - Split vertical
+
+### 14.5 Data Model Changes
+
+**Database migration** (`0015_gui_support.up.sql`):
+```sql
+-- Add GUI fields to projects table
+ALTER TABLE projects ADD COLUMN gui_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE projects ADD COLUMN gui_resolution TEXT DEFAULT '1920x1080x24';
+ALTER TABLE projects ADD COLUMN gui_vnc_port INTEGER DEFAULT 5901;
+```
+
+**Go types:**
+```go
+// Extended Project model
+type Project struct {
+    // ... existing fields ...
+    GUIEnabled    bool   `json:"guiEnabled"`
+    GUIResolution string `json:"guiResolution"`
+    GUIVNCPort    int    `json:"guiVNCPort"`
+}
+```
+
+**TypeScript types:**
+```typescript
+export type ViewMode = 'terminal' | 'gui' | 'split-horizontal' | 'split-vertical';
+
+export interface ProjectInfo {
+  // ... existing fields ...
+  guiEnabled?: boolean;
+  guiResolution?: string;
+}
+```
+
+### 14.6 API Endpoints
+
+**New WebSocket endpoint:**
+- `GET /vnc?tab=<tabId>` - VNC WebSocket proxy (binary frames)
+
+**Extended endpoints:**
+- `GET /api/projects` - Now includes `guiEnabled` field
+- `GET /api/gui/status` (project pod) - GUI stack health
+
+**GUI status response:**
+```json
+{
+  "enabled": true,
+  "display": ":99",
+  "resolution": "1920x1080",
+  "vncPort": 5901,
+  "desktopEnvironment": "xfce",
+  "runningApps": [
+    {"pid": 1234, "name": "firefox", "title": "Mozilla Firefox"}
+  ]
+}
+```
+
+### 14.7 Gateway VNC Relay
+
+New relay implementation for VNC traffic:
+
+```go
+// server/internal/gateway/vnc/relay.go
+
+// VNCRelay proxies WebSocket ↔ TCP (VNC/RFB protocol)
+// Implements relay.Proxier interface
+type VNCRelay struct {
+    vncConn    net.Conn
+    target     string           // e.g., "service.namespace.svc:5901"
+    statusCh   chan relay.StatusEvent
+    activityCh chan struct{}
+}
+
+func (r *VNCRelay) Proxy(ctx context.Context, upstream *websocket.Conn) error {
+    // Bidirectional binary relay
+}
+```
+
+### 14.8 Frontend Components
+
+**New components:**
+- `GUIView.tsx` - noVNC wrapper component
+- `SplitPane.tsx` - Resizable split container
+- `ViewToolbar.tsx` - View mode selector
+
+**Component hierarchy:**
+```
+TabView
+├── ViewToolbar ([Terminal] [GUI] [Split])
+└── SplitPane (when split mode)
+    ├── TerminalView (xterm.js)
+    └── GUIView (noVNC)
+```
+
+**SplitPane features:**
+- Draggable divider (mouse + touch)
+- Minimum pane size (300px horizontal, 200px vertical)
+- Ratio persisted in localStorage
+- Keyboard accessible
+
+### 14.9 Shell Integration
+
+When GUI is enabled, terminal sessions include helpers:
+
+```bash
+# /etc/profile.d/kubetty-gui.sh
+
+if [ "$GUI_ENABLED" = "true" ]; then
+    export DISPLAY=:99
+
+    # Notification helper
+    _kubetty_gui_hint() {
+        echo -e "\033[36m→ GUI app launched on display $DISPLAY\033[0m"
+        echo -e "\033[36m  Click [GUI] or [Split] to view\033[0m"
+    }
+
+    # Wrapped commands
+    alias firefox='firefox "$@" & _kubetty_gui_hint'
+    alias chromium='chromium --no-sandbox "$@" & _kubetty_gui_hint'
+    alias code='code "$@" & _kubetty_gui_hint'
+fi
+```
+
+**User experience:**
+```
+user@beacon:~$ firefox &
+[1] 12345
+
+→ GUI app launched on display :99
+  Click [GUI] or [Split] to view
+
+user@beacon:~$
+```
+
+### 14.10 Configuration
+
+**Project-level (Admin API):**
+```json
+{
+  "name": "beacon",
+  "guiEnabled": true,
+  "guiResolution": "1920x1080x24"
+}
+```
+
+**Environment variables (project pod):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GUI_ENABLED` | `false` | Enable GUI stack |
+| `GUI_DISPLAY` | `:99` | X display number |
+| `GUI_RESOLUTION` | `1920x1080x24` | Screen resolution |
+| `VNC_PORT` | `5901` | VNC server port |
+
+**Helm values:**
+```yaml
+gui:
+  enabled: false
+  resolution: "1920x1080x24"
+  vncPort: 5901
+  desktop: "xfce"  # xfce, mate, lxde, or fluxbox
+```
+
+### 14.11 Resource Requirements
+
+**Additional resources when GUI enabled:**
+
+| Component | Memory | CPU |
+|-----------|--------|-----|
+| Xvfb | ~50 MB | Minimal |
+| x11vnc | ~20 MB | Variable |
+| XFCE | ~150-200 MB | Low |
+| Chromium | ~300-500 MB | Variable |
+| Firefox | ~200-400 MB | Variable |
+
+**Recommended minimums:**
+- Without GUI: 1 GB RAM, 0.5 CPU
+- With GUI: 2 GB RAM, 1 CPU
+
+### 14.12 Security
+
+**VNC security model:**
+- VNC runs without password (`-nopw`)
+- Security enforced by:
+  1. Gateway JWT authentication
+  2. Tab ownership validation
+  3. NetworkPolicy (only gateway can reach VNC port)
+
+**NetworkPolicy addition:**
+```yaml
+# Allow gateway to reach VNC port
+- from:
+    - namespaceSelector:
+        matchLabels:
+          name: kubetty-gateway
+  ports:
+    - port: 5901
+      protocol: TCP
+```
+
+**Browser security:**
+```bash
+# Chromium must run with sandbox disabled in containers
+chromium --no-sandbox --disable-dev-shm-usage
+```
+
+### 14.13 Package Layout
+
+```
+server/
+└── internal/
+    └── gateway/
+        └── vnc/              # NEW
+            ├── relay.go      # VNCRelay implementation
+            ├── relay_test.go
+            └── options.go    # Configuration
+
+web/
+└── src/
+    └── components/
+        ├── GUIView.tsx       # NEW - noVNC wrapper
+        ├── SplitPane.tsx     # NEW - Resizable splitter
+        ├── ViewToolbar.tsx   # NEW - View mode selector
+        └── TabView.tsx       # Extended for view modes
+
+config/
+├── supervisor/
+│   └── kubetty.conf          # NEW - Supervisor config
+└── xfce/                     # NEW - XFCE defaults
+    └── xfce4/
+        └── panel/
+            └── default.xml
+```
+
+### 14.14 Acceptance Criteria
+
+**Backend:**
+- [ ] VNC relay implements `Proxier` interface
+- [ ] `/vnc` WebSocket endpoint proxies to project VNC port
+- [ ] Projects can be created with `guiEnabled: true`
+- [ ] GUI stack starts when `GUI_ENABLED=true`
+
+**Frontend:**
+- [ ] View mode toolbar with Terminal/GUI/Split buttons
+- [ ] noVNC connects and renders XFCE desktop
+- [ ] SplitPane resizable via mouse drag
+- [ ] View preferences persist in localStorage
+- [ ] Keyboard shortcuts work (Ctrl+Shift+T/G/S)
+
+**Integration:**
+- [ ] Running `firefox` in terminal shows hint message
+- [ ] Clicking "GUI" or "Split" shows running Firefox
+- [ ] Desktop persists across view mode changes
+- [ ] Terminal and GUI share same filesystem/processes
+
+---

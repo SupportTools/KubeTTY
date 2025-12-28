@@ -11,6 +11,7 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/projects"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -139,6 +140,16 @@ func (m *mockStore) SetStatus(ctx context.Context, id uuid.UUID, status projects
 		p.Status = status
 		p.StatusMessage = message
 		m.statuses = append(m.statuses, statusUpdate{id: id, status: status, message: message})
+		return nil
+	}
+	return projects.ErrProjectNotFound
+}
+
+func (m *mockStore) SetPaused(ctx context.Context, id uuid.UUID, paused bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p, ok := m.projects[id]; ok {
+		p.Paused = paused
 		return nil
 	}
 	return projects.ErrProjectNotFound
@@ -1215,5 +1226,756 @@ func TestController_HandleCreating_StatusCallback(t *testing.T) {
 	}
 	if callbackStatus != projects.StatusRunning {
 		t.Errorf("Callback status = %s, want %s", callbackStatus, projects.StatusRunning)
+	}
+}
+
+// mockLeaderInfo implements LeaderInfo for testing.
+type mockLeaderInfo struct {
+	isLeader      bool
+	currentLeader string
+	identity      string
+}
+
+func (m *mockLeaderInfo) IsLeader() bool           { return m.isLeader }
+func (m *mockLeaderInfo) GetCurrentLeader() string { return m.currentLeader }
+func (m *mockLeaderInfo) GetIdentity() string      { return m.identity }
+
+// TestController_SetLeaderInfo verifies SetLeaderInfo sets the leader info provider.
+func TestController_SetLeaderInfo(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	if ctrl.leaderInfo != nil {
+		t.Error("leaderInfo should be nil initially")
+	}
+
+	info := &mockLeaderInfo{isLeader: true, currentLeader: "pod-1", identity: "pod-1"}
+	ctrl.SetLeaderInfo(info)
+
+	if ctrl.leaderInfo == nil {
+		t.Error("leaderInfo should not be nil after SetLeaderInfo")
+	}
+	if ctrl.leaderInfo != info {
+		t.Error("leaderInfo should be the same object passed to SetLeaderInfo")
+	}
+}
+
+// TestController_IsRunning verifies IsRunning returns correct running state.
+func TestController_IsRunning(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+	cfg.ReconcileInterval = 100 * time.Millisecond
+	cfg.HealthCheckInterval = 100 * time.Millisecond
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	// Initially not running
+	if ctrl.IsRunning() {
+		t.Error("Controller should not be running initially")
+	}
+
+	// Start the controller
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctrl.Start(ctx)
+
+	// Should be running now
+	if !ctrl.IsRunning() {
+		t.Error("Controller should be running after Start()")
+	}
+
+	// Stop the controller
+	ctrl.Stop()
+
+	// Should not be running after stop
+	if ctrl.IsRunning() {
+		t.Error("Controller should not be running after Stop()")
+	}
+}
+
+// TestController_IsLeader_NoLeaderInfo verifies IsLeader returns true when no leader info is set.
+func TestController_IsLeader_NoLeaderInfo(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	// Without leader info, should always be leader (single replica mode)
+	if !ctrl.IsLeader() {
+		t.Error("IsLeader should return true when no leader info is set")
+	}
+}
+
+// TestController_IsLeader_WithLeaderInfo verifies IsLeader returns leader info state.
+func TestController_IsLeader_WithLeaderInfo(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	// Set as leader
+	info := &mockLeaderInfo{isLeader: true}
+	ctrl.SetLeaderInfo(info)
+	if !ctrl.IsLeader() {
+		t.Error("IsLeader should return true when leaderInfo.IsLeader() is true")
+	}
+
+	// Set as not leader
+	info.isLeader = false
+	if ctrl.IsLeader() {
+		t.Error("IsLeader should return false when leaderInfo.IsLeader() is false")
+	}
+}
+
+// TestController_GetLeaderInfo_NoLeaderInfo verifies GetLeaderInfo when no leader info is set.
+func TestController_GetLeaderInfo_NoLeaderInfo(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	isLeader, currentLeader, identity := ctrl.GetLeaderInfo()
+
+	if !isLeader {
+		t.Error("isLeader should be true when no leader info is set")
+	}
+	if currentLeader != "" {
+		t.Errorf("currentLeader should be empty, got %q", currentLeader)
+	}
+	if identity != "" {
+		t.Errorf("identity should be empty, got %q", identity)
+	}
+}
+
+// TestController_GetLeaderInfo_WithLeaderInfo verifies GetLeaderInfo when leader info is set.
+func TestController_GetLeaderInfo_WithLeaderInfo(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	info := &mockLeaderInfo{
+		isLeader:      false,
+		currentLeader: "leader-pod",
+		identity:      "my-pod",
+	}
+	ctrl.SetLeaderInfo(info)
+
+	isLeader, currentLeader, identity := ctrl.GetLeaderInfo()
+
+	if isLeader {
+		t.Error("isLeader should be false")
+	}
+	if currentLeader != "leader-pod" {
+		t.Errorf("currentLeader = %q, want %q", currentLeader, "leader-pod")
+	}
+	if identity != "my-pod" {
+		t.Errorf("identity = %q, want %q", identity, "my-pod")
+	}
+}
+
+// TestController_StartStop verifies Start and Stop lifecycle methods.
+func TestController_StartStop(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+	cfg.ReconcileInterval = 50 * time.Millisecond
+	cfg.HealthCheckInterval = 50 * time.Millisecond
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start the controller
+	ctrl.Start(ctx)
+
+	if !ctrl.IsRunning() {
+		t.Error("Controller should be running after Start")
+	}
+
+	// Start again should be a no-op (logged warning)
+	ctrl.Start(ctx)
+
+	// Still running
+	if !ctrl.IsRunning() {
+		t.Error("Controller should still be running after duplicate Start")
+	}
+
+	// Stop
+	ctrl.Stop()
+
+	if ctrl.IsRunning() {
+		t.Error("Controller should not be running after Stop")
+	}
+
+	// Stop again should be a no-op (logged warning)
+	ctrl.Stop()
+}
+
+// TestController_StartContextCancel verifies controller responds to context cancellation.
+func TestController_StartContextCancel(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+	cfg.ReconcileInterval = 10 * time.Millisecond
+	cfg.HealthCheckInterval = 10 * time.Millisecond
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctrl.Start(ctx)
+
+	if !ctrl.IsRunning() {
+		t.Error("Controller should be running after Start")
+	}
+
+	// Cancel context
+	cancel()
+
+	// Wait for goroutines to stop
+	time.Sleep(50 * time.Millisecond)
+
+	// Clean up with Stop (controller still reports running until Stop() is called)
+	ctrl.Stop()
+}
+
+// TestIsPodReady verifies the isPodReady helper function.
+func TestIsPodReady(t *testing.T) {
+	tests := []struct {
+		name       string
+		conditions []corev1.PodCondition
+		expected   bool
+	}{
+		{
+			name:       "no conditions",
+			conditions: []corev1.PodCondition{},
+			expected:   false,
+		},
+		{
+			name: "ready condition true",
+			conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+			expected: true,
+		},
+		{
+			name: "ready condition false",
+			conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			},
+			expected: false,
+		},
+		{
+			name: "ready condition unknown",
+			conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionUnknown},
+			},
+			expected: false,
+		},
+		{
+			name: "other conditions only",
+			conditions: []corev1.PodCondition{
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+			},
+			expected: false,
+		},
+		{
+			name: "multiple conditions including ready",
+			conditions: []corev1.PodCondition{
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				Status: corev1.PodStatus{
+					Conditions: tt.conditions,
+				},
+			}
+			result := isPodReady(pod)
+			if result != tt.expected {
+				t.Errorf("isPodReady() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestController_ReconcileAll verifies reconcileAll processes projects with actionable statuses.
+func TestController_ReconcileAll(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	// Add projects with different statuses
+	pendingProject := newTestProjectWithStatus("pending-project", projects.StatusPending)
+	creatingProject := newTestProjectWithStatus("creating-project", projects.StatusCreating)
+	runningProject := newTestProjectWithStatus("running-project", projects.StatusRunning)
+	failedProject := newTestProjectWithStatus("failed-project", projects.StatusFailed)
+
+	store.addProject(pendingProject)
+	store.addProject(creatingProject)
+	store.addProject(runningProject)
+	store.addProject(failedProject)
+
+	ctx := context.Background()
+
+	// Run reconcileAll
+	ctrl.reconcileAll(ctx)
+
+	// Verify pending project was processed (status changed to creating)
+	statuses := store.getStatuses()
+	foundPendingTransition := false
+	for _, s := range statuses {
+		if s.id == pendingProject.ID && s.status == projects.StatusCreating {
+			foundPendingTransition = true
+			break
+		}
+	}
+	if !foundPendingTransition {
+		t.Error("Expected pending project to transition to creating")
+	}
+}
+
+// TestController_ReconcileProject verifies reconcileProject dispatches to correct handler.
+func TestController_ReconcileProject(t *testing.T) {
+	tests := []struct {
+		name             string
+		status           projects.ProjectStatus
+		expectTransition bool
+	}{
+		{
+			name:             "pending",
+			status:           projects.StatusPending,
+			expectTransition: true,
+		},
+		{
+			name:             "running",
+			status:           projects.StatusRunning,
+			expectTransition: false, // running has no reconcile handler
+		},
+		{
+			name:             "failed",
+			status:           projects.StatusFailed,
+			expectTransition: false, // failed has no reconcile handler
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewSimpleClientset()
+			store := newMockStore()
+			cfg := newControllerConfig()
+
+			ctrl := NewWithClient(cfg, store, client)
+
+			project := newTestProjectWithStatus("reconcile-test-"+tt.name, tt.status)
+			store.addProject(project)
+
+			ctx := context.Background()
+			err := ctrl.reconcileProject(ctx, project)
+
+			if err != nil && tt.status != projects.StatusDeleting {
+				// Deleting might error due to hard delete on non-existent data
+				t.Errorf("reconcileProject failed: %v", err)
+			}
+
+			statuses := store.getStatuses()
+			hasTransition := len(statuses) > 0
+			if hasTransition != tt.expectTransition {
+				t.Errorf("transition = %v, want %v", hasTransition, tt.expectTransition)
+			}
+		})
+	}
+}
+
+// TestController_CheckAllHealth verifies checkAllHealth processes running projects.
+func TestController_CheckAllHealth(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	// Add a running project
+	project := newTestProjectWithStatus("health-check-test", projects.StatusRunning)
+	store.addProject(project)
+
+	// Create the deployment
+	ctx := context.Background()
+	project.Status = projects.StatusPending
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	// Update deployment to ready
+	resourceName := cfg.ResourceConfig.ResourceName(project.Name)
+	deploy, _ := client.AppsV1().Deployments(cfg.ResourceConfig.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	deploy.Status.ReadyReplicas = 1
+	client.AppsV1().Deployments(cfg.ResourceConfig.Namespace).UpdateStatus(ctx, deploy, metav1.UpdateOptions{})
+
+	project.Status = projects.StatusRunning
+	store.statuses = []statusUpdate{}
+
+	// Run checkAllHealth - should not error even if health check fails (network)
+	ctrl.checkAllHealth(ctx)
+
+	// Health check is run but may not change status unless deployment becomes unhealthy
+}
+
+// TestController_CheckProjectHealth_Paused verifies paused projects skip health checks.
+func TestController_CheckProjectHealth_Paused(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	project := newTestProjectWithStatus("paused-health-test", projects.StatusRunning)
+	project.Paused = true
+	store.addProject(project)
+
+	ctx := context.Background()
+
+	// Run health check on paused project - should be skipped
+	ctrl.checkProjectHealth(ctx, project)
+
+	// No status change expected
+	if len(store.getStatuses()) > 0 {
+		t.Error("No status changes expected for paused project")
+	}
+}
+
+// TestController_CheckProjectHealth_DeploymentNotFound verifies health check marks project failed.
+func TestController_CheckProjectHealth_DeploymentNotFound(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	project := newTestProjectWithStatus("missing-deploy-health-test", projects.StatusRunning)
+	store.addProject(project)
+
+	ctx := context.Background()
+
+	// Run health check when deployment doesn't exist
+	ctrl.checkProjectHealth(ctx, project)
+
+	// Should be marked as failed
+	statuses := store.getStatuses()
+	found := false
+	for _, s := range statuses {
+		if s.status == projects.StatusFailed && s.message == "Deployment not found" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected project to be marked failed with 'Deployment not found' message")
+	}
+}
+
+// TestController_CheckProjectHealth_DeploymentNotReady verifies health check marks unhealthy.
+func TestController_CheckProjectHealth_DeploymentNotReady(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	project := newTestProjectWithStatus("not-ready-health-test", projects.StatusRunning)
+	store.addProject(project)
+
+	// Create deployment with 0 ready replicas
+	ctx := context.Background()
+	project.Status = projects.StatusPending
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	project.Status = projects.StatusRunning
+	store.statuses = []statusUpdate{}
+
+	// Run health check
+	ctrl.checkProjectHealth(ctx, project)
+
+	// Should be marked as failed due to not ready
+	statuses := store.getStatuses()
+	found := false
+	for _, s := range statuses {
+		if s.status == projects.StatusFailed && s.message == "Deployment not ready" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected project to be marked failed with 'Deployment not ready' message")
+	}
+}
+
+// TestController_ResyncProject verifies ResyncProject sets status to pending.
+func TestController_ResyncProject(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	project := newTestProjectWithStatus("resync-test", projects.StatusFailed)
+	store.addProject(project)
+
+	ctx := context.Background()
+
+	// Resync the project
+	if err := ctrl.ResyncProject(ctx, project); err != nil {
+		t.Fatalf("ResyncProject failed: %v", err)
+	}
+
+	// Verify status changed to pending
+	statuses := store.getStatuses()
+	found := false
+	for _, s := range statuses {
+		if s.status == projects.StatusPending {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected project status to be set to pending")
+	}
+}
+
+// TestController_ScaleProject verifies ScaleProject updates deployment replicas.
+func TestController_ScaleProject(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	project := newTestProjectWithStatus("scale-test", projects.StatusRunning)
+	store.addProject(project)
+
+	// Create the deployment first
+	ctx := context.Background()
+	project.Status = projects.StatusPending
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	// Scale to 0
+	if err := ctrl.ScaleProject(ctx, project, 0); err != nil {
+		t.Fatalf("ScaleProject(0) failed: %v", err)
+	}
+
+	// Verify deployment has 0 replicas
+	resourceName := cfg.ResourceConfig.ResourceName(project.Name)
+	deploy, _ := client.AppsV1().Deployments(cfg.ResourceConfig.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	if *deploy.Spec.Replicas != 0 {
+		t.Errorf("Expected 0 replicas, got %d", *deploy.Spec.Replicas)
+	}
+
+	// Scale to 1
+	if err := ctrl.ScaleProject(ctx, project, 1); err != nil {
+		t.Fatalf("ScaleProject(1) failed: %v", err)
+	}
+
+	deploy, _ = client.AppsV1().Deployments(cfg.ResourceConfig.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	if *deploy.Spec.Replicas != 1 {
+		t.Errorf("Expected 1 replica, got %d", *deploy.Spec.Replicas)
+	}
+}
+
+// TestController_ScaleProject_NotFound verifies error when deployment doesn't exist.
+func TestController_ScaleProject_NotFound(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	project := newTestProjectWithStatus("scale-notfound-test", projects.StatusRunning)
+	store.addProject(project)
+
+	ctx := context.Background()
+
+	// Try to scale non-existent deployment
+	err := ctrl.ScaleProject(ctx, project, 0)
+	if err == nil {
+		t.Error("Expected error when scaling non-existent deployment")
+	}
+}
+
+// TestController_UpdateProjectSecrets_CreateNew verifies creating new secrets.
+func TestController_UpdateProjectSecrets_CreateNew(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	project := newTestProjectWithStatus("secrets-create-test", projects.StatusRunning)
+	store.addProject(project)
+
+	// Create the deployment first (UpdateProjectSecrets triggers restart)
+	ctx := context.Background()
+	project.Status = projects.StatusPending
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	// Delete the auto-created secret to test creation
+	envSecretName := cfg.ResourceConfig.EnvSecretName(project.Name)
+	client.CoreV1().Secrets(cfg.ResourceConfig.Namespace).Delete(ctx, envSecretName, metav1.DeleteOptions{})
+
+	// Update secrets (should create new)
+	secrets := map[string]string{
+		"API_KEY":     "test-key",
+		"DB_PASSWORD": "test-pass",
+	}
+
+	if err := ctrl.UpdateProjectSecrets(ctx, project, secrets); err != nil {
+		t.Fatalf("UpdateProjectSecrets failed: %v", err)
+	}
+
+	// Verify secret was created
+	secret, err := client.CoreV1().Secrets(cfg.ResourceConfig.Namespace).Get(ctx, envSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get secret: %v", err)
+	}
+
+	if string(secret.Data["API_KEY"]) != "test-key" {
+		t.Errorf("API_KEY = %q, want %q", string(secret.Data["API_KEY"]), "test-key")
+	}
+	if string(secret.Data["DB_PASSWORD"]) != "test-pass" {
+		t.Errorf("DB_PASSWORD = %q, want %q", string(secret.Data["DB_PASSWORD"]), "test-pass")
+	}
+}
+
+// TestController_UpdateProjectSecrets_UpdateExisting verifies updating existing secrets.
+func TestController_UpdateProjectSecrets_UpdateExisting(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	project := newTestProjectWithStatus("secrets-update-test", projects.StatusRunning)
+	store.addProject(project)
+
+	// Create the deployment first
+	ctx := context.Background()
+	project.Status = projects.StatusPending
+	if err := ctrl.handlePending(ctx, project); err != nil {
+		t.Fatalf("handlePending failed: %v", err)
+	}
+
+	// Update secrets
+	secrets := map[string]string{
+		"NEW_KEY": "new-value",
+	}
+
+	if err := ctrl.UpdateProjectSecrets(ctx, project, secrets); err != nil {
+		t.Fatalf("UpdateProjectSecrets failed: %v", err)
+	}
+
+	// Verify secret was updated
+	envSecretName := cfg.ResourceConfig.EnvSecretName(project.Name)
+	secret, err := client.CoreV1().Secrets(cfg.ResourceConfig.Namespace).Get(ctx, envSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get secret: %v", err)
+	}
+
+	if string(secret.Data["NEW_KEY"]) != "new-value" {
+		t.Errorf("NEW_KEY = %q, want %q", string(secret.Data["NEW_KEY"]), "new-value")
+	}
+}
+
+// TestController_HandleSyncing_JobNotFound verifies handling when sync job is not found.
+func TestController_HandleSyncing_JobNotFound(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+	cfg.ResourceConfig.TemplatePVCName = "template-pvc" // Enable template sync
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	project := newTestProjectWithStatus("syncing-nojob-test", projects.StatusSyncing)
+	store.addProject(project)
+
+	ctx := context.Background()
+
+	// Handle syncing when job doesn't exist - should proceed to create deployment
+	if err := ctrl.handleSyncing(ctx, project); err != nil {
+		t.Fatalf("handleSyncing failed: %v", err)
+	}
+
+	// Should have created the deployment and transitioned to creating
+	statuses := store.getStatuses()
+	found := false
+	for _, s := range statuses {
+		if s.status == projects.StatusCreating {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected project to transition to creating status")
+	}
+}
+
+// TestController_HandleUpdating_DeploymentNotFound verifies creating deployment when missing.
+func TestController_HandleUpdating_DeploymentNotFound(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	store := newMockStore()
+	cfg := newControllerConfig()
+
+	ctrl := NewWithClient(cfg, store, client)
+
+	project := newTestProjectWithStatus("updating-notfound-test", projects.StatusUpdating)
+	store.addProject(project)
+
+	ctx := context.Background()
+
+	// Handle updating when deployment doesn't exist - should create it
+	if err := ctrl.handleUpdating(ctx, project); err != nil {
+		t.Fatalf("handleUpdating failed: %v", err)
+	}
+
+	// Verify deployment was created
+	resourceName := cfg.ResourceConfig.ResourceName(project.Name)
+	_, err := client.AppsV1().Deployments(cfg.ResourceConfig.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	if err != nil {
+		t.Errorf("Deployment should have been created: %v", err)
+	}
+
+	// Should transition to creating
+	statuses := store.getStatuses()
+	found := false
+	for _, s := range statuses {
+		if s.status == projects.StatusCreating {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected project to transition to creating status")
 	}
 }

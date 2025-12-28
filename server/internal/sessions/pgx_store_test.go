@@ -2,629 +2,737 @@ package sessions
 
 import (
 	"context"
-	"fmt"
-	"os"
+	"errors"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/stretchr/testify/require"
+	"github.com/jackc/pgx/v5"
+	"github.com/pashagolub/pgxmock/v2"
 )
 
-// getTestConnString builds a connection string from environment variables.
-func getTestConnString() string {
-	host := os.Getenv("CNPG_HOST")
-	if host == "" {
-		host = "localhost"
+// Helper to create a mock pool for testing
+func setupMockPool(t *testing.T) (pgxmock.PgxPoolIface, *PGXStore) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("failed to create mock pool: %v", err)
 	}
-	port := os.Getenv("CNPG_PORT")
-	if port == "" {
-		port = "5432"
-	}
-	user := os.Getenv("CNPG_USER")
-	if user == "" {
-		user = "kubetty_test"
-	}
-	password := os.Getenv("CNPG_PASSWORD")
-	if password == "" {
-		password = "kubetty_test"
-	}
-	database := os.Getenv("CNPG_DATABASE")
-	if database == "" {
-		database = "kubetty_test"
-	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, database)
+	store := NewPGXStoreWithPool(mock)
+	return mock, store
 }
 
-// newTestStore creates a PGXStore connected to the test database.
-// Skips the test if the database is not available or tables don't exist.
-func newTestStore(t *testing.T) *PGXStore {
-	t.Helper()
-	ctx := context.Background()
-	config, err := pgxpool.ParseConfig(getTestConnString())
+func TestNewPGXStoreWithPool(t *testing.T) {
+	mock, err := pgxmock.NewPool()
 	if err != nil {
-		t.Skipf("Skipping database test: failed to parse connection string: %v", err)
+		t.Fatalf("failed to create mock pool: %v", err)
 	}
+	defer mock.Close()
 
-	store, err := NewPGXStore(ctx, config)
-	if err != nil {
-		t.Skipf("Skipping database test: database not available: %v", err)
-	}
+	store := NewPGXStoreWithPool(mock)
 	if store == nil {
-		t.Skip("Skipping database test: store is nil")
+		t.Fatal("expected non-nil store")
 	}
-
-	// Verify the required tables exist
-	var exists bool
-	err = store.pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT FROM information_schema.tables
-			WHERE table_name = 'sessions'
-		)
-	`).Scan(&exists)
-	if err != nil || !exists {
-		store.Close()
-		t.Skipf("Skipping database test: sessions table not found: %v", err)
+	if store.pool == nil {
+		t.Fatal("expected non-nil pool in store")
 	}
-
-	return store
 }
 
-// cleanupSessions removes all sessions from the test database.
-func cleanupSessions(t *testing.T, ctx context.Context, store *PGXStore) {
-	t.Helper()
-	_, err := store.pool.Exec(ctx, "DELETE FROM sessions")
-	require.NoError(t, err)
-}
+func TestPGXStore_Ping(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		mock, err := pgxmock.NewPool(pgxmock.MonitorPingsOption(true))
+		if err != nil {
+			t.Fatalf("failed to create mock pool: %v", err)
+		}
+		defer mock.Close()
+		store := NewPGXStoreWithPool(mock)
 
-// cleanupLogs removes all log entries from the test database.
-func cleanupLogs(t *testing.T, ctx context.Context, store *PGXStore) {
-	t.Helper()
-	_, err := store.pool.Exec(ctx, "DELETE FROM session_logs")
-	require.NoError(t, err)
-}
+		mock.ExpectPing()
 
-// cleanupAll removes all test data.
-func cleanupAll(t *testing.T, ctx context.Context, store *PGXStore) {
-	t.Helper()
-	cleanupLogs(t, ctx, store)
-	cleanupSessions(t, ctx, store)
-}
-
-func TestPGXStore_UpsertSession(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
-	defer cleanupAll(t, ctx, store)
-
-	t.Run("insert new session", func(t *testing.T) {
-		cleanupSessions(t, ctx, store)
-
-		sessionID := uuid.NewString()
-		session := Session{
-			SessionID:    sessionID,
-			DeploymentID: "deploy-1",
-			ShellPID:     12345,
+		err = store.Ping(context.Background())
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
 		}
 
-		err := store.UpsertSession(ctx, session)
-		require.NoError(t, err)
-
-		// Verify session was created
-		retrieved, err := store.GetSession(ctx, sessionID)
-		require.NoError(t, err)
-		require.Equal(t, sessionID, retrieved.SessionID)
-		require.Equal(t, "deploy-1", retrieved.DeploymentID)
-		require.Equal(t, 12345, retrieved.ShellPID)
-	})
-
-	t.Run("update existing session", func(t *testing.T) {
-		cleanupSessions(t, ctx, store)
-
-		// Insert initial session
-		sessionID := uuid.NewString()
-		session := Session{
-			SessionID:    sessionID,
-			DeploymentID: "deploy-2",
-			ShellPID:     100,
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
 		}
-		err := store.UpsertSession(ctx, session)
-		require.NoError(t, err)
-
-		// Update with new PID
-		session.ShellPID = 200
-		err = store.UpsertSession(ctx, session)
-		require.NoError(t, err)
-
-		// Verify update
-		retrieved, err := store.GetSession(ctx, sessionID)
-		require.NoError(t, err)
-		require.Equal(t, 200, retrieved.ShellPID)
 	})
 
-	t.Run("upsert with attachment info", func(t *testing.T) {
-		cleanupSessions(t, ctx, store)
-
-		sessionID := uuid.NewString()
-		clientID := "client-123"
-		attachedAt := time.Now()
-		session := Session{
-			SessionID:    sessionID,
-			DeploymentID: "deploy-3",
-			ShellPID:     300,
-			AttachedTo:   &clientID,
-			AttachedAt:   &attachedAt,
+	t.Run("error", func(t *testing.T) {
+		mock, err := pgxmock.NewPool(pgxmock.MonitorPingsOption(true))
+		if err != nil {
+			t.Fatalf("failed to create mock pool: %v", err)
 		}
+		defer mock.Close()
+		store := NewPGXStoreWithPool(mock)
 
-		err := store.UpsertSession(ctx, session)
-		require.NoError(t, err)
+		expectedErr := errors.New("connection refused")
+		mock.ExpectPing().WillReturnError(expectedErr)
 
-		retrieved, err := store.GetSession(ctx, sessionID)
-		require.NoError(t, err)
-		require.NotNil(t, retrieved.AttachedTo)
-		require.Equal(t, "client-123", *retrieved.AttachedTo)
-		require.NotNil(t, retrieved.AttachedAt)
+		err = store.Ping(context.Background())
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
+		if !errors.Is(err, expectedErr) {
+			t.Errorf("error = %v, want %v", err, expectedErr)
+		}
 	})
+}
+
+func TestPGXStore_Close(t *testing.T) {
+	mock, store := setupMockPool(t)
+	mock.ExpectClose()
+
+	store.Close()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
 }
 
 func TestPGXStore_GetSession(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
-	defer cleanupAll(t, ctx, store)
+	columns := []string{
+		"session_uuid", "deployment_id", "shell_pid", "created_at", "updated_at",
+		"forked_from", "attached_to", "attached_at", "state", "last_log_at", "log_count",
+	}
+	now := time.Now()
 
-	t.Run("get existing session", func(t *testing.T) {
-		cleanupSessions(t, ctx, store)
+	t.Run("success", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-		sessionID := uuid.NewString()
-		session := Session{
-			SessionID:    sessionID,
-			DeploymentID: "deploy-1",
-			ShellPID:     555,
+		sessionID := "test-session-uuid"
+		attachedTo := "client-123"
+		attachedAt := now.Add(-time.Hour)
+
+		mock.ExpectQuery(`SELECT s.session_uuid`).
+			WithArgs(sessionID).
+			WillReturnRows(pgxmock.NewRows(columns).
+				AddRow(sessionID, "deploy-1", 12345, now, now, nil, &attachedTo, &attachedAt, []byte("active"), &now, 10))
+
+		sess, err := store.GetSession(context.Background(), sessionID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-		err := store.UpsertSession(ctx, session)
-		require.NoError(t, err)
+		if sess.SessionID != sessionID {
+			t.Errorf("SessionID = %s, want %s", sess.SessionID, sessionID)
+		}
+		if sess.DeploymentID != "deploy-1" {
+			t.Errorf("DeploymentID = %s, want deploy-1", sess.DeploymentID)
+		}
+		if sess.ShellPID != 12345 {
+			t.Errorf("ShellPID = %d, want 12345", sess.ShellPID)
+		}
+		if sess.AttachedTo == nil || *sess.AttachedTo != attachedTo {
+			t.Errorf("AttachedTo = %v, want %s", sess.AttachedTo, attachedTo)
+		}
 
-		retrieved, err := store.GetSession(ctx, sessionID)
-		require.NoError(t, err)
-		require.Equal(t, sessionID, retrieved.SessionID)
-		require.Equal(t, 0, retrieved.LogCount)
-		require.Nil(t, retrieved.LastLogAt)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
 	})
 
-	t.Run("get non-existent session", func(t *testing.T) {
-		nonexistentID := uuid.NewString()
-		_, err := store.GetSession(ctx, nonexistentID)
-		require.ErrorIs(t, err, ErrNotFound)
+	t.Run("not found", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		mock.ExpectQuery(`SELECT s.session_uuid`).
+			WithArgs("nonexistent").
+			WillReturnError(pgx.ErrNoRows)
+
+		_, err := store.GetSession(context.Background(), "nonexistent")
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("error = %v, want ErrNotFound", err)
+		}
 	})
 
-	t.Run("get session with logs", func(t *testing.T) {
-		cleanupAll(t, ctx, store)
+	t.Run("database error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-		// Create session
-		sessionID := uuid.NewString()
-		session := Session{
-			SessionID:    sessionID,
-			DeploymentID: "deploy-1",
-			ShellPID:     777,
+		expectedErr := errors.New("database error")
+		mock.ExpectQuery(`SELECT s.session_uuid`).
+			WithArgs("test-id").
+			WillReturnError(expectedErr)
+
+		_, err := store.GetSession(context.Background(), "test-id")
+		if err == nil {
+			t.Error("expected error, got nil")
 		}
-		err := store.UpsertSession(ctx, session)
-		require.NoError(t, err)
-
-		// Add log entries
-		for i := 0; i < 3; i++ {
-			log := LogEntry{
-				SessionID: sessionID,
-				Direction: "in",
-				Data:      []byte("test data"),
-			}
-			err := store.AppendLog(ctx, log)
-			require.NoError(t, err)
-		}
-
-		// Retrieve session - should have log count
-		retrieved, err := store.GetSession(ctx, sessionID)
-		require.NoError(t, err)
-		require.Equal(t, 3, retrieved.LogCount)
-		require.NotNil(t, retrieved.LastLogAt)
 	})
 }
 
 func TestPGXStore_ListSessions(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
-	defer cleanupAll(t, ctx, store)
+	columns := []string{
+		"session_uuid", "deployment_id", "shell_pid", "created_at", "updated_at",
+		"forked_from", "attached_to", "attached_at", "state", "last_log_at", "log_count",
+	}
+	now := time.Now()
 
-	t.Run("list empty", func(t *testing.T) {
-		cleanupSessions(t, ctx, store)
+	t.Run("success with results", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-		sessions, err := store.ListSessions(ctx, "deploy-1")
-		require.NoError(t, err)
-		require.Empty(t, sessions)
+		deploymentID := "deploy-1"
+		mock.ExpectQuery(`SELECT s.session_uuid`).
+			WithArgs(deploymentID).
+			WillReturnRows(pgxmock.NewRows(columns).
+				AddRow("sess-1", deploymentID, 1001, now, now, nil, nil, nil, []byte("active"), nil, 0).
+				AddRow("sess-2", deploymentID, 1002, now, now, nil, nil, nil, []byte("active"), nil, 5))
+
+		sessions, err := store.ListSessions(context.Background(), deploymentID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(sessions) != 2 {
+			t.Errorf("len(sessions) = %d, want 2", len(sessions))
+		}
+		if sessions[0].SessionID != "sess-1" {
+			t.Errorf("sessions[0].SessionID = %s, want sess-1", sessions[0].SessionID)
+		}
 	})
 
-	t.Run("list multiple sessions", func(t *testing.T) {
-		cleanupSessions(t, ctx, store)
+	t.Run("empty results", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-		// Create 3 sessions for same deployment
-		for i := 1; i <= 3; i++ {
-			session := Session{
-				SessionID:    uuid.NewString(),
-				DeploymentID: "deploy-list",
-				ShellPID:     100 + i,
-			}
-			err := store.UpsertSession(ctx, session)
-			require.NoError(t, err)
+		mock.ExpectQuery(`SELECT s.session_uuid`).
+			WithArgs("no-sessions").
+			WillReturnRows(pgxmock.NewRows(columns))
+
+		sessions, err := store.ListSessions(context.Background(), "no-sessions")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(sessions) != 0 {
+			t.Errorf("len(sessions) = %d, want 0", len(sessions))
+		}
+	})
+
+	t.Run("database error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		mock.ExpectQuery(`SELECT s.session_uuid`).
+			WithArgs("deploy-1").
+			WillReturnError(errors.New("connection lost"))
+
+		_, err := store.ListSessions(context.Background(), "deploy-1")
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
+	})
+}
+
+func TestPGXStore_UpsertSession(t *testing.T) {
+	t.Run("success with zero timestamps", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		sess := Session{
+			SessionID:    "new-session",
+			DeploymentID: "deploy-1",
+			ShellPID:     5000,
+			State:        []byte("active"),
 		}
 
-		// Create 1 session for different deployment
-		other := Session{
-			SessionID:    uuid.NewString(),
-			DeploymentID: "deploy-other",
-			ShellPID:     999,
-		}
-		err := store.UpsertSession(ctx, other)
-		require.NoError(t, err)
+		// Use AnyArg for timestamp and pointer fields as pgxmock is strict about types
+		mock.ExpectExec(`INSERT INTO sessions`).
+			WithArgs(
+				sess.SessionID,
+				sess.DeploymentID,
+				sess.ShellPID,
+				pgxmock.AnyArg(), // createdAt
+				pgxmock.AnyArg(), // updatedAt
+				pgxmock.AnyArg(), // forkedFrom
+				pgxmock.AnyArg(), // attachedTo
+				pgxmock.AnyArg(), // attachedAt
+				sess.State,
+			).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-		// List should only return sessions for target deployment
-		sessions, err := store.ListSessions(ctx, "deploy-list")
-		require.NoError(t, err)
-		require.Len(t, sessions, 3)
+		err := store.UpsertSession(context.Background(), sess)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("success with timestamps", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		now := time.Now()
+		sess := Session{
+			SessionID:    "existing-session",
+			DeploymentID: "deploy-1",
+			ShellPID:     5001,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			State:        []byte("active"),
+		}
+
+		mock.ExpectExec(`INSERT INTO sessions`).
+			WithArgs(
+				sess.SessionID,
+				sess.DeploymentID,
+				sess.ShellPID,
+				pgxmock.AnyArg(), // createdAt
+				pgxmock.AnyArg(), // updatedAt
+				pgxmock.AnyArg(), // forkedFrom
+				pgxmock.AnyArg(), // attachedTo
+				pgxmock.AnyArg(), // attachedAt
+				sess.State,
+			).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+		err := store.UpsertSession(context.Background(), sess)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("database error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		sess := Session{SessionID: "fail-session", DeploymentID: "d", State: []byte("active")}
+
+		mock.ExpectExec(`INSERT INTO sessions`).
+			WithArgs(
+				sess.SessionID,
+				sess.DeploymentID,
+				sess.ShellPID,
+				pgxmock.AnyArg(), // createdAt
+				pgxmock.AnyArg(), // updatedAt
+				pgxmock.AnyArg(), // forkedFrom
+				pgxmock.AnyArg(), // attachedTo
+				pgxmock.AnyArg(), // attachedAt
+				sess.State,
+			).
+			WillReturnError(errors.New("constraint violation"))
+
+		err := store.UpsertSession(context.Background(), sess)
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
 	})
 }
 
 func TestPGXStore_DeleteSession(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
-	defer cleanupAll(t, ctx, store)
+	t.Run("success", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-	t.Run("delete existing session", func(t *testing.T) {
-		cleanupSessions(t, ctx, store)
+		mock.ExpectExec(`DELETE FROM sessions`).
+			WithArgs("session-to-delete").
+			WillReturnResult(pgxmock.NewResult("DELETE", 1))
 
-		sessionID := uuid.NewString()
-		session := Session{
-			SessionID:    sessionID,
-			DeploymentID: "deploy-1",
-			ShellPID:     123,
+		err := store.DeleteSession(context.Background(), "session-to-delete")
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
 		}
-		err := store.UpsertSession(ctx, session)
-		require.NoError(t, err)
-
-		// Delete session
-		err = store.DeleteSession(ctx, sessionID)
-		require.NoError(t, err)
-
-		// Verify session is gone
-		_, err = store.GetSession(ctx, sessionID)
-		require.ErrorIs(t, err, ErrNotFound)
 	})
 
-	t.Run("delete non-existent session", func(t *testing.T) {
-		// Should not error
-		nonexistentID := uuid.NewString()
-		err := store.DeleteSession(ctx, nonexistentID)
-		require.NoError(t, err)
-	})
+	t.Run("database error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-	t.Run("delete cascades logs", func(t *testing.T) {
-		cleanupAll(t, ctx, store)
+		mock.ExpectExec(`DELETE FROM sessions`).
+			WithArgs("session-id").
+			WillReturnError(errors.New("delete failed"))
 
-		// Create session with logs
-		sessionID := uuid.NewString()
-		session := Session{
-			SessionID:    sessionID,
-			DeploymentID: "deploy-1",
-			ShellPID:     456,
+		err := store.DeleteSession(context.Background(), "session-id")
+		if err == nil {
+			t.Error("expected error, got nil")
 		}
-		err := store.UpsertSession(ctx, session)
-		require.NoError(t, err)
-
-		log := LogEntry{
-			SessionID: sessionID,
-			Direction: "out",
-			Data:      []byte("test"),
-		}
-		err = store.AppendLog(ctx, log)
-		require.NoError(t, err)
-
-		// Delete session
-		err = store.DeleteSession(ctx, sessionID)
-		require.NoError(t, err)
-
-		// Logs should be gone too
-		result, err := store.ListLogs(ctx, sessionID, 100, nil)
-		require.NoError(t, err)
-		require.Empty(t, result.Logs)
-	})
-}
-
-func TestPGXStore_SetAttachment(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
-	defer cleanupAll(t, ctx, store)
-
-	sessionID := uuid.NewString()
-	session := Session{
-		SessionID:    sessionID,
-		DeploymentID: "deploy-1",
-		ShellPID:     789,
-	}
-	err := store.UpsertSession(ctx, session)
-	require.NoError(t, err)
-
-	t.Run("attach client", func(t *testing.T) {
-		err := store.SetAttachment(ctx, sessionID, "client-1", true)
-		require.NoError(t, err)
-
-		retrieved, err := store.GetSession(ctx, sessionID)
-		require.NoError(t, err)
-		require.NotNil(t, retrieved.AttachedTo)
-		require.Equal(t, "client-1", *retrieved.AttachedTo)
-		require.NotNil(t, retrieved.AttachedAt)
-	})
-
-	t.Run("detach client", func(t *testing.T) {
-		err := store.SetAttachment(ctx, sessionID, "client-1", false)
-		require.NoError(t, err)
-
-		retrieved, err := store.GetSession(ctx, sessionID)
-		require.NoError(t, err)
-		require.Nil(t, retrieved.AttachedTo)
-		require.Nil(t, retrieved.AttachedAt)
 	})
 }
 
 func TestPGXStore_ClearAttachments(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
-	defer cleanupAll(t, ctx, store)
+	t.Run("success", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-	t.Run("clear all attachments for deployment", func(t *testing.T) {
-		cleanupSessions(t, ctx, store)
+		mock.ExpectExec(`UPDATE sessions`).
+			WithArgs("deploy-1").
+			WillReturnResult(pgxmock.NewResult("UPDATE", 3))
 
-		// Create 2 attached sessions
-		for i := 1; i <= 2; i++ {
-			sessionID := uuid.NewString()
-			session := Session{
-				SessionID:    sessionID,
-				DeploymentID: "deploy-clear",
-				ShellPID:     100 + i,
-			}
-			err := store.UpsertSession(ctx, session)
-			require.NoError(t, err)
-
-			clientID := "client-" + string(rune('0'+i))
-			err = store.SetAttachment(ctx, sessionID, clientID, true)
-			require.NoError(t, err)
+		err := store.ClearAttachments(context.Background(), "deploy-1")
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
 		}
+	})
 
-		// Clear all attachments
-		err := store.ClearAttachments(ctx, "deploy-clear")
-		require.NoError(t, err)
+	t.Run("database error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-		// Verify both sessions are detached
-		sessions, err := store.ListSessions(ctx, "deploy-clear")
-		require.NoError(t, err)
-		for _, s := range sessions {
-			require.Nil(t, s.AttachedTo)
-			require.Nil(t, s.AttachedAt)
+		mock.ExpectExec(`UPDATE sessions`).
+			WithArgs("deploy-1").
+			WillReturnError(errors.New("update failed"))
+
+		err := store.ClearAttachments(context.Background(), "deploy-1")
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
+	})
+}
+
+func TestPGXStore_SetAttachment(t *testing.T) {
+	t.Run("attach success", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		mock.ExpectExec(`UPDATE sessions SET attached_to=\$2`).
+			WithArgs("session-1", "client-1").
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err := store.SetAttachment(context.Background(), "session-1", "client-1", true)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("detach success", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		mock.ExpectExec(`UPDATE sessions SET attached_to=NULL`).
+			WithArgs("session-1", "client-1").
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err := store.SetAttachment(context.Background(), "session-1", "client-1", false)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("detach with empty client ID", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		mock.ExpectExec(`UPDATE sessions SET attached_to=NULL`).
+			WithArgs("session-1", "").
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err := store.SetAttachment(context.Background(), "session-1", "", false)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("attach error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		mock.ExpectExec(`UPDATE sessions SET attached_to=\$2`).
+			WithArgs("session-1", "client-1").
+			WillReturnError(errors.New("update failed"))
+
+		err := store.SetAttachment(context.Background(), "session-1", "client-1", true)
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
+	})
+
+	t.Run("detach error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		mock.ExpectExec(`UPDATE sessions SET attached_to=NULL`).
+			WithArgs("session-1", "client-1").
+			WillReturnError(errors.New("update failed"))
+
+		err := store.SetAttachment(context.Background(), "session-1", "client-1", false)
+		if err == nil {
+			t.Error("expected error, got nil")
 		}
 	})
 }
 
 func TestPGXStore_AppendLog(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
-	defer cleanupAll(t, ctx, store)
+	t.Run("success with zero timestamp", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-	// Create session
-	sessionID := uuid.NewString()
-	session := Session{
-		SessionID:    sessionID,
-		DeploymentID: "deploy-1",
-		ShellPID:     321,
-	}
-	err := store.UpsertSession(ctx, session)
-	require.NoError(t, err)
-
-	t.Run("append log entry", func(t *testing.T) {
-		cleanupLogs(t, ctx, store)
-
-		log := LogEntry{
-			SessionID: sessionID,
-			Direction: "in",
-			Data:      []byte("ls -la"),
+		entry := LogEntry{
+			SessionID: "session-1",
+			Direction: "output",
+			Data:      []byte("hello world"),
 		}
-		err := store.AppendLog(ctx, log)
-		require.NoError(t, err)
 
-		// Retrieve logs
-		result, err := store.ListLogs(ctx, sessionID, 10, nil)
-		require.NoError(t, err)
-		require.Len(t, result.Logs, 1)
-		require.Equal(t, "in", result.Logs[0].Direction)
-		require.Equal(t, []byte("ls -la"), result.Logs[0].Data)
+		mock.ExpectExec(`INSERT INTO session_logs`).
+			WithArgs(entry.SessionID, entry.Direction, entry.Data, nil).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+		err := store.AppendLog(context.Background(), entry)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
 	})
 
-	t.Run("append multiple logs", func(t *testing.T) {
-		cleanupLogs(t, ctx, store)
+	t.Run("success with timestamp", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-		for i := 0; i < 5; i++ {
-			log := LogEntry{
-				SessionID: sessionID,
-				Direction: "out",
-				Data:      []byte("line " + string(rune('0'+i))),
-			}
-			err := store.AppendLog(ctx, log)
-			require.NoError(t, err)
+		now := time.Now()
+		entry := LogEntry{
+			SessionID: "session-1",
+			Direction: "input",
+			Data:      []byte("ls -la"),
+			CreatedAt: now,
 		}
 
-		result, err := store.ListLogs(ctx, sessionID, 100, nil)
-		require.NoError(t, err)
-		require.Len(t, result.Logs, 5)
+		mock.ExpectExec(`INSERT INTO session_logs`).
+			WithArgs(entry.SessionID, entry.Direction, entry.Data, now).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+		err := store.AppendLog(context.Background(), entry)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("database error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		entry := LogEntry{SessionID: "s", Direction: "output", Data: []byte("x")}
+
+		mock.ExpectExec(`INSERT INTO session_logs`).
+			WithArgs(entry.SessionID, entry.Direction, entry.Data, nil).
+			WillReturnError(errors.New("insert failed"))
+
+		err := store.AppendLog(context.Background(), entry)
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
 	})
 }
 
 func TestPGXStore_ListLogs(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
-	defer cleanupAll(t, ctx, store)
+	columns := []string{"session_uuid", "direction", "payload", "created_at"}
+	now := time.Now()
 
-	// Create session
-	sessionID := uuid.NewString()
-	session := Session{
-		SessionID:    sessionID,
-		DeploymentID: "deploy-1",
-		ShellPID:     654,
-	}
-	err := store.UpsertSession(ctx, session)
-	require.NoError(t, err)
+	t.Run("success without filter", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-	t.Run("list with limit", func(t *testing.T) {
-		cleanupLogs(t, ctx, store)
+		// Expect count query
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM session_logs`).
+			WithArgs("session-1").
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(5))
 
-		// Create 10 log entries
-		for i := 0; i < 10; i++ {
-			log := LogEntry{
-				SessionID: sessionID,
-				Direction: "in",
-				Data:      []byte("entry " + string(rune('0'+i))),
-			}
-			err := store.AppendLog(ctx, log)
-			require.NoError(t, err)
+		// Expect data query
+		mock.ExpectQuery(`SELECT session_uuid, direction, payload, created_at`).
+			WithArgs("session-1", 200).
+			WillReturnRows(pgxmock.NewRows(columns).
+				AddRow("session-1", "output", []byte("line1"), now).
+				AddRow("session-1", "input", []byte("cmd"), now))
+
+		result, err := store.ListLogs(context.Background(), "session-1", 0, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-
-		// List with limit of 5
-		result, err := store.ListLogs(ctx, sessionID, 5, nil)
-		require.NoError(t, err)
-		require.Len(t, result.Logs, 5)
+		if result.MatchCount != 5 {
+			t.Errorf("MatchCount = %d, want 5", result.MatchCount)
+		}
+		if len(result.Logs) != 2 {
+			t.Errorf("len(Logs) = %d, want 2", len(result.Logs))
+		}
 	})
 
-	t.Run("list empty", func(t *testing.T) {
-		cleanupLogs(t, ctx, store)
+	t.Run("with direction filter", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-		result, err := store.ListLogs(ctx, sessionID, 10, nil)
-		require.NoError(t, err)
-		require.Empty(t, result.Logs)
+		filter := &LogFilter{Direction: "output"}
+
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM session_logs`).
+			WithArgs("session-1", "output").
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
+
+		mock.ExpectQuery(`SELECT session_uuid, direction, payload, created_at`).
+			WithArgs("session-1", "output", 100).
+			WillReturnRows(pgxmock.NewRows(columns).
+				AddRow("session-1", "output", []byte("data"), now))
+
+		result, err := store.ListLogs(context.Background(), "session-1", 100, filter)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.MatchCount != 3 {
+			t.Errorf("MatchCount = %d, want 3", result.MatchCount)
+		}
+	})
+
+	t.Run("with search filter", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		filter := &LogFilter{Search: "error"}
+
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM session_logs`).
+			WithArgs("session-1", "%error%").
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+
+		mock.ExpectQuery(`SELECT session_uuid, direction, payload, created_at`).
+			WithArgs("session-1", "%error%", 50).
+			WillReturnRows(pgxmock.NewRows(columns).
+				AddRow("session-1", "output", []byte("error occurred"), now))
+
+		result, err := store.ListLogs(context.Background(), "session-1", 50, filter)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.MatchCount != 1 {
+			t.Errorf("MatchCount = %d, want 1", result.MatchCount)
+		}
+	})
+
+	t.Run("count query error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM session_logs`).
+			WithArgs("session-1").
+			WillReturnError(errors.New("count failed"))
+
+		_, err := store.ListLogs(context.Background(), "session-1", 0, nil)
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
+	})
+
+	t.Run("data query error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM session_logs`).
+			WithArgs("session-1").
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(5))
+
+		mock.ExpectQuery(`SELECT session_uuid, direction, payload, created_at`).
+			WithArgs("session-1", 200).
+			WillReturnError(errors.New("query failed"))
+
+		_, err := store.ListLogs(context.Background(), "session-1", 0, nil)
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
 	})
 }
 
 func TestPGXStore_PruneLogs(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
-	defer cleanupAll(t, ctx, store)
+	t.Run("success", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-	// Create session
-	sessionID := uuid.NewString()
-	session := Session{
-		SessionID:    sessionID,
-		DeploymentID: "deploy-1",
-		ShellPID:     987,
-	}
-	err := store.UpsertSession(ctx, session)
-	require.NoError(t, err)
+		cutoff := time.Now().Add(-24 * time.Hour)
+		mock.ExpectExec(`DELETE FROM session_logs WHERE created_at < \$1`).
+			WithArgs(cutoff).
+			WillReturnResult(pgxmock.NewResult("DELETE", 100))
 
-	t.Run("prune old logs", func(t *testing.T) {
-		cleanupLogs(t, ctx, store)
-
-		now := time.Now()
-
-		// Create old log (simulate)
-		oldLog := LogEntry{
-			SessionID: sessionID,
-			Direction: "out",
-			Data:      []byte("old"),
-			CreatedAt: now.Add(-2 * time.Hour),
+		count, err := store.PruneLogs(context.Background(), cutoff)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
 		}
-		err := store.AppendLog(ctx, oldLog)
-		require.NoError(t, err)
-
-		// Create recent log
-		recentLog := LogEntry{
-			SessionID: sessionID,
-			Direction: "out",
-			Data:      []byte("recent"),
+		if count != 100 {
+			t.Errorf("count = %d, want 100", count)
 		}
-		err = store.AppendLog(ctx, recentLog)
-		require.NoError(t, err)
+	})
 
-		// Prune logs older than 1 hour
-		cutoff := now.Add(-1 * time.Hour)
-		count, err := store.PruneLogs(ctx, cutoff)
-		require.NoError(t, err)
-		require.Equal(t, int64(1), count)
+	t.Run("zero cutoff returns zero", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-		// Recent log should remain
-		result, err := store.ListLogs(ctx, sessionID, 10, nil)
-		require.NoError(t, err)
-		require.Len(t, result.Logs, 1)
-		require.Equal(t, []byte("recent"), result.Logs[0].Data)
+		count, err := store.PruneLogs(context.Background(), time.Time{})
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("count = %d, want 0", count)
+		}
+
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("database error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		cutoff := time.Now()
+		mock.ExpectExec(`DELETE FROM session_logs WHERE created_at < \$1`).
+			WithArgs(cutoff).
+			WillReturnError(errors.New("delete failed"))
+
+		_, err := store.PruneLogs(context.Background(), cutoff)
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
 	})
 }
 
 func TestPGXStore_TrimLogs(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
-	defer cleanupAll(t, ctx, store)
+	t.Run("success", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-	// Create session
-	sessionID := uuid.NewString()
-	session := Session{
-		SessionID:    sessionID,
-		DeploymentID: "deploy-1",
-		ShellPID:     111,
-	}
-	err := store.UpsertSession(ctx, session)
-	require.NoError(t, err)
+		mock.ExpectExec(`WITH ranked AS`).
+			WithArgs(1000).
+			WillReturnResult(pgxmock.NewResult("DELETE", 50))
 
-	t.Run("trim excess logs", func(t *testing.T) {
-		cleanupLogs(t, ctx, store)
-
-		// Create 10 log entries
-		for i := 0; i < 10; i++ {
-			log := LogEntry{
-				SessionID: sessionID,
-				Direction: "in",
-				Data:      []byte("entry " + string(rune('0'+i))),
-			}
-			err := store.AppendLog(ctx, log)
-			require.NoError(t, err)
-			// Small delay to ensure distinct timestamps
-			time.Sleep(1 * time.Millisecond)
+		count, err := store.TrimLogs(context.Background(), 1000)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
 		}
-
-		// Trim to keep only 5 newest
-		count, err := store.TrimLogs(ctx, 5)
-		require.NoError(t, err)
-		require.Equal(t, int64(5), count)
-
-		// Verify only 5 logs remain
-		result, err := store.ListLogs(ctx, sessionID, 100, nil)
-		require.NoError(t, err)
-		require.Len(t, result.Logs, 5)
+		if count != 50 {
+			t.Errorf("count = %d, want 50", count)
+		}
 	})
 
-	t.Run("trim with zero max entries", func(t *testing.T) {
-		count, err := store.TrimLogs(ctx, 0)
-		require.NoError(t, err)
-		require.Equal(t, int64(0), count)
+	t.Run("zero max entries returns zero", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		count, err := store.TrimLogs(context.Background(), 0)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("count = %d, want 0", count)
+		}
 	})
-}
 
-func TestPGXStore_Ping(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
+	t.Run("negative max entries returns zero", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
 
-	err := store.Ping(ctx)
-	require.NoError(t, err)
+		count, err := store.TrimLogs(context.Background(), -5)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("count = %d, want 0", count)
+		}
+	})
+
+	t.Run("database error", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		mock.ExpectExec(`WITH ranked AS`).
+			WithArgs(500).
+			WillReturnError(errors.New("trim failed"))
+
+		_, err := store.TrimLogs(context.Background(), 500)
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
+	})
 }

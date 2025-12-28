@@ -11,6 +11,7 @@ import (
 
 const (
 	defaultServicePort = 8080
+	defaultGUIVNCPort  = 5901
 )
 
 // Catalog describes all projects available through the gateway UI.
@@ -30,6 +31,10 @@ type Project struct {
 	Tags        []string      `yaml:"tags" json:"tags"`
 	HealthCheck *HealthCheck  `yaml:"healthCheck" json:"healthCheck"`
 	Limits      ProjectLimits `yaml:"limits" json:"limits"`
+
+	// GUI desktop support
+	GUIEnabled bool `yaml:"guiEnabled" json:"guiEnabled"`
+	GUIVNCPort int  `yaml:"guiVNCPort" json:"guiVNCPort"` // Default: 5901
 }
 
 // HealthCheck defines how to poll downstream readiness (optional).
@@ -103,6 +108,10 @@ func (c *Catalog) normalize() {
 	for i := range c.Projects {
 		if c.Projects[i].Port == 0 {
 			c.Projects[i].Port = defaultServicePort
+		}
+		// Apply default VNC port for GUI-enabled projects
+		if c.Projects[i].GUIEnabled && c.Projects[i].GUIVNCPort == 0 {
+			c.Projects[i].GUIVNCPort = defaultGUIVNCPort
 		}
 	}
 }

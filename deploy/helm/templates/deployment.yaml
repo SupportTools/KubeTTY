@@ -27,7 +27,7 @@ metadata:
     app.kubernetes.io/version: {{ .Chart.AppVersion }}
     app.kubernetes.io/managed-by: Helm
 spec:
-  replicas: 3
+  replicas: 1
   strategy:
     type: RollingUpdate
   selector:
@@ -219,6 +219,10 @@ spec:
               value: {{ default "" .Values.auth.cookieDomain | quote }}
             - name: AUTH_COOKIE_SECURE
               value: {{ ternary "true" "false" (default true .Values.auth.cookieSecure) | quote }}
+{{- if .Values.gateway.recommendedImageTag }}
+            - name: RECOMMENDED_IMAGE_TAG
+              value: {{ .Values.gateway.recommendedImageTag | quote }}
+{{- end }}
 {{- /* Controller configuration for project lifecycle management */}}
 {{- if .Values.controller.enabled }}
             - name: CONTROLLER_ENABLED
@@ -283,6 +287,9 @@ spec:
             - name: http
               containerPort: {{ .Values.service.port }}
           volumeMounts:
+            # Shared memory for browser automation (Playwright/Puppeteer)
+            - name: dshm
+              mountPath: /dev/shm
 {{- if .Values.pipelines.dind.enabled }}
             - name: dind-sock
               mountPath: /var/run/docker
@@ -302,6 +309,11 @@ spec:
 {{- end }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
       volumes:
+        # Shared memory volume for browser automation (Playwright/Puppeteer)
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.browser.shmSize | default "2Gi" }}
       {{- if .Values.dataPVC.enabled }}
         - name: data
           persistentVolumeClaim:

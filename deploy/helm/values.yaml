@@ -5,7 +5,7 @@
 # Container image configuration
 image:
   repository: harbor.support.tools/kubetty/kubetty
-  tag: v1.4.2
+  tag: v1.8.0
   pullPolicy: IfNotPresent
 
 # Image pull secrets for private registries
@@ -109,6 +109,12 @@ auth:
 # Enables multi-project tabbed interface
 gateway:
   enabled: false
+
+  # Recommended image tag for project upgrades
+  # This value is shown in the admin UI for quick one-click upgrades
+  # Should match the version you're deploying (e.g., "v1.12.0")
+  # Leave empty to use "latest" (not recommended for production)
+  recommendedImageTag: ""
 
   # Project catalog configuration
   catalog:
@@ -389,3 +395,40 @@ pipelines:
     # Enable DinD sidecar for pipeline execution
     # Requires privileged container
     enabled: true
+
+# Browser automation configuration (Playwright/Puppeteer)
+browser:
+  # Shared memory size for headless browser processes
+  # Chrome/Chromium requires adequate /dev/shm for stable operation
+  # Increase for heavy browser workloads (multiple tabs/instances)
+  shmSize: "2Gi"
+
+# GUI Desktop configuration (Project pods only)
+# These are default values passed to the controller for project deployments.
+# Per-project GUI settings can be configured via the Admin API.
+gui:
+  # Default GUI enabled state for new projects
+  # Can be overridden per-project via Admin API
+  defaultEnabled: false
+
+  # Default screen resolution (WIDTHxHEIGHTxDEPTH)
+  # Supported: 1024x768x24, 1280x720x24, 1280x1024x24, 1920x1080x24
+  defaultResolution: "1920x1080x24"
+
+  # VNC port for GUI connections
+  # The gateway proxies WebSocket connections to this port
+  vncPort: 5901
+
+  # Desktop environment to use
+  # Options: xfce (default, lightweight), mate, lxde, fluxbox
+  desktop: "xfce"
+
+  # Additional resource adjustments when GUI is enabled
+  # GUI projects require more resources for the X server and desktop
+  resourceOverrides:
+    # Additional memory request when GUI is enabled
+    memoryRequestAdd: "512Mi"
+    # Additional memory limit when GUI is enabled
+    memoryLimitAdd: "1Gi"
+    # Additional CPU request when GUI is enabled
+    cpuRequestAdd: "250m"

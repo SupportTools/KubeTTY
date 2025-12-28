@@ -69,6 +69,11 @@ func (f *fakeStore) GetRecentErrors(ctx context.Context, limit int) ([]tabs.Tab,
 	}
 	return result, nil
 }
+func (f *fakeStore) UpdatePositions(context.Context, string, []string) error { return nil }
+func (f *fakeStore) GetNextPosition(context.Context, string) (int, error)    { return 0, nil }
+func (f *fakeStore) CleanOrphanedTabs(context.Context, time.Duration) (int64, error) {
+	return 0, nil
+}
 
 func TestNewManager(t *testing.T) {
 	cat := gatewayconfig.Catalog{Projects: []gatewayconfig.Project{{ID: "proj", Namespace: "ns", Service: "svc", Port: 8080}}}
@@ -510,5 +515,149 @@ func TestProjectWithStatus_Fields(t *testing.T) {
 	}
 	if pws.LastCheckedAt == nil {
 		t.Error("LastCheckedAt should not be nil")
+	}
+}
+
+// TestIsGUIEnabled verifies checking if a project has GUI support.
+func TestIsGUIEnabled(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{
+			{ID: "gui-enabled", Namespace: "ns", Service: "svc", Port: 8080, GUIEnabled: true, GUIVNCPort: 5901},
+			{ID: "gui-disabled", Namespace: "ns", Service: "svc", Port: 8080, GUIEnabled: false},
+		},
+	}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	tests := []struct {
+		name      string
+		projectID string
+		want      bool
+	}{
+		{"GUI enabled project", "gui-enabled", true},
+		{"GUI disabled project", "gui-disabled", false},
+		{"Non-existent project", "missing", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mgr.IsGUIEnabled(tt.projectID); got != tt.want {
+				t.Errorf("IsGUIEnabled(%q) = %v, want %v", tt.projectID, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCreateVNCTab verifies VNC tab creation for GUI-enabled projects.
+func TestCreateVNCTab(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{
+			{ID: "gui-project", Namespace: "ns", Service: "svc", Port: 8080, GUIEnabled: true, GUIVNCPort: 5901},
+		},
+	}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	ctx := context.Background()
+	tab, err := mgr.CreateVNCTab(ctx, "gui-project", "client1")
+	if err != nil {
+		t.Fatalf("CreateVNCTab error: %v", err)
+	}
+	if tab.ProjectID != "gui-project" {
+		t.Errorf("ProjectID = %q, want %q", tab.ProjectID, "gui-project")
+	}
+	if tab.ClientID != "client1" {
+		t.Errorf("ClientID = %q, want %q", tab.ClientID, "client1")
+	}
+	// Check downstream URI has vnc:// scheme
+	if tab.DownstreamURI == nil || *tab.DownstreamURI == "" {
+		t.Error("DownstreamURI should not be empty")
+	} else if (*tab.DownstreamURI)[:6] != "vnc://" {
+		t.Errorf("DownstreamURI = %q, want vnc:// prefix", *tab.DownstreamURI)
+	}
+}
+
+// TestCreateVNCTab_UnknownProject verifies error for unknown project.
+func TestCreateVNCTab_UnknownProject(t *testing.T) {
+	store := &fakeStore{}
+	mgr := New(gatewayconfig.Catalog{}, store, 2*time.Hour)
+
+	_, err := mgr.CreateVNCTab(context.Background(), "missing", "client")
+	if err == nil {
+		t.Fatal("expected error for unknown project")
+	}
+}
+
+// TestCreateVNCTab_GUINotEnabled verifies error when GUI is not enabled.
+func TestCreateVNCTab_GUINotEnabled(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{
+			{ID: "no-gui", Namespace: "ns", Service: "svc", Port: 8080, GUIEnabled: false},
+		},
+	}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	_, err := mgr.CreateVNCTab(context.Background(), "no-gui", "client")
+	if err == nil {
+		t.Fatal("expected error when GUI is not enabled")
+	}
+}
+
+// TestCreateVNCTab_LimitEnforcement verifies tab limit enforcement for VNC tabs.
+func TestCreateVNCTab_LimitEnforcement(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{
+			{
+				ID:         "gui-limited",
+				Namespace:  "ns",
+				Service:    "svc",
+				Port:       8080,
+				GUIEnabled: true,
+				GUIVNCPort: 5901,
+				Limits:     gatewayconfig.ProjectLimits{MaxTabsPerClient: 1},
+			},
+		},
+	}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+	ctx := context.Background()
+
+	// First tab should succeed
+	_, err := mgr.CreateVNCTab(ctx, "gui-limited", "client1")
+	if err != nil {
+		t.Fatalf("First CreateVNCTab error: %v", err)
+	}
+
+	// Second tab should fail due to limit
+	_, err = mgr.CreateVNCTab(ctx, "gui-limited", "client1")
+	if err == nil {
+		t.Fatal("expected error when at tab limit")
+	}
+	var limitErr *TabLimitExceededError
+	if !errors.As(err, &limitErr) {
+		t.Errorf("expected TabLimitExceededError, got %T: %v", err, err)
+	}
+}
+
+// TestCreateVNCTab_DefaultVNCPort verifies default VNC port is used when not specified.
+func TestCreateVNCTab_DefaultVNCPort(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{
+			{ID: "gui-default-port", Namespace: "ns", Service: "svc", Port: 8080, GUIEnabled: true},
+		},
+	}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	tab, err := mgr.CreateVNCTab(context.Background(), "gui-default-port", "client1")
+	if err != nil {
+		t.Fatalf("CreateVNCTab error: %v", err)
+	}
+
+	// Should use default VNC port 5901
+	expected := "vnc://svc.ns.svc:5901"
+	if tab.DownstreamURI == nil || *tab.DownstreamURI != expected {
+		t.Errorf("DownstreamURI = %q, want %q", *tab.DownstreamURI, expected)
 	}
 }

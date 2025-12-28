@@ -69,6 +69,19 @@ type Project struct {
 	// Feature flags
 	DinDEnabled bool `json:"dindEnabled"`
 
+	// GUI desktop support
+	GUIEnabled    bool   `json:"guiEnabled"`
+	GUIResolution string `json:"guiResolution,omitempty"`
+	GUIVNCPort    int    `json:"guiVNCPort,omitempty"`
+
+	// PTY session logging for Loki integration
+	PTYLoggingEnabled       bool   `json:"ptyLoggingEnabled"`
+	PTYLoggingMaxSize       int64  `json:"ptyLoggingMaxSize,omitempty"`       // Max file size before rotation (bytes)
+	PTYLoggingMaxBackups    int    `json:"ptyLoggingMaxBackups,omitempty"`    // Rotated files to keep
+	PTYLoggingBufferSize    int    `json:"ptyLoggingBufferSize,omitempty"`    // Write buffer size (bytes)
+	PTYLoggingFlushInterval string `json:"ptyLoggingFlushInterval,omitempty"` // Flush interval (e.g., "5s")
+	PTYLoggingIncludeRaw    bool   `json:"ptyLoggingIncludeRaw"`              // Include base64 raw bytes
+
 	// Environment variables
 	EnvVars map[string]string `json:"envVars,omitempty"`
 
@@ -82,6 +95,7 @@ type Project struct {
 	LastHealthCheck *time.Time    `json:"lastHealthCheck,omitempty"`
 	LastActivity    *time.Time    `json:"lastActivity,omitempty"`
 	PodIP           string        `json:"podIP,omitempty"`
+	Paused          bool          `json:"paused"`
 
 	// Timestamps
 	CreatedAt time.Time  `json:"createdAt"`
@@ -116,6 +130,19 @@ type CreateProjectRequest struct {
 	// Feature flags
 	DinDEnabled *bool `json:"dindEnabled,omitempty"`
 
+	// GUI desktop support
+	GUIEnabled    *bool  `json:"guiEnabled,omitempty"`
+	GUIResolution string `json:"guiResolution,omitempty"`
+	GUIVNCPort    int    `json:"guiVNCPort,omitempty"`
+
+	// PTY session logging for Loki integration
+	PTYLoggingEnabled       *bool  `json:"ptyLoggingEnabled,omitempty"`
+	PTYLoggingMaxSize       int64  `json:"ptyLoggingMaxSize,omitempty"`       // Max file size before rotation (bytes)
+	PTYLoggingMaxBackups    int    `json:"ptyLoggingMaxBackups,omitempty"`    // Rotated files to keep
+	PTYLoggingBufferSize    int    `json:"ptyLoggingBufferSize,omitempty"`    // Write buffer size (bytes)
+	PTYLoggingFlushInterval string `json:"ptyLoggingFlushInterval,omitempty"` // Flush interval (e.g., "5s")
+	PTYLoggingIncludeRaw    *bool  `json:"ptyLoggingIncludeRaw,omitempty"`    // Include base64 raw bytes
+
 	// Environment variables
 	EnvVars map[string]string `json:"envVars,omitempty"`
 
@@ -143,6 +170,19 @@ type UpdateProjectRequest struct {
 
 	// Feature flags
 	DinDEnabled *bool `json:"dindEnabled,omitempty"`
+
+	// GUI desktop support
+	GUIEnabled    *bool   `json:"guiEnabled,omitempty"`
+	GUIResolution *string `json:"guiResolution,omitempty"`
+	GUIVNCPort    *int    `json:"guiVNCPort,omitempty"`
+
+	// PTY session logging for Loki integration
+	PTYLoggingEnabled       *bool   `json:"ptyLoggingEnabled,omitempty"`
+	PTYLoggingMaxSize       *int64  `json:"ptyLoggingMaxSize,omitempty"`       // Max file size before rotation (bytes)
+	PTYLoggingMaxBackups    *int    `json:"ptyLoggingMaxBackups,omitempty"`    // Rotated files to keep
+	PTYLoggingBufferSize    *int    `json:"ptyLoggingBufferSize,omitempty"`    // Write buffer size (bytes)
+	PTYLoggingFlushInterval *string `json:"ptyLoggingFlushInterval,omitempty"` // Flush interval (e.g., "5s")
+	PTYLoggingIncludeRaw    *bool   `json:"ptyLoggingIncludeRaw,omitempty"`    // Include base64 raw bytes
 
 	// Environment variables
 	EnvVars map[string]string `json:"envVars,omitempty"`
@@ -172,6 +212,19 @@ const (
 	DefaultMaxTabsTotal     = 10
 	DefaultImageRepository  = "harbor.support.tools/kubetty/kubetty"
 	DefaultImageTag         = "latest"
+
+	// GUI defaults
+	DefaultGUIEnabled    = false
+	DefaultGUIResolution = "1920x1080x24"
+	DefaultGUIVNCPort    = 5901
+
+	// PTY logging defaults
+	DefaultPTYLoggingEnabled       = false
+	DefaultPTYLoggingMaxSize       = 104857600 // 100MB
+	DefaultPTYLoggingMaxBackups    = 3
+	DefaultPTYLoggingBufferSize    = 65536 // 64KB
+	DefaultPTYLoggingFlushInterval = "5s"
+	DefaultPTYLoggingIncludeRaw    = true
 )
 
 // ApplyDefaults fills in default values for any unset fields.
@@ -203,6 +256,36 @@ func (r *CreateProjectRequest) ApplyDefaults() {
 	if r.DinDEnabled == nil {
 		enabled := true
 		r.DinDEnabled = &enabled
+	}
+	if r.GUIEnabled == nil {
+		guiEnabled := DefaultGUIEnabled
+		r.GUIEnabled = &guiEnabled
+	}
+	if r.GUIResolution == "" {
+		r.GUIResolution = DefaultGUIResolution
+	}
+	if r.GUIVNCPort == 0 {
+		r.GUIVNCPort = DefaultGUIVNCPort
+	}
+	if r.PTYLoggingEnabled == nil {
+		ptyEnabled := DefaultPTYLoggingEnabled
+		r.PTYLoggingEnabled = &ptyEnabled
+	}
+	if r.PTYLoggingMaxSize == 0 {
+		r.PTYLoggingMaxSize = DefaultPTYLoggingMaxSize
+	}
+	if r.PTYLoggingMaxBackups == 0 {
+		r.PTYLoggingMaxBackups = DefaultPTYLoggingMaxBackups
+	}
+	if r.PTYLoggingBufferSize == 0 {
+		r.PTYLoggingBufferSize = DefaultPTYLoggingBufferSize
+	}
+	if r.PTYLoggingFlushInterval == "" {
+		r.PTYLoggingFlushInterval = DefaultPTYLoggingFlushInterval
+	}
+	if r.PTYLoggingIncludeRaw == nil {
+		ptyIncludeRaw := DefaultPTYLoggingIncludeRaw
+		r.PTYLoggingIncludeRaw = &ptyIncludeRaw
 	}
 	if r.ImageRepository == "" {
 		r.ImageRepository = DefaultImageRepository

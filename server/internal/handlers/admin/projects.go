@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/supporttools/KubeTTY/server/internal/controller"
 	"github.com/supporttools/KubeTTY/server/internal/projects"
+	"github.com/supporttools/KubeTTY/server/internal/settings"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 )
@@ -19,6 +21,7 @@ import (
 // ProjectHandlers provides HTTP handlers for project management.
 type ProjectHandlers struct {
 	store               projects.Store
+	settingsStore       settings.Store
 	controller          *controller.Controller
 	recommendedImageTag string
 	onProjectDeleted    func(projectName string) // Callback when project is deleted
@@ -30,6 +33,58 @@ func NewProjectHandlers(store projects.Store, ctrl *controller.Controller, recom
 		store:               store,
 		controller:          ctrl,
 		recommendedImageTag: recommendedImageTag,
+	}
+}
+
+// SetSettingsStore sets the settings store for applying defaults from DB.
+func (h *ProjectHandlers) SetSettingsStore(store settings.Store) {
+	h.settingsStore = store
+}
+
+// applySettingsDefaults applies default values from settings store to the request.
+// Only fills in empty/zero values - explicitly provided values are preserved.
+func (h *ProjectHandlers) applySettingsDefaults(ctx context.Context, req *projects.CreateProjectRequest) {
+	if h.settingsStore == nil {
+		return // No settings store configured, use hardcoded defaults
+	}
+
+	cat := settings.CategoryProjectDefaults
+
+	if req.CPURequest == "" {
+		req.CPURequest = h.settingsStore.GetString(ctx, cat, "cpu_request", projects.DefaultCPURequest)
+	}
+	if req.CPULimit == "" {
+		req.CPULimit = h.settingsStore.GetString(ctx, cat, "cpu_limit", projects.DefaultCPULimit)
+	}
+	if req.MemoryRequest == "" {
+		req.MemoryRequest = h.settingsStore.GetString(ctx, cat, "memory_request", projects.DefaultMemoryRequest)
+	}
+	if req.MemoryLimit == "" {
+		req.MemoryLimit = h.settingsStore.GetString(ctx, cat, "memory_limit", projects.DefaultMemoryLimit)
+	}
+	if req.StorageSize == "" {
+		req.StorageSize = h.settingsStore.GetString(ctx, cat, "storage_size", projects.DefaultStorageSize)
+	}
+	if req.StorageClass == "" {
+		req.StorageClass = h.settingsStore.GetString(ctx, cat, "storage_class", projects.DefaultStorageClass)
+	}
+	if req.MaxTabsPerClient == 0 {
+		req.MaxTabsPerClient = h.settingsStore.GetInt(ctx, cat, "max_tabs_per_client", projects.DefaultMaxTabsPerClient)
+	}
+	if req.MaxTabsTotal == 0 {
+		req.MaxTabsTotal = h.settingsStore.GetInt(ctx, cat, "max_tabs_total", projects.DefaultMaxTabsTotal)
+	}
+	if req.ImageRepository == "" {
+		req.ImageRepository = h.settingsStore.GetString(ctx, cat, "image_repository", projects.DefaultImageRepository)
+	}
+	if req.ImageTag == "" {
+		req.ImageTag = h.settingsStore.GetString(ctx, cat, "image_tag", projects.DefaultImageTag)
+	}
+	// DinDEnabled: only set from settings if not explicitly set in request
+	// Using pointer allows distinguishing between "user set to false" vs "not set at all"
+	if req.DinDEnabled == nil {
+		dindDefault := h.settingsStore.GetBool(ctx, cat, "dind_enabled", true)
+		req.DinDEnabled = &dindDefault
 	}
 }
 
@@ -105,6 +160,21 @@ func (h *ProjectHandlers) CreateProject(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Validate GUI configuration if provided
+	if !isValidGUIResolution(req.GUIResolution) {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(
+			"guiResolution must be in format WIDTHxHEIGHTxDEPTH (e.g., 1920x1080x24)", ""))
+		return
+	}
+	if !isValidVNCPort(req.GUIVNCPort) {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(
+			"guiVNCPort must be in range 5900-5999", ""))
+		return
+	}
+
+	// Apply defaults from settings store (falls back to hardcoded defaults)
+	h.applySettingsDefaults(ctx, &req)
+
 	project, err := h.store.Create(ctx, req)
 	if err != nil {
 		if errors.Is(err, projects.ErrInvalidName) {
@@ -168,6 +238,18 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 	var req projects.UpdateProjectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
+		return
+	}
+
+	// Validate GUI configuration if provided
+	if req.GUIResolution != nil && !isValidGUIResolution(*req.GUIResolution) {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(
+			"guiResolution must be in format WIDTHxHEIGHTxDEPTH (e.g., 1920x1080x24)", ""))
+		return
+	}
+	if req.GUIVNCPort != nil && !isValidVNCPort(*req.GUIVNCPort) {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(
+			"guiVNCPort must be in range 5900-5999", ""))
 		return
 	}
 
@@ -547,8 +629,130 @@ func (h *ProjectHandlers) UpdateProjectSecrets(w http.ResponseWriter, r *http.Re
 	})
 }
 
+// PauseProject handles POST /api/admin/projects/{id}/pause
+// This pauses a project by scaling the deployment to 0 replicas.
+func (h *ProjectHandlers) PauseProject(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	projectID, err := extractProjectID(r)
+	if err != nil {
+		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid project ID", ""))
+		return
+	}
+
+	project, err := h.store.Get(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, projects.ErrProjectNotFound) {
+			_ = apierrors.WriteError(w, apierrors.NotFound("project not found", ""))
+			return
+		}
+		log.WithError(err).Error("admin/projects: failed to get project for pause")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to pause project", ""))
+		return
+	}
+
+	// Can only pause running projects
+	if project.Status != projects.StatusRunning {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(
+			"project must be running to pause (current status: "+string(project.Status)+")", ""))
+		return
+	}
+
+	if project.Paused {
+		_ = apierrors.WriteError(w, apierrors.BadRequest("project is already paused", ""))
+		return
+	}
+
+	// Set paused flag in database
+	if err := h.store.SetPaused(ctx, projectID, true); err != nil {
+		log.WithError(err).Error("admin/projects: failed to set paused flag")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to pause project", ""))
+		return
+	}
+
+	// Scale deployment to 0
+	if err := h.controller.ScaleProject(ctx, project, 0); err != nil {
+		// Rollback paused flag on failure
+		_ = h.store.SetPaused(ctx, projectID, false)
+		log.WithError(err).Error("admin/projects: failed to scale deployment to 0")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to pause project", ""))
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"project_id":   project.ID.String(),
+		"project_name": project.Name,
+	}).Info("admin/projects: project paused")
+
+	_ = util.WriteJSON(w, http.StatusOK, map[string]string{
+		"message": "project paused, deployment scaled to 0",
+	})
+}
+
+// UnpauseProject handles POST /api/admin/projects/{id}/unpause
+// This unpauses a project by scaling the deployment back to 1 replica.
+func (h *ProjectHandlers) UnpauseProject(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	projectID, err := extractProjectID(r)
+	if err != nil {
+		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid project ID", ""))
+		return
+	}
+
+	project, err := h.store.Get(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, projects.ErrProjectNotFound) {
+			_ = apierrors.WriteError(w, apierrors.NotFound("project not found", ""))
+			return
+		}
+		log.WithError(err).Error("admin/projects: failed to get project for unpause")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to unpause project", ""))
+		return
+	}
+
+	if !project.Paused {
+		_ = apierrors.WriteError(w, apierrors.BadRequest("project is not paused", ""))
+		return
+	}
+
+	// Set paused flag to false in database
+	if err := h.store.SetPaused(ctx, projectID, false); err != nil {
+		log.WithError(err).Error("admin/projects: failed to clear paused flag")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to unpause project", ""))
+		return
+	}
+
+	// Scale deployment back to 1
+	if err := h.controller.ScaleProject(ctx, project, 1); err != nil {
+		// Rollback paused flag on failure
+		_ = h.store.SetPaused(ctx, projectID, true)
+		log.WithError(err).Error("admin/projects: failed to scale deployment to 1")
+		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to unpause project", ""))
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"project_id":   project.ID.String(),
+		"project_name": project.Name,
+	}).Info("admin/projects: project unpaused")
+
+	_ = util.WriteJSON(w, http.StatusOK, map[string]string{
+		"message": "project unpaused, deployment scaled to 1",
+	})
+}
+
+// GetGatewayVersion handles GET /api/admin/gateway-version
+// Returns the gateway's recommended image version for quick project upgrades.
+func (h *ProjectHandlers) GetGatewayVersion(w http.ResponseWriter, r *http.Request) {
+	_ = util.WriteJSON(w, http.StatusOK, map[string]string{
+		"recommendedVersion": h.recommendedImageTag,
+	})
+}
+
 // RegisterRoutes registers all admin project routes on the provided mux.
 func (h *ProjectHandlers) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/admin/gateway-version", h.GetGatewayVersion)
 	mux.HandleFunc("GET /api/admin/projects", h.ListProjects)
 	mux.HandleFunc("POST /api/admin/projects", h.CreateProject)
 	mux.HandleFunc("GET /api/admin/projects/{id}", h.GetProject)
@@ -556,6 +760,8 @@ func (h *ProjectHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/admin/projects/{id}", h.DeleteProject)
 	mux.HandleFunc("POST /api/admin/projects/{id}/restart", h.RestartProject)
 	mux.HandleFunc("POST /api/admin/projects/{id}/resync", h.ResyncProject)
+	mux.HandleFunc("POST /api/admin/projects/{id}/pause", h.PauseProject)
+	mux.HandleFunc("POST /api/admin/projects/{id}/unpause", h.UnpauseProject)
 	mux.HandleFunc("GET /api/admin/projects/{id}/status", h.GetProjectStatus)
 	mux.HandleFunc("GET /api/admin/projects/{id}/upgrade-info", h.GetUpgradeInfo)
 	mux.HandleFunc("POST /api/admin/projects/{id}/upgrade", h.UpgradeProject)
@@ -579,4 +785,23 @@ var versionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
 // isValidVersion checks if a string is a valid semantic version.
 func isValidVersion(version string) bool {
 	return versionPattern.MatchString(version)
+}
+
+// guiResolutionPattern matches resolution format: WIDTHxHEIGHTxDEPTH (e.g., 1920x1080x24)
+var guiResolutionPattern = regexp.MustCompile(`^\d{3,5}x\d{3,5}x\d{1,2}$`)
+
+// isValidGUIResolution checks if a string is a valid GUI resolution.
+func isValidGUIResolution(resolution string) bool {
+	if resolution == "" {
+		return true // Empty is OK (will use default)
+	}
+	return guiResolutionPattern.MatchString(resolution)
+}
+
+// isValidVNCPort checks if a port is a valid VNC port (5900-5999).
+func isValidVNCPort(port int) bool {
+	if port == 0 {
+		return true // Zero means use default
+	}
+	return port >= 5900 && port <= 5999
 }

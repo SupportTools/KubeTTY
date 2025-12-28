@@ -2,14 +2,13 @@ import { useState, useCallback, useEffect, useMemo } from "react";
 import TerminalView from "./components/TerminalView";
 import TabBar from "./components/TabBar";
 import StatusBar from "./components/StatusBar";
-import ProjectPanel from "./components/ProjectPanel";
+import ProjectPicker from "./components/ProjectPicker";
 import Login from "./components/Login";
 import ProfileModal from "./components/ProfileModal";
 import PasswordChangeModal from "./components/PasswordChangeModal";
 import LogoutConfirmDialog from "./components/LogoutConfirmDialog";
 import AdminProjectList from "./components/AdminProjectList";
 import AdminDashboard from "./components/AdminDashboard";
-import Footer from "./components/Footer";
 import { useAuth } from "./contexts/AuthContext";
 import { GatewayTab, ProjectInfo, ProjectsResponse, TabEvent } from "./types";
 import { parseErrorResponse } from "./utils/errorParser";
@@ -19,8 +18,6 @@ type GatewayState = "unknown" | "enabled" | "disabled";
 
 type ClientTab = GatewayTab & { wsUrl: string };
 
-const STORAGE_KEY_SHOW_PANEL = "kubetty:showProjectPanel";
-
 const App = () => {
   const { authState, user: authUser, authFetch } = useAuth();
 
@@ -29,32 +26,14 @@ const App = () => {
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [tabs, setTabs] = useState<ClientTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [passwordChangeOpen, setPasswordChangeOpen] = useState(false);
   const [logoutDialogOpen, setLogoutDialogOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
   const [dashboardOpen, setDashboardOpen] = useState(false);
   const [eventRetry, setEventRetry] = useState(0);
-  const [showProjectPanel, setShowProjectPanel] = useState(() => {
-    try {
-      return localStorage.getItem(STORAGE_KEY_SHOW_PANEL) === "true";
-    } catch {
-      return false;
-    }
-  });
   const authenticated = authState === "authenticated";
-
-  const toggleProjectPanel = useCallback(() => {
-    setShowProjectPanel((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(STORAGE_KEY_SHOW_PANEL, String(next));
-      } catch {
-        // Ignore localStorage errors
-      }
-      return next;
-    });
-  }, []);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -81,6 +60,7 @@ const App = () => {
     setProjects([]);
     setTabs([]);
     setActiveTabId(null);
+    setPickerOpen(false);
     setGatewayState("unknown");
     setEventRetry(0);
   }, [authState]);
@@ -208,12 +188,6 @@ const App = () => {
     return map;
   }, [projects]);
 
-  const projectMap = useMemo(() => {
-    const map = new Map<string, ProjectInfo>();
-    projects.forEach((p) => map.set(p.id, p));
-    return map;
-  }, [projects]);
-
   const handleCreateTab = useCallback(
     async (projectId: string) => {
       try {
@@ -239,6 +213,7 @@ const App = () => {
           return [...prev, tab];
         });
         setActiveTabId(tab.tabId);
+        setPickerOpen(false);
       } catch {
         showToast("Failed to open tab");
       }
@@ -274,86 +249,22 @@ const App = () => {
     [showToast, authFetch]
   );
 
-  const handleReorderTabs = useCallback(
-    async (tabIds: string[]) => {
-      // Optimistically reorder tabs in UI
-      setTabs((prev) => {
-        const tabMap = new Map(prev.map((t) => [t.tabId, t]));
-        return tabIds
-          .map((id) => tabMap.get(id))
-          .filter((t): t is ClientTab => t !== undefined);
-      });
-
-      // Persist to server
-      try {
-        const res = await authFetch("/api/tabs/reorder", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tabIds })
-        });
-        if (!res.ok) {
-          const errorMessage = await parseErrorResponse(res);
-          throw new Error(errorMessage);
-        }
-      } catch {
-        showToast("Failed to save tab order");
-      }
-    },
-    [showToast, authFetch]
-  );
-
-  const handleNewSessionShortcut = useCallback(() => {
-    if (projects.length === 0) {
-      showToast("No projects are available yet.");
-      return;
-    }
-    if (!showProjectPanel) {
-      // Show sidebar automatically when user clicks "+ New session"
-      setShowProjectPanel(true);
-      try {
-        localStorage.setItem(STORAGE_KEY_SHOW_PANEL, "true");
-      } catch {
-        // Ignore localStorage errors
-      }
-      showToast("Select a project from the sidebar to start a session.");
-    } else {
-      showToast("Select a project from the sidebar to start a session.");
-    }
-  }, [projects.length, showToast, showProjectPanel]);
-
   const showGatewayUI = authenticated && gatewayState === "enabled";
   const decoratedTabs = useMemo(
     () =>
-      tabs.map((tab) => {
-        const project = projectMap.get(tab.projectId);
-        return {
-          tabId: tab.tabId,
-          projectLabel: project?.displayName || project?.id || tab.projectId,
-          status: tab.status,
-          metrics: tab.metrics,
-          projectNamespace: project?.namespace,
-          lifecycleStatus: project?.lifecycleStatus,
-          projectHealth: project?.status,
-          paused: project?.paused,
-          createdAt: tab.createdAt,
-          updatedAt: tab.updatedAt,
-          lastError: tab.lastError,
-        };
-      }),
-    [tabs, projectMap]
+      tabs.map((tab) => ({
+        tabId: tab.tabId,
+        label: projectLabels.get(tab.projectId) || tab.projectId,
+        status: tab.status,
+        metrics: tab.metrics
+      })),
+    [tabs, projectLabels]
   );
 
   const activeTab = useMemo(
     () => (activeTabId ? tabs.find((t) => t.tabId === activeTabId) : null),
     [tabs, activeTabId]
   );
-
-  const activeProject = useMemo(() => {
-    if (!activeTab) {
-      return null;
-    }
-    return projectMap.get(activeTab.projectId) || null;
-  }, [activeTab, projectMap]);
 
   const activeTabLabel = useMemo(
     () =>
@@ -363,23 +274,47 @@ const App = () => {
     [activeTab, projectLabels]
   );
 
+  const renderHeader = () => (
+    <header className="header">
+      <div className="brand">
+        <img src={logo} alt="KubeTTY" className="logo" />
+        <h1>KubeTTY</h1>
+      </div>
+      {authenticated && (
+        <div className="session-info">
+          {showGatewayUI && (
+            <>
+              <button className="admin-link" onClick={() => setDashboardOpen(true)}>
+                Dashboard
+              </button>
+              <button className="admin-link" onClick={() => setAdminOpen(true)}>
+                Projects
+              </button>
+            </>
+          )}
+          {authUser && (
+            <button
+              className="username-button"
+              onClick={() => setProfileOpen(true)}
+            >
+              {authUser.username}
+            </button>
+          )}
+          <button className="secondary" onClick={() => setLogoutDialogOpen(true)}>
+            Logout
+          </button>
+        </div>
+      )}
+    </header>
+  );
+
   if (authState === "checking") {
     return (
-      <div className="app-shell loading">
-        <div className="global-rail">
-          <div className="rail-brand">
-            <img src={logo} alt="KubeTTY" />
-            <span>KubeTTY</span>
-          </div>
-        </div>
-        <div className="workspace-shell">
-          <div className="workspace">
-            <section className="workspace-body">
-              <p>Checking authentication…</p>
-            </section>
-            <Footer />
-          </div>
-        </div>
+      <div className="app-shell">
+        {renderHeader()}
+        <section className="main full-width">
+          <p>Checking authentication…</p>
+        </section>
       </div>
     );
   }
@@ -389,125 +324,60 @@ const App = () => {
   }
 
   return (
-    <div className={`app-shell layout-modern${showProjectPanel ? " show-panel" : ""}`}>
-      <aside className="global-rail">
-        <div className="rail-brand">
-          <img src={logo} alt="KubeTTY" className="logo" />
-          <div>
-            <p>KubeTTY</p>
-            <span>Internal terminal</span>
-          </div>
-        </div>
-        <div className="rail-actions">
-          <button
-            onClick={toggleProjectPanel}
-            className={showProjectPanel ? "active" : ""}
-            title={showProjectPanel ? "Hide project sidebar" : "Show project sidebar"}
-          >
-            {showProjectPanel ? "Hide Sidebar" : "Show Sidebar"}
-          </button>
-          <button onClick={() => setDashboardOpen(true)} disabled={!authenticated}>
-            Dashboard
-          </button>
-          <button onClick={() => setAdminOpen(true)} disabled={!authenticated}>
-            Projects
-          </button>
-        </div>
-        <div className="rail-user">
-          {authUser && (
-            <button className="rail-username" onClick={() => setProfileOpen(true)}>
-              {authUser.username}
-            </button>
+    <div className="app-shell">
+      {renderHeader()}
+      {toast && <div className="toast">{toast}</div>}
+      {showGatewayUI ? (
+        <>
+          <TabBar
+            tabs={decoratedTabs}
+            activeTabId={activeTabId}
+            onSelect={setActiveTabId}
+            onClose={handleCloseTab}
+            onNew={() => setPickerOpen(true)}
+            projects={projects}
+          />
+          {activeTab && (
+            <StatusBar tabLabel={activeTabLabel} metrics={activeTab.metrics} />
           )}
-          <button className="rail-logout" onClick={() => setLogoutDialogOpen(true)}>
-            Logout
-          </button>
-        </div>
-      </aside>
-      <div className="workspace-shell">
-        <ProjectPanel
-          projects={projects}
-          gatewayState={gatewayState}
-          onSelect={handleCreateTab}
-          selectedProjectId={activeTab?.projectId}
-          onOpenAdmin={() => setAdminOpen(true)}
-          onOpenDashboard={() => setDashboardOpen(true)}
-        />
-        <div className="workspace">
-          {toast && <div className="toast floating">{toast}</div>}
-          {showGatewayUI ? (
-            <>
-              <TabBar
-                tabs={decoratedTabs}
-                activeTabId={activeTabId}
-                onSelect={setActiveTabId}
-                onClose={handleCloseTab}
-                onNew={handleNewSessionShortcut}
-                onReorder={handleReorderTabs}
-                projects={projects}
-              />
-              {activeTab ? (
-                <StatusBar
-                  tabLabel={activeTabLabel}
-                  tabStatus={activeTab.status}
-                  metrics={activeTab.metrics}
-                  namespace={activeProject?.namespace}
-                  createdAt={activeTab.createdAt}
-                  updatedAt={activeTab.updatedAt}
-                  lastError={activeTab.lastError}
-                />
-              ) : (
-                <div className="session-hud-empty">
-                  {showProjectPanel
-                    ? "Select a project from the sidebar to start a session."
-                    : "Click \"+ New session\" or enable the sidebar to start."}
+          <section className="main full-width tabbed">
+            {tabs.length === 0 ? (
+              <div className="tab-empty">
+                <p>No tabs yet.</p>
+                <button onClick={() => setPickerOpen(true)} disabled={projects.length === 0}>
+                  Open a tab
+                </button>
+              </div>
+            ) : (
+              tabs.map((tab) => (
+                <div
+                  key={tab.tabId}
+                  className={`terminal-pane${tab.tabId !== activeTabId ? ' hidden' : ''}`}
+                >
+                  <TerminalView
+                    wsUrl={tab.wsUrl}
+                    healthUrl={healthForTab(tab.tabId)}
+                    isFocused={tab.tabId === activeTabId}
+                    onReconnect={handleReconnect}
+                    externalStatus={tab.status as 'connecting' | 'connected' | 'reconnecting' | 'closed'}
+                  />
                 </div>
-              )}
-              <section className="workspace-body tabbed">
-                {tabs.length === 0 ? (
-                  <div className="tab-empty">
-                    <h2>No sessions yet</h2>
-                    <p>
-                      {showProjectPanel
-                        ? "Pick a project from the sidebar to launch an interactive shell."
-                        : "Click \"+ New session\" above or use \"Show Sidebar\" to pick a project."}
-                    </p>
-                  </div>
-                ) : (
-                  tabs.map((tab) => (
-                    <div
-                      key={tab.tabId}
-                      className={`terminal-pane${tab.tabId !== activeTabId ? ' hidden' : ''}`}
-                    >
-                      <TerminalView
-                        wsUrl={tab.wsUrl}
-                        healthUrl={healthForTab(tab.tabId)}
-                        isFocused={tab.tabId === activeTabId}
-                        onReconnect={handleReconnect}
-                        externalStatus={tab.status as 'connecting' | 'connected' | 'reconnecting' | 'closed'}
-                      />
-                    </div>
-                  ))
-                )}
-              </section>
-            </>
-          ) : (
-            <section className="workspace-body solo">
-              <div className="gateway-disabled-card">
-                <h2>Gateway disabled</h2>
-                <p>
-                  The multi-tab gateway is currently unavailable. You still have access to the
-                  default PTY below.
-                </p>
-              </div>
-              <div className="terminal-pane single">
-                <TerminalView onReconnect={handleReconnect} />
-              </div>
-            </section>
+              ))
+            )}
+          </section>
+          {pickerOpen && (
+            <ProjectPicker
+              projects={projects}
+              onClose={() => setPickerOpen(false)}
+              onSelect={handleCreateTab}
+            />
           )}
-          <Footer />
-        </div>
-      </div>
+        </>
+      ) : (
+        <section className="main full-width">
+          <TerminalView onReconnect={handleReconnect} />
+        </section>
+      )}
       {profileOpen && (
         <ProfileModal
           onClose={() => setProfileOpen(false)}

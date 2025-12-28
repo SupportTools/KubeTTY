@@ -22,6 +22,17 @@ type appMetrics struct {
 	wsDisconnectsTotal  *prometheus.CounterVec
 	wsWriteErrorsTotal  prometheus.Counter
 	wsFlowControlPauses prometheus.Counter
+
+	// Flow control metrics
+	wsFlowControlResumes       prometheus.Counter
+	wsFlowControlBufferedBytes prometheus.Counter
+	wsFlowControlBufferDrops   prometheus.Counter
+
+	// Output buffer metrics (ring buffer for PTY output replay)
+	outputBufferUsageBytes    prometheus.Gauge
+	outputBufferCapacityBytes prometheus.Gauge
+	outputBufferTotalWritten  prometheus.Counter
+	replayBytesTotal          prometheus.Counter
 }
 
 func newAppMetrics() *appMetrics {
@@ -77,6 +88,52 @@ func newAppMetrics() *appMetrics {
 			prometheus.CounterOpts{
 				Name: "kubetty_websocket_flow_control_pauses_total",
 				Help: "Total number of flow control pause events",
+			},
+		),
+
+		// Flow control metrics
+		wsFlowControlResumes: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "kubetty_websocket_flow_control_resumes_total",
+				Help: "Total number of flow control resume events",
+			},
+		),
+		wsFlowControlBufferedBytes: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "kubetty_websocket_flow_control_buffered_bytes_total",
+				Help: "Total bytes buffered during flow control pauses",
+			},
+		),
+		wsFlowControlBufferDrops: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "kubetty_websocket_flow_control_buffer_drops_total",
+				Help: "Total number of messages dropped due to full flow control buffer",
+			},
+		),
+
+		// Output buffer metrics
+		outputBufferUsageBytes: promauto.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "kubetty_project_output_buffer_usage_bytes",
+				Help: "Current bytes stored in the PTY output ring buffer",
+			},
+		),
+		outputBufferCapacityBytes: promauto.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "kubetty_project_output_buffer_capacity_bytes",
+				Help: "Total capacity of the PTY output ring buffer",
+			},
+		),
+		outputBufferTotalWritten: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "kubetty_project_output_buffer_total_written_bytes",
+				Help: "Total bytes ever written to the PTY output buffer (monotonic)",
+			},
+		),
+		replayBytesTotal: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Name: "kubetty_project_replay_bytes_total",
+				Help: "Total bytes sent during buffer replay to new clients",
 			},
 		),
 	}
@@ -153,4 +210,49 @@ func (m *appMetrics) observeWSFlowControlPause() {
 		return
 	}
 	m.wsFlowControlPauses.Inc()
+}
+
+func (m *appMetrics) observeFlowControlResume(bytesFlushed int) {
+	if m == nil {
+		return
+	}
+	m.wsFlowControlResumes.Inc()
+	m.wsFlowControlBufferedBytes.Add(float64(bytesFlushed))
+}
+
+func (m *appMetrics) observeFlowControlBufferDrop() {
+	if m == nil {
+		return
+	}
+	m.wsFlowControlBufferDrops.Inc()
+}
+
+// Output buffer metrics observers
+
+func (m *appMetrics) setOutputBufferCapacity(capacity int) {
+	if m == nil {
+		return
+	}
+	m.outputBufferCapacityBytes.Set(float64(capacity))
+}
+
+func (m *appMetrics) setOutputBufferUsage(usage int) {
+	if m == nil {
+		return
+	}
+	m.outputBufferUsageBytes.Set(float64(usage))
+}
+
+func (m *appMetrics) observeOutputBufferWrite(bytesWritten int) {
+	if m == nil {
+		return
+	}
+	m.outputBufferTotalWritten.Add(float64(bytesWritten))
+}
+
+func (m *appMetrics) observeReplayBytes(bytesSent int) {
+	if m == nil {
+		return
+	}
+	m.replayBytesTotal.Add(float64(bytesSent))
 }

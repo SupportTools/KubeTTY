@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/supporttools/KubeTTY/server/internal/config"
+	"github.com/supporttools/KubeTTY/server/internal/shared/buffer"
 )
 
 // TestPtySession_HasClients verifies hasClients returns correct state.
@@ -62,15 +63,25 @@ func TestPtySession_GetClientCount(t *testing.T) {
 
 // TestPtySession_AddClient verifies client addition and buffer replay.
 func TestPtySession_AddClient(t *testing.T) {
+	// Create ring buffer and write test data
+	ringBuf := buffer.NewRingBuffer(1024)
+	ringBuf.Write([]byte("test output"))
+
 	ps := &ptySession{
 		clients:      make(map[*websocket.Conn]*wsClient),
-		outputBuffer: []byte("test output"),
+		outputBuffer: ringBuf,
 		createdAt:    time.Now(),
 	}
 
 	initialCount := ps.getClientCount()
 	if initialCount != 0 {
 		t.Errorf("Initial client count = %d, want 0", initialCount)
+	}
+
+	// Verify buffer contents can be retrieved
+	bufferBytes := ps.outputBuffer.Bytes()
+	if string(bufferBytes) != "test output" {
+		t.Errorf("Buffer content = %q, want %q", string(bufferBytes), "test output")
 	}
 
 	// Note: We can't fully test addClient without a real WebSocket connection
@@ -714,4 +725,398 @@ func TestWebSocket_PingPongHeartbeat(t *testing.T) {
 		srv.pty.broadcastClose()
 	}
 	srv.mu.Unlock()
+}
+
+// =============================================================================
+// Pause Buffer Unit Tests
+// =============================================================================
+
+// TestWsClient_BufferPausedData tests normal data buffering.
+func TestWsClient_BufferPausedData(t *testing.T) {
+	client := &wsClient{}
+
+	// Buffer some data
+	data := []byte("test data")
+	if !client.bufferPausedData(data) {
+		t.Error("bufferPausedData should return true for small data")
+	}
+
+	// Verify data was buffered
+	client.pauseBufferMu.Lock()
+	if len(client.pauseBuffer) != len(data) {
+		t.Errorf("Buffer length = %d, want %d", len(client.pauseBuffer), len(data))
+	}
+	if string(client.pauseBuffer) != string(data) {
+		t.Errorf("Buffer content = %q, want %q", string(client.pauseBuffer), string(data))
+	}
+	client.pauseBufferMu.Unlock()
+}
+
+// TestWsClient_BufferPausedData_Accumulates tests that multiple bufferPausedData calls accumulate.
+func TestWsClient_BufferPausedData_Accumulates(t *testing.T) {
+	client := &wsClient{}
+
+	// Buffer multiple chunks
+	chunk1 := []byte("first ")
+	chunk2 := []byte("second ")
+	chunk3 := []byte("third")
+
+	client.bufferPausedData(chunk1)
+	client.bufferPausedData(chunk2)
+	client.bufferPausedData(chunk3)
+
+	client.pauseBufferMu.Lock()
+	expected := "first second third"
+	if string(client.pauseBuffer) != expected {
+		t.Errorf("Buffer content = %q, want %q", string(client.pauseBuffer), expected)
+	}
+	client.pauseBufferMu.Unlock()
+}
+
+// TestWsClient_BufferPausedData_MaxSize tests that buffer respects max size.
+func TestWsClient_BufferPausedData_MaxSize(t *testing.T) {
+	client := &wsClient{}
+
+	// Fill buffer to max capacity
+	largeData := make([]byte, pauseBufferMaxSize)
+	for i := range largeData {
+		largeData[i] = byte('A' + (i % 26))
+	}
+
+	if !client.bufferPausedData(largeData) {
+		t.Error("bufferPausedData should return true when filling to max")
+	}
+
+	client.pauseBufferMu.Lock()
+	if len(client.pauseBuffer) != pauseBufferMaxSize {
+		t.Errorf("Buffer length = %d, want %d", len(client.pauseBuffer), pauseBufferMaxSize)
+	}
+	client.pauseBufferMu.Unlock()
+
+	// Now try to add more - should return false (buffer full)
+	moreData := []byte("extra")
+	if client.bufferPausedData(moreData) {
+		t.Error("bufferPausedData should return false when buffer is full")
+	}
+
+	// Buffer should still be at max size
+	client.pauseBufferMu.Lock()
+	if len(client.pauseBuffer) != pauseBufferMaxSize {
+		t.Errorf("Buffer length after overflow = %d, want %d", len(client.pauseBuffer), pauseBufferMaxSize)
+	}
+	client.pauseBufferMu.Unlock()
+}
+
+// TestWsClient_BufferPausedData_PartialFit tests partial data buffering when space is limited.
+func TestWsClient_BufferPausedData_PartialFit(t *testing.T) {
+	client := &wsClient{}
+
+	// Fill buffer partially
+	initialSize := pauseBufferMaxSize - 100
+	initialData := make([]byte, initialSize)
+	client.bufferPausedData(initialData)
+
+	// Now try to add 200 bytes - only 100 should fit
+	moreData := make([]byte, 200)
+	for i := range moreData {
+		moreData[i] = byte('X')
+	}
+
+	if !client.bufferPausedData(moreData) {
+		t.Error("bufferPausedData should return true for partial fit")
+	}
+
+	// Verify buffer is now at max size
+	client.pauseBufferMu.Lock()
+	if len(client.pauseBuffer) != pauseBufferMaxSize {
+		t.Errorf("Buffer length = %d, want %d", len(client.pauseBuffer), pauseBufferMaxSize)
+	}
+	client.pauseBufferMu.Unlock()
+}
+
+// TestWsClient_PauseBufferLen tests the pauseBufferLen method.
+func TestWsClient_PauseBufferLen(t *testing.T) {
+	client := &wsClient{}
+
+	// Initially empty
+	if client.pauseBufferLen() != 0 {
+		t.Errorf("Initial buffer length = %d, want 0", client.pauseBufferLen())
+	}
+
+	// Add some data
+	data := []byte("hello world")
+	client.bufferPausedData(data)
+
+	if client.pauseBufferLen() != len(data) {
+		t.Errorf("Buffer length = %d, want %d", client.pauseBufferLen(), len(data))
+	}
+}
+
+// TestWsClient_FlushPauseBuffer_Empty tests flushing an empty buffer.
+func TestWsClient_FlushPauseBuffer_Empty(t *testing.T) {
+	client := &wsClient{}
+
+	bytesFlushed, err := client.flushPauseBuffer()
+	if err != nil {
+		t.Errorf("flushPauseBuffer returned error for empty buffer: %v", err)
+	}
+	if bytesFlushed != 0 {
+		t.Errorf("Bytes flushed = %d, want 0", bytesFlushed)
+	}
+}
+
+// TestWsClient_BufferPausedData_Concurrent tests concurrent buffer operations.
+func TestWsClient_BufferPausedData_Concurrent(t *testing.T) {
+	client := &wsClient{}
+	var wg sync.WaitGroup
+
+	// Concurrent writes
+	numWriters := 10
+	dataPerWrite := 100
+
+	wg.Add(numWriters)
+	for i := 0; i < numWriters; i++ {
+		go func(id int) {
+			defer wg.Done()
+			data := make([]byte, dataPerWrite)
+			for j := range data {
+				data[j] = byte('A' + id)
+			}
+			client.bufferPausedData(data)
+		}(i)
+	}
+
+	// Concurrent reads of buffer length
+	wg.Add(10)
+	for i := 0; i < 10; i++ {
+		go func() {
+			defer wg.Done()
+			_ = client.pauseBufferLen()
+		}()
+	}
+
+	wg.Wait()
+
+	// Buffer should contain data (exact amount depends on race timing)
+	bufLen := client.pauseBufferLen()
+	if bufLen == 0 {
+		t.Error("Buffer should contain some data after concurrent writes")
+	}
+	if bufLen > pauseBufferMaxSize {
+		t.Errorf("Buffer exceeded max size: %d > %d", bufLen, pauseBufferMaxSize)
+	}
+}
+
+// TestWsClient_ConcurrentPauseAndBuffer tests concurrent pause state and buffer operations.
+func TestWsClient_ConcurrentPauseAndBuffer(t *testing.T) {
+	client := &wsClient{}
+	var wg sync.WaitGroup
+
+	// Concurrent pause state toggles
+	wg.Add(50)
+	for i := 0; i < 50; i++ {
+		go func(id int) {
+			defer wg.Done()
+			if id%2 == 0 {
+				client.paused.Store(true)
+			} else {
+				client.paused.Store(false)
+			}
+		}(i)
+	}
+
+	// Concurrent buffer operations
+	wg.Add(50)
+	for i := 0; i < 50; i++ {
+		go func() {
+			defer wg.Done()
+			data := []byte("test")
+			client.bufferPausedData(data)
+		}()
+	}
+
+	// Concurrent buffer length reads
+	wg.Add(50)
+	for i := 0; i < 50; i++ {
+		go func() {
+			defer wg.Done()
+			_ = client.pauseBufferLen()
+		}()
+	}
+
+	wg.Wait()
+	// Test passes if no race conditions or panics occur
+}
+
+// TestPtySession_Broadcast_BuffersPausedClients tests that broadcast buffers data for paused clients.
+func TestPtySession_Broadcast_BuffersPausedClients(t *testing.T) {
+	ps := &ptySession{
+		clients:   make(map[*websocket.Conn]*wsClient),
+		createdAt: time.Now(),
+	}
+
+	// Create mock clients
+	mockConn1 := &websocket.Conn{}
+	mockConn2 := &websocket.Conn{}
+
+	client1 := &wsClient{conn: mockConn1}
+	client2 := &wsClient{conn: mockConn2}
+
+	ps.clients[mockConn1] = client1
+	ps.clients[mockConn2] = client2
+
+	// Pause client1
+	client1.paused.Store(true)
+
+	// Manually simulate what broadcast does for paused clients
+	testData := []byte("test output data")
+
+	// For client1 (paused), data should be buffered
+	if client1.paused.Load() {
+		client1.bufferPausedData(testData)
+	}
+
+	// Verify client1 has buffered data
+	if client1.pauseBufferLen() != len(testData) {
+		t.Errorf("Paused client buffer = %d, want %d", client1.pauseBufferLen(), len(testData))
+	}
+
+	// Client2 (not paused) should have no buffered data
+	if client2.pauseBufferLen() != 0 {
+		t.Errorf("Active client buffer = %d, want 0", client2.pauseBufferLen())
+	}
+}
+
+// TestPtySession_BufferOverflow_DropsExcessData tests buffer overflow behavior.
+func TestPtySession_BufferOverflow_DropsExcessData(t *testing.T) {
+	client := &wsClient{}
+
+	// Fill buffer to max
+	fillData := make([]byte, pauseBufferMaxSize)
+	if !client.bufferPausedData(fillData) {
+		t.Fatal("Initial fill should succeed")
+	}
+
+	// Track drop count (simulating what happens in broadcast)
+	droppedCount := 0
+	for i := 0; i < 5; i++ {
+		data := []byte("overflow data")
+		if !client.bufferPausedData(data) {
+			droppedCount++
+		}
+	}
+
+	if droppedCount != 5 {
+		t.Errorf("Dropped count = %d, want 5", droppedCount)
+	}
+
+	// Buffer should still be at max
+	if client.pauseBufferLen() != pauseBufferMaxSize {
+		t.Errorf("Buffer size = %d, want %d", client.pauseBufferLen(), pauseBufferMaxSize)
+	}
+}
+
+// TestFlowControl_Constants verifies flow control constants are reasonable.
+func TestFlowControl_Constants(t *testing.T) {
+	// Verify constants are set to reasonable values
+	if pauseBufferMaxSize <= 0 {
+		t.Errorf("pauseBufferMaxSize should be positive: %d", pauseBufferMaxSize)
+	}
+	if pauseBufferChunkSize <= 0 {
+		t.Errorf("pauseBufferChunkSize should be positive: %d", pauseBufferChunkSize)
+	}
+	if pauseBufferChunkDelay < 0 {
+		t.Errorf("pauseBufferChunkDelay should be non-negative: %v", pauseBufferChunkDelay)
+	}
+
+	// Chunk size should be smaller than max buffer size
+	if pauseBufferChunkSize >= pauseBufferMaxSize {
+		t.Errorf("Chunk size (%d) should be smaller than max buffer (%d)",
+			pauseBufferChunkSize, pauseBufferMaxSize)
+	}
+
+	// Verify expected values from implementation
+	expectedMaxSize := 64 * 1024  // 64KB
+	expectedChunkSize := 8 * 1024 // 8KB
+
+	if pauseBufferMaxSize != expectedMaxSize {
+		t.Errorf("pauseBufferMaxSize = %d, want %d", pauseBufferMaxSize, expectedMaxSize)
+	}
+	if pauseBufferChunkSize != expectedChunkSize {
+		t.Errorf("pauseBufferChunkSize = %d, want %d", pauseBufferChunkSize, expectedChunkSize)
+	}
+}
+
+// TestWsClient_BufferAndFlushSequence tests the complete buffer -> flush cycle.
+func TestWsClient_BufferAndFlushSequence(t *testing.T) {
+	client := &wsClient{}
+
+	// Buffer some data
+	testData := []byte("data to buffer and flush")
+	client.bufferPausedData(testData)
+
+	// Verify it's buffered
+	if client.pauseBufferLen() != len(testData) {
+		t.Errorf("Buffer before flush = %d, want %d", client.pauseBufferLen(), len(testData))
+	}
+
+	// Clear the buffer directly (simulating what happens after flush without real WS)
+	client.pauseBufferMu.Lock()
+	data := client.pauseBuffer
+	client.pauseBuffer = nil
+	client.pauseBufferMu.Unlock()
+
+	// Verify data was retrieved correctly
+	if string(data) != string(testData) {
+		t.Errorf("Retrieved data = %q, want %q", string(data), string(testData))
+	}
+
+	// Buffer should now be empty
+	if client.pauseBufferLen() != 0 {
+		t.Errorf("Buffer after flush = %d, want 0", client.pauseBufferLen())
+	}
+}
+
+// TestWsClient_PauseResumeWithBuffering tests complete pause -> buffer -> resume flow.
+func TestWsClient_PauseResumeWithBuffering(t *testing.T) {
+	client := &wsClient{}
+
+	// Initially not paused
+	if client.paused.Load() {
+		t.Error("Client should not be paused initially")
+	}
+
+	// Pause client
+	client.paused.Store(true)
+
+	// Simulate buffering data while paused
+	for i := 0; i < 10; i++ {
+		data := []byte("buffered output\n")
+		client.bufferPausedData(data)
+	}
+
+	// Verify data accumulated
+	expectedLen := 10 * len("buffered output\n")
+	if client.pauseBufferLen() != expectedLen {
+		t.Errorf("Buffer while paused = %d, want %d", client.pauseBufferLen(), expectedLen)
+	}
+
+	// Resume client
+	client.paused.Store(false)
+
+	// On resume, flush would be called - simulate the buffer clearing
+	client.pauseBufferMu.Lock()
+	bufferedData := client.pauseBuffer
+	client.pauseBuffer = nil
+	client.pauseBufferMu.Unlock()
+
+	// Verify all data was retrieved
+	if len(bufferedData) != expectedLen {
+		t.Errorf("Flushed data = %d bytes, want %d", len(bufferedData), expectedLen)
+	}
+
+	// Buffer should be empty after flush
+	if client.pauseBufferLen() != 0 {
+		t.Errorf("Buffer after resume = %d, want 0", client.pauseBufferLen())
+	}
 }

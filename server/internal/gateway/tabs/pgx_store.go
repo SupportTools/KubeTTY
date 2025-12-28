@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,12 +23,13 @@ func NewPGXStore(pool *pgxpool.Pool) *PGXStore {
 // Create inserts a new tab row.
 func (s *PGXStore) Create(ctx context.Context, tab Tab) error {
 	const stmt = `
-INSERT INTO gateway_tabs (tab_id, project_id, client_id, status, created_at, updated_at, last_error, downstream_uri)
-VALUES ($1,$2,$3,$4,COALESCE($5,NOW()),COALESCE($6,NOW()),$7,$8)
+INSERT INTO gateway_tabs (tab_id, project_id, client_id, status, position, created_at, updated_at, last_error, downstream_uri)
+VALUES ($1,$2,$3,$4,$5,COALESCE($6,NOW()),COALESCE($7,NOW()),$8,$9)
 ON CONFLICT (tab_id) DO UPDATE SET
   project_id=EXCLUDED.project_id,
   client_id=EXCLUDED.client_id,
   status=EXCLUDED.status,
+  position=EXCLUDED.position,
   created_at=COALESCE(EXCLUDED.created_at,gateway_tabs.created_at),
   updated_at=COALESCE(EXCLUDED.updated_at,NOW()),
   last_error=EXCLUDED.last_error,
@@ -40,7 +42,7 @@ ON CONFLICT (tab_id) DO UPDATE SET
 	if !tab.UpdatedAt.IsZero() {
 		updatedAt = tab.UpdatedAt
 	}
-	if _, err := s.pool.Exec(ctx, stmt, tab.TabID, tab.ProjectID, tab.ClientID, tab.Status, createdAt, updatedAt, tab.LastError, tab.DownstreamURI); err != nil {
+	if _, err := s.pool.Exec(ctx, stmt, tab.TabID, tab.ProjectID, tab.ClientID, tab.Status, tab.Position, createdAt, updatedAt, tab.LastError, tab.DownstreamURI); err != nil {
 		return fmt.Errorf("create tab: %w", err)
 	}
 	return nil
@@ -94,12 +96,12 @@ func (s *PGXStore) Delete(ctx context.Context, tabID string) error {
 // Get retrieves a tab by ID.
 func (s *PGXStore) Get(ctx context.Context, tabID string) (*Tab, error) {
 	const stmt = `
-SELECT tab_id, project_id, client_id, status, created_at, updated_at, last_error, downstream_uri
+SELECT tab_id, project_id, client_id, status, position, created_at, updated_at, last_error, downstream_uri
 FROM gateway_tabs
 WHERE tab_id=$1`
 	row := s.pool.QueryRow(ctx, stmt, tabID)
 	var tab Tab
-	if err := row.Scan(&tab.TabID, &tab.ProjectID, &tab.ClientID, &tab.Status, &tab.CreatedAt, &tab.UpdatedAt, &tab.LastError, &tab.DownstreamURI); err != nil {
+	if err := row.Scan(&tab.TabID, &tab.ProjectID, &tab.ClientID, &tab.Status, &tab.Position, &tab.CreatedAt, &tab.UpdatedAt, &tab.LastError, &tab.DownstreamURI); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -108,16 +110,16 @@ WHERE tab_id=$1`
 	return &tab, nil
 }
 
-// ListByClient returns most recent tabs for a client.
+// ListByClient returns tabs for a client ordered by position.
 func (s *PGXStore) ListByClient(ctx context.Context, clientID string, limit int) ([]Tab, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	const stmt = `
-SELECT tab_id, project_id, client_id, status, created_at, updated_at, last_error, downstream_uri
+SELECT tab_id, project_id, client_id, status, position, created_at, updated_at, last_error, downstream_uri
 FROM gateway_tabs
 WHERE client_id=$1
-ORDER BY updated_at DESC
+ORDER BY position ASC, created_at ASC
 LIMIT $2`
 	rows, err := s.pool.Query(ctx, stmt, clientID, limit)
 	if err != nil {
@@ -127,7 +129,7 @@ LIMIT $2`
 	var result []Tab
 	for rows.Next() {
 		var tab Tab
-		if err := rows.Scan(&tab.TabID, &tab.ProjectID, &tab.ClientID, &tab.Status, &tab.CreatedAt, &tab.UpdatedAt, &tab.LastError, &tab.DownstreamURI); err != nil {
+		if err := rows.Scan(&tab.TabID, &tab.ProjectID, &tab.ClientID, &tab.Status, &tab.Position, &tab.CreatedAt, &tab.UpdatedAt, &tab.LastError, &tab.DownstreamURI); err != nil {
 			return nil, fmt.Errorf("scan tab: %w", err)
 		}
 		result = append(result, tab)
@@ -138,7 +140,7 @@ LIMIT $2`
 // ListAll returns all tabs for restoration purposes.
 func (s *PGXStore) ListAll(ctx context.Context) ([]Tab, error) {
 	const stmt = `
-SELECT tab_id, project_id, client_id, status, created_at, updated_at, last_error, downstream_uri
+SELECT tab_id, project_id, client_id, status, position, created_at, updated_at, last_error, downstream_uri
 FROM gateway_tabs`
 	rows, err := s.pool.Query(ctx, stmt)
 	if err != nil {
@@ -148,7 +150,7 @@ FROM gateway_tabs`
 	var result []Tab
 	for rows.Next() {
 		var tab Tab
-		if err := rows.Scan(&tab.TabID, &tab.ProjectID, &tab.ClientID, &tab.Status, &tab.CreatedAt, &tab.UpdatedAt, &tab.LastError, &tab.DownstreamURI); err != nil {
+		if err := rows.Scan(&tab.TabID, &tab.ProjectID, &tab.ClientID, &tab.Status, &tab.Position, &tab.CreatedAt, &tab.UpdatedAt, &tab.LastError, &tab.DownstreamURI); err != nil {
 			return nil, fmt.Errorf("scan tab: %w", err)
 		}
 		result = append(result, tab)
@@ -204,7 +206,7 @@ func (s *PGXStore) GetRecentErrors(ctx context.Context, limit int) ([]Tab, error
 	}
 
 	const stmt = `
-SELECT tab_id, project_id, client_id, status, created_at, updated_at, last_error, downstream_uri
+SELECT tab_id, project_id, client_id, status, position, created_at, updated_at, last_error, downstream_uri
 FROM gateway_tabs
 WHERE last_error IS NOT NULL AND last_error != ''
 ORDER BY updated_at DESC
@@ -219,7 +221,7 @@ LIMIT $1`
 	var result []Tab
 	for rows.Next() {
 		var tab Tab
-		if err := rows.Scan(&tab.TabID, &tab.ProjectID, &tab.ClientID, &tab.Status, &tab.CreatedAt, &tab.UpdatedAt, &tab.LastError, &tab.DownstreamURI); err != nil {
+		if err := rows.Scan(&tab.TabID, &tab.ProjectID, &tab.ClientID, &tab.Status, &tab.Position, &tab.CreatedAt, &tab.UpdatedAt, &tab.LastError, &tab.DownstreamURI); err != nil {
 			return nil, fmt.Errorf("scan tab: %w", err)
 		}
 		result = append(result, tab)
@@ -252,4 +254,62 @@ GROUP BY project_id`
 	}
 
 	return counts, rows.Err()
+}
+
+// UpdatePositions updates the position of multiple tabs in the given order.
+// tabIDs should be in the desired order (first element = position 0).
+func (s *PGXStore) UpdatePositions(ctx context.Context, clientID string, tabIDs []string) error {
+	if len(tabIDs) == 0 {
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	const stmt = `UPDATE gateway_tabs SET position=$1, updated_at=NOW() WHERE tab_id=$2 AND client_id=$3`
+	for i, tabID := range tabIDs {
+		cmd, err := tx.Exec(ctx, stmt, i, tabID, clientID)
+		if err != nil {
+			return fmt.Errorf("update position for tab %s: %w", tabID, err)
+		}
+		if cmd.RowsAffected() == 0 {
+			return fmt.Errorf("tab %s not found or does not belong to client", tabID)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	return nil
+}
+
+// GetNextPosition returns the next available position for a new tab.
+func (s *PGXStore) GetNextPosition(ctx context.Context, clientID string) (int, error) {
+	const stmt = `SELECT COALESCE(MAX(position), -1) + 1 FROM gateway_tabs WHERE client_id=$1`
+	var pos int
+	if err := s.pool.QueryRow(ctx, stmt, clientID).Scan(&pos); err != nil {
+		return 0, fmt.Errorf("get next position: %w", err)
+	}
+	return pos, nil
+}
+
+// CleanOrphanedTabs deletes tabs that have been in 'closed' or 'reconnecting' status
+// for longer than maxAge. This helps clean up database rows that weren't properly
+// removed when their in-memory counterparts were closed (e.g., during gateway restart).
+// Returns the number of rows deleted.
+func (s *PGXStore) CleanOrphanedTabs(ctx context.Context, maxAge time.Duration) (int64, error) {
+	const stmt = `
+DELETE FROM gateway_tabs
+WHERE updated_at < $1
+  AND status IN ('closed', 'reconnecting')`
+
+	cutoff := time.Now().Add(-maxAge)
+	result, err := s.pool.Exec(ctx, stmt, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("clean orphaned tabs: %w", err)
+	}
+	return result.RowsAffected(), nil
 }

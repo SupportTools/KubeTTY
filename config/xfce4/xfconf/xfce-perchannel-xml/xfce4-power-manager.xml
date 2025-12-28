@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- XFCE Power Manager Configuration for KubeTTY -->
+<!-- Disables all sleep/suspend/hibernate functions for container use -->
+
+<channel name="xfce4-power-manager" version="1.0">
+  <!-- Disable display power management -->
+  <property name="dpms-enabled" type="bool" value="false"/>
+  <property name="dpms-on-ac-sleep" type="uint" value="0"/>
+  <property name="dpms-on-ac-off" type="uint" value="0"/>
+  <property name="dpms-on-battery-sleep" type="uint" value="0"/>
+  <property name="dpms-on-battery-off" type="uint" value="0"/>
+
+  <!-- Disable blank screen -->
+  <property name="blank-on-ac" type="int" value="0"/>
+  <property name="blank-on-battery" type="int" value="0"/>
+
+  <!-- Disable sleep/suspend actions -->
+  <property name="inactivity-on-ac" type="uint" value="0"/>
+  <property name="inactivity-on-battery" type="uint" value="0"/>
+  <property name="inactivity-sleep-mode-on-ac" type="uint" value="0"/>
+  <property name="inactivity-sleep-mode-on-battery" type="uint" value="0"/>
+
+  <!-- Disable lid and button actions (not applicable but set for completeness) -->
+  <property name="lid-action-on-ac" type="uint" value="0"/>
+  <property name="lid-action-on-battery" type="uint" value="0"/>
+  <property name="sleep-button-action" type="uint" value="0"/>
+  <property name="hibernate-button-action" type="uint" value="0"/>
+  <property name="power-button-action" type="uint" value="0"/>
+
+  <!-- Show settings icon in panel (useful for debugging) -->
+  <property name="show-tray-icon" type="bool" value="true"/>
+</channel>

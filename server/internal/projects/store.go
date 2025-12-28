@@ -10,8 +10,18 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// Pool defines the interface for database pool operations.
+// This allows for mocking in tests using pgxmock.
+type Pool interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Close()
+}
 
 // Errors returned by the project store.
 var (
@@ -38,6 +48,7 @@ type Store interface {
 
 	// Status updates
 	SetStatus(ctx context.Context, id uuid.UUID, status ProjectStatus, message string) error
+	SetPaused(ctx context.Context, id uuid.UUID, paused bool) error
 	UpdateHealthCheck(ctx context.Context, id uuid.UUID, podIP string) error
 	UpdateLastActivity(ctx context.Context, projectName string) error
 
@@ -51,7 +62,7 @@ type Store interface {
 
 // PGStore is a pgx-backed Store implementation.
 type PGStore struct {
-	pool            *pgxpool.Pool
+	pool            Pool
 	targetNamespace string // Target namespace for all projects (from controller config)
 }
 
@@ -73,6 +84,12 @@ func (s *PGStore) Close() {
 
 // NewStoreFromPool reuses an existing pool.
 func NewStoreFromPool(pool *pgxpool.Pool, targetNamespace string) *PGStore {
+	return &PGStore{pool: pool, targetNamespace: targetNamespace}
+}
+
+// NewStoreWithPool creates a PGStore with a pre-configured pool.
+// This is primarily used for testing with mock pools.
+func NewStoreWithPool(pool Pool, targetNamespace string) *PGStore {
 	return &PGStore{pool: pool, targetNamespace: targetNamespace}
 }
 
@@ -108,7 +125,8 @@ INSERT INTO kubetty_projects (
     storage_size, storage_class,
     admin_namespaces, read_namespaces,
     max_tabs_per_client, max_tabs_total,
-    dind_enabled, env_vars,
+    dind_enabled, gui_enabled, gui_resolution, gui_vnc_port,
+    env_vars,
     image_repository, image_tag,
     status
 )
@@ -119,8 +137,9 @@ VALUES (
     $14, $15,
     $16, $17,
     $18, $19,
-    $20, $21,
-    $22, $23,
+    $20, $21, $22, $23,
+    $24,
+    $25, $26,
     'pending'
 )
 RETURNING id, name, display_name, description, icon,
@@ -129,9 +148,10 @@ RETURNING id, name, display_name, description, icon,
     storage_size, storage_class,
     admin_namespaces, read_namespaces,
     max_tabs_per_client, max_tabs_total,
-    dind_enabled, env_vars,
+    dind_enabled, gui_enabled, gui_resolution, gui_vnc_port,
+    env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, last_activity, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at`
 
 	row := s.pool.QueryRow(ctx, stmt,
@@ -141,7 +161,8 @@ RETURNING id, name, display_name, description, icon,
 		req.StorageSize, req.StorageClass,
 		adminNS, readNS,
 		req.MaxTabsPerClient, req.MaxTabsTotal,
-		*req.DinDEnabled, envVars,
+		*req.DinDEnabled, *req.GUIEnabled, req.GUIResolution, req.GUIVNCPort,
+		envVars,
 		req.ImageRepository, req.ImageTag,
 	)
 
@@ -156,9 +177,10 @@ SELECT id, name, display_name, description, icon,
     storage_size, storage_class,
     admin_namespaces, read_namespaces,
     max_tabs_per_client, max_tabs_total,
-    dind_enabled, env_vars,
+    dind_enabled, gui_enabled, gui_resolution, gui_vnc_port,
+    env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, last_activity, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
 WHERE id = $1 AND deleted_at IS NULL`
@@ -175,9 +197,10 @@ SELECT id, name, display_name, description, icon,
     storage_size, storage_class,
     admin_namespaces, read_namespaces,
     max_tabs_per_client, max_tabs_total,
-    dind_enabled, env_vars,
+    dind_enabled, gui_enabled, gui_resolution, gui_vnc_port,
+    env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, last_activity, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
 WHERE name = $1 AND deleted_at IS NULL`
@@ -194,9 +217,10 @@ SELECT id, name, display_name, description, icon,
     storage_size, storage_class,
     admin_namespaces, read_namespaces,
     max_tabs_per_client, max_tabs_total,
-    dind_enabled, env_vars,
+    dind_enabled, gui_enabled, gui_resolution, gui_vnc_port,
+    env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, last_activity, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
 WHERE service_name = $1 AND deleted_at IS NULL`
@@ -213,9 +237,10 @@ SELECT id, name, display_name, description, icon,
     storage_size, storage_class,
     admin_namespaces, read_namespaces,
     max_tabs_per_client, max_tabs_total,
-    dind_enabled, env_vars,
+    dind_enabled, gui_enabled, gui_resolution, gui_vnc_port,
+    env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, last_activity, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
 WHERE 1=1`
@@ -291,9 +316,10 @@ SELECT id, name, display_name, description, icon,
     storage_size, storage_class,
     admin_namespaces, read_namespaces,
     max_tabs_per_client, max_tabs_total,
-    dind_enabled, env_vars,
+    dind_enabled, gui_enabled, gui_resolution, gui_vnc_port,
+    env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, last_activity, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
 WHERE status = ANY($1)`
@@ -389,6 +415,21 @@ func (s *PGStore) Update(ctx context.Context, id uuid.UUID, req UpdateProjectReq
 		args = append(args, *req.DinDEnabled)
 		argN++
 	}
+	if req.GUIEnabled != nil {
+		setClauses = append(setClauses, fmt.Sprintf("gui_enabled = $%d", argN))
+		args = append(args, *req.GUIEnabled)
+		argN++
+	}
+	if req.GUIResolution != nil {
+		setClauses = append(setClauses, fmt.Sprintf("gui_resolution = $%d", argN))
+		args = append(args, *req.GUIResolution)
+		argN++
+	}
+	if req.GUIVNCPort != nil {
+		setClauses = append(setClauses, fmt.Sprintf("gui_vnc_port = $%d", argN))
+		args = append(args, *req.GUIVNCPort)
+		argN++
+	}
 	if req.EnvVars != nil {
 		envJSON, _ := json.Marshal(req.EnvVars)
 		setClauses = append(setClauses, fmt.Sprintf("env_vars = $%d", argN))
@@ -416,9 +457,10 @@ RETURNING id, name, display_name, description, icon,
     storage_size, storage_class,
     admin_namespaces, read_namespaces,
     max_tabs_per_client, max_tabs_total,
-    dind_enabled, env_vars,
+    dind_enabled, gui_enabled, gui_resolution, gui_vnc_port,
+    env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, last_activity, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at`,
 		joinStrings(setClauses, ", "))
 
@@ -503,9 +545,26 @@ WHERE name = $1 AND deleted_at IS NULL`
 	return nil
 }
 
+func (s *PGStore) SetPaused(ctx context.Context, id uuid.UUID, paused bool) error {
+	const stmt = `
+UPDATE kubetty_projects
+SET paused = $2, updated_at = NOW()
+WHERE id = $1 AND deleted_at IS NULL`
+
+	tag, err := s.pool.Exec(ctx, stmt, id, paused)
+	if err != nil {
+		return fmt.Errorf("set paused: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProjectNotFound
+	}
+	return nil
+}
+
 func scanProject(row pgx.Row) (*Project, error) {
 	var p Project
-	var description, icon, statusMessage, podIP, serviceName *string
+	var description, icon, statusMessage, podIP, serviceName, guiResolution *string
+	var guiVNCPort *int
 	var adminNS, readNS, envVars []byte
 
 	err := row.Scan(
@@ -515,9 +574,10 @@ func scanProject(row pgx.Row) (*Project, error) {
 		&p.StorageSize, &p.StorageClass,
 		&adminNS, &readNS,
 		&p.MaxTabsPerClient, &p.MaxTabsTotal,
-		&p.DinDEnabled, &envVars,
+		&p.DinDEnabled, &p.GUIEnabled, &guiResolution, &guiVNCPort,
+		&envVars,
 		&p.ImageRepository, &p.ImageTag,
-		&p.Status, &statusMessage, &p.LastHealthCheck, &p.LastActivity, &podIP,
+		&p.Status, &statusMessage, &p.LastHealthCheck, &p.LastActivity, &podIP, &p.Paused,
 		&p.CreatedAt, &p.UpdatedAt, &p.DeletedAt,
 	)
 	if err != nil {
@@ -543,6 +603,12 @@ func scanProject(row pgx.Row) (*Project, error) {
 	if podIP != nil {
 		p.PodIP = *podIP
 	}
+	if guiResolution != nil {
+		p.GUIResolution = *guiResolution
+	}
+	if guiVNCPort != nil {
+		p.GUIVNCPort = *guiVNCPort
+	}
 
 	// Parse JSON fields
 	if err := json.Unmarshal(adminNS, &p.AdminNamespaces); err != nil {
@@ -560,7 +626,8 @@ func scanProject(row pgx.Row) (*Project, error) {
 
 func scanProjectRows(rows pgx.Rows) (*Project, error) {
 	var p Project
-	var description, icon, statusMessage, podIP, serviceName *string
+	var description, icon, statusMessage, podIP, serviceName, guiResolution *string
+	var guiVNCPort *int
 	var adminNS, readNS, envVars []byte
 
 	err := rows.Scan(
@@ -570,9 +637,10 @@ func scanProjectRows(rows pgx.Rows) (*Project, error) {
 		&p.StorageSize, &p.StorageClass,
 		&adminNS, &readNS,
 		&p.MaxTabsPerClient, &p.MaxTabsTotal,
-		&p.DinDEnabled, &envVars,
+		&p.DinDEnabled, &p.GUIEnabled, &guiResolution, &guiVNCPort,
+		&envVars,
 		&p.ImageRepository, &p.ImageTag,
-		&p.Status, &statusMessage, &p.LastHealthCheck, &p.LastActivity, &podIP,
+		&p.Status, &statusMessage, &p.LastHealthCheck, &p.LastActivity, &podIP, &p.Paused,
 		&p.CreatedAt, &p.UpdatedAt, &p.DeletedAt,
 	)
 	if err != nil {
@@ -594,6 +662,12 @@ func scanProjectRows(rows pgx.Rows) (*Project, error) {
 	}
 	if podIP != nil {
 		p.PodIP = *podIP
+	}
+	if guiResolution != nil {
+		p.GUIResolution = *guiResolution
+	}
+	if guiVNCPort != nil {
+		p.GUIVNCPort = *guiVNCPort
 	}
 
 	// Parse JSON fields
@@ -664,9 +738,10 @@ SELECT id, name, display_name, description, icon,
     storage_size, storage_class,
     admin_namespaces, read_namespaces,
     max_tabs_per_client, max_tabs_total,
-    dind_enabled, env_vars,
+    dind_enabled, gui_enabled, gui_resolution, gui_vnc_port,
+    env_vars,
     image_repository, image_tag,
-    status, status_message, last_health_check, last_activity, pod_ip,
+    status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at
 FROM kubetty_projects
 WHERE status = 'failed' AND updated_at >= $1 AND deleted_at IS NULL

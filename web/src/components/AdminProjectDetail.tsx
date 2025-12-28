@@ -19,6 +19,7 @@ interface Props {
 
 const statusColors: Record<AdminProjectStatus, string> = {
   pending: "#f59e0b",
+  syncing: "#60a5fa",
   creating: "#3b82f6",
   running: "#10b981",
   updating: "#8b5cf6",
@@ -29,6 +30,7 @@ const statusColors: Record<AdminProjectStatus, string> = {
 
 const statusLabels: Record<AdminProjectStatus, string> = {
   pending: "Pending",
+  syncing: "Syncing",
   creating: "Creating",
   running: "Running",
   updating: "Updating",
@@ -73,6 +75,22 @@ const AdminProjectDetail = ({
   const [newSecretKey, setNewSecretKey] = useState("");
   const [newSecretValue, setNewSecretValue] = useState("");
   const [showSecretValues, setShowSecretValues] = useState<Record<string, boolean>>({});
+
+  // Pause/Unpause state
+  const [pausing, setPausing] = useState(false);
+
+  // Edit Settings modal state
+  const [showEditSettingsModal, setShowEditSettingsModal] = useState(false);
+  const [editSettings, setEditSettings] = useState({
+    displayName: "",
+    description: "",
+    maxTabsPerClient: 3,
+    maxTabsTotal: 10,
+    dindEnabled: false,
+    guiEnabled: false,
+    guiResolution: "1280x720x24",
+  });
+  const [savingSettings, setSavingSettings] = useState(false);
 
   const loadStatus = useCallback(async () => {
     setLoading(true);
@@ -230,6 +248,60 @@ const AdminProjectDetail = ({
     }
   };
 
+  // Edit Settings handlers
+  const handleEditSettingsClick = () => {
+    setEditSettings({
+      displayName: project.displayName,
+      description: project.description || "",
+      maxTabsPerClient: project.maxTabsPerClient,
+      maxTabsTotal: project.maxTabsTotal,
+      dindEnabled: project.dindEnabled,
+      guiEnabled: project.guiEnabled,
+      guiResolution: project.guiResolution || "1280x720x24",
+    });
+    setShowEditSettingsModal(true);
+    setError(null);
+  };
+
+  const handleEditSettingsCancel = () => {
+    setShowEditSettingsModal(false);
+    setError(null);
+  };
+
+  const handleEditSettingsChange = (field: keyof typeof editSettings, value: string | number | boolean) => {
+    setEditSettings((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleEditSettingsSave = async () => {
+    setSavingSettings(true);
+    setError(null);
+    try {
+      const res = await authFetch(`/api/admin/projects/${project.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          displayName: editSettings.displayName,
+          description: editSettings.description,
+          maxTabsPerClient: editSettings.maxTabsPerClient,
+          maxTabsTotal: editSettings.maxTabsTotal,
+          dindEnabled: editSettings.dindEnabled,
+          guiEnabled: editSettings.guiEnabled,
+          guiResolution: editSettings.guiEnabled ? editSettings.guiResolution : undefined,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(await parseErrorResponse(res));
+      }
+      setShowEditSettingsModal(false);
+      await loadStatus();
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update settings");
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
   // Manage Secrets handlers
   const handleManageSecretsClick = async () => {
     setLoadingSecrets(true);
@@ -335,6 +407,27 @@ const AdminProjectDetail = ({
     return date.toLocaleString();
   };
 
+  // Pause/Unpause handlers
+  const handlePauseToggle = async () => {
+    const action = project.paused ? "unpause" : "pause";
+    setPausing(true);
+    setError(null);
+    try {
+      const res = await authFetch(`/api/admin/projects/${project.id}/${action}`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        throw new Error(await parseErrorResponse(res));
+      }
+      await loadStatus();
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to ${action} project`);
+    } finally {
+      setPausing(false);
+    }
+  };
+
   return (
     <div className="modal-backdrop">
       <div className="modal admin-modal admin-detail-modal">
@@ -343,10 +436,15 @@ const AdminProjectDetail = ({
             <h2>{project.displayName}</h2>
             <span
               className="status-badge"
-              style={{ backgroundColor: statusColors[project.status] }}
+              style={{ backgroundColor: project.paused ? "#6b7280" : statusColors[project.status] }}
             >
-              {statusLabels[project.status]}
+              {project.paused ? "Paused" : statusLabels[project.status]}
             </span>
+            {project.paused && (
+              <span className="paused-indicator" title="Project is paused (scaled to 0 replicas)">
+                ⏸️
+              </span>
+            )}
           </div>
           <button className="icon-button" onClick={onClose}>
             &times;
@@ -448,6 +546,16 @@ const AdminProjectDetail = ({
               <div className="detail-item">
                 <label>Docker-in-Docker</label>
                 <span>{project.dindEnabled ? "Enabled" : "Disabled"}</span>
+              </div>
+              <div className="detail-item">
+                <label>GUI Desktop</label>
+                <span>
+                  {project.guiEnabled ? (
+                    <>Enabled ({project.guiResolution || "1280x720"})</>
+                  ) : (
+                    "Disabled"
+                  )}
+                </span>
               </div>
             </div>
           </div>
@@ -552,6 +660,9 @@ const AdminProjectDetail = ({
               <button className="primary-button" onClick={handleEditResourcesClick}>
                 Edit Resources
               </button>
+              <button className="primary-button" onClick={handleEditSettingsClick}>
+                Edit Settings
+              </button>
               <button className="primary-button" onClick={handleManageSecretsClick} disabled={loadingSecrets}>
                 {loadingSecrets ? "Loading..." : "Manage Secrets"}
               </button>
@@ -562,7 +673,16 @@ const AdminProjectDetail = ({
               Upgrade
             </button>
           )}
-          {(project.status === "running" || project.status === "failed") && (
+          {project.status === "running" && (
+            <button
+              className={project.paused ? "primary-button" : "warning-button"}
+              onClick={handlePauseToggle}
+              disabled={pausing}
+            >
+              {pausing ? (project.paused ? "Resuming..." : "Pausing...") : (project.paused ? "Resume" : "Pause")}
+            </button>
+          )}
+          {(project.status === "running" || project.status === "failed") && !project.paused && (
             <button className="warning-button" onClick={handleRestart}>
               Restart
             </button>
@@ -758,6 +878,140 @@ const AdminProjectDetail = ({
                   disabled={savingResources}
                 >
                   {savingResources ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showEditSettingsModal && (
+          <div className="modal-backdrop" onClick={handleEditSettingsCancel}>
+            <div className="modal edit-resources-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <h2>Edit Settings</h2>
+                <button className="icon-button" onClick={handleEditSettingsCancel}>
+                  &times;
+                </button>
+              </div>
+              <div className="modal-body">
+                {error && <p className="error">{error}</p>}
+
+                <div className="info-box">
+                  Changes to Docker-in-Docker or GUI settings will restart the project pod.
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="displayName">Display Name:</label>
+                  <input
+                    id="displayName"
+                    type="text"
+                    className="form-input"
+                    placeholder="My Project"
+                    value={editSettings.displayName}
+                    onChange={(e) => handleEditSettingsChange("displayName", e.target.value)}
+                    disabled={savingSettings}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="description">Description:</label>
+                  <textarea
+                    id="description"
+                    className="form-input"
+                    placeholder="Project description"
+                    value={editSettings.description}
+                    onChange={(e) => handleEditSettingsChange("description", e.target.value)}
+                    disabled={savingSettings}
+                    rows={3}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="maxTabsPerClient">Max Tabs Per Client:</label>
+                  <input
+                    id="maxTabsPerClient"
+                    type="number"
+                    className="form-input"
+                    min={1}
+                    max={10}
+                    value={editSettings.maxTabsPerClient}
+                    onChange={(e) => handleEditSettingsChange("maxTabsPerClient", parseInt(e.target.value, 10) || 1)}
+                    disabled={savingSettings}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="maxTabsTotal">Max Tabs Total:</label>
+                  <input
+                    id="maxTabsTotal"
+                    type="number"
+                    className="form-input"
+                    min={1}
+                    max={50}
+                    value={editSettings.maxTabsTotal}
+                    onChange={(e) => handleEditSettingsChange("maxTabsTotal", parseInt(e.target.value, 10) || 1)}
+                    disabled={savingSettings}
+                  />
+                </div>
+
+                <div className="form-group checkbox-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={editSettings.dindEnabled}
+                      onChange={(e) => handleEditSettingsChange("dindEnabled", e.target.checked)}
+                      disabled={savingSettings}
+                    />
+                    Enable Docker-in-Docker
+                  </label>
+                  <small className="form-help">
+                    Allows running Docker containers inside the project pod
+                  </small>
+                </div>
+
+                <div className="form-group checkbox-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={editSettings.guiEnabled}
+                      onChange={(e) => handleEditSettingsChange("guiEnabled", e.target.checked)}
+                      disabled={savingSettings}
+                    />
+                    Enable GUI Desktop
+                  </label>
+                  <small className="form-help">
+                    Provides a graphical desktop environment via VNC
+                  </small>
+                </div>
+
+                {editSettings.guiEnabled && (
+                  <div className="form-group">
+                    <label htmlFor="guiResolution">GUI Resolution:</label>
+                    <select
+                      id="guiResolution"
+                      className="form-input"
+                      value={editSettings.guiResolution}
+                      onChange={(e) => handleEditSettingsChange("guiResolution", e.target.value)}
+                      disabled={savingSettings}
+                    >
+                      <option value="1024x768x24">1024×768 (XGA)</option>
+                      <option value="1280x720x24">1280×720 (HD)</option>
+                      <option value="1280x1024x24">1280×1024 (SXGA)</option>
+                      <option value="1920x1080x24">1920×1080 (Full HD)</option>
+                    </select>
+                  </div>
+                )}
+              </div>
+              <div className="modal-actions">
+                <button className="secondary" onClick={handleEditSettingsCancel} disabled={savingSettings}>
+                  Cancel
+                </button>
+                <button
+                  className="primary-button"
+                  onClick={handleEditSettingsSave}
+                  disabled={savingSettings}
+                >
+                  {savingSettings ? "Saving..." : "Save Changes"}
                 </button>
               </div>
             </div>

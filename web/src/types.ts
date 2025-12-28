@@ -31,6 +31,9 @@ export type SessionLogsResponse = {
 
 export type ProjectHealthStatus = 'online' | 'degraded' | 'offline' | 'unknown';
 
+// GUI view modes for split-view UI
+export type ViewMode = 'terminal' | 'gui' | 'split-horizontal' | 'split-vertical';
+
 // Tab Resource Metrics Types
 export type ResourceMetric = {
   usage: number;    // Current usage in bytes (memory/disk) or millicores (CPU)
@@ -69,6 +72,9 @@ export function getMetricStatus(percent: number): MetricStatus {
   return 'healthy';
 }
 
+// Project lifecycle status (from database)
+export type ProjectLifecycleStatus = 'pending' | 'syncing' | 'creating' | 'running' | 'updating' | 'failed' | 'deleting' | 'deleted';
+
 export type ProjectInfo = {
   id: string;
   displayName: string;
@@ -78,8 +84,14 @@ export type ProjectInfo = {
   description?: string;
   icon?: string;
   tags?: string[];
-  status?: ProjectHealthStatus;
+  lifecycleStatus?: ProjectLifecycleStatus; // pending, syncing, running, failed, etc.
+  paused?: boolean;
+  status?: ProjectHealthStatus; // health status: online, offline, degraded, unknown
   lastCheckedAt?: string;
+  // GUI desktop support
+  guiEnabled?: boolean;
+  guiResolution?: string;
+  guiVNCPort?: number;
 };
 
 export type ProjectsResponse = {
@@ -91,6 +103,7 @@ export type GatewayTab = {
   projectId: string;
   clientId: string;
   status: 'connecting' | 'connected' | 'reconnecting' | 'closed';
+  position: number;
   createdAt: string;
   updatedAt: string;
   lastError?: string;
@@ -118,6 +131,7 @@ export interface ErrorResponse {
 // Admin Project Types
 export type AdminProjectStatus =
   | 'pending'
+  | 'syncing'
   | 'creating'
   | 'running'
   | 'updating'
@@ -145,6 +159,17 @@ export interface AdminProject {
   maxTabsPerClient: number;
   maxTabsTotal: number;
   dindEnabled: boolean;
+  // GUI desktop support
+  guiEnabled: boolean;
+  guiResolution?: string;
+  guiVNCPort?: number;
+  // PTY session logging for Loki integration
+  ptyLoggingEnabled: boolean;
+  ptyLoggingMaxSize?: number;       // Max file size before rotation (bytes)
+  ptyLoggingMaxBackups?: number;    // Rotated files to keep
+  ptyLoggingBufferSize?: number;    // Write buffer size (bytes)
+  ptyLoggingFlushInterval?: string; // Flush interval (e.g., "5s")
+  ptyLoggingIncludeRaw?: boolean;   // Include base64 raw bytes
   envVars?: Record<string, string>;
   imageRepository: string;
   imageTag: string;
@@ -153,6 +178,7 @@ export interface AdminProject {
   lastHealthCheck?: string;
   lastActivity?: string;
   podIP?: string;
+  paused: boolean;
   createdAt: string;
   updatedAt: string;
   deletedAt?: string;
@@ -175,6 +201,17 @@ export interface CreateProjectRequest {
   maxTabsPerClient?: number;
   maxTabsTotal?: number;
   dindEnabled?: boolean;
+  // GUI desktop support
+  guiEnabled?: boolean;
+  guiResolution?: string;
+  guiVNCPort?: number;
+  // PTY session logging for Loki integration
+  ptyLoggingEnabled?: boolean;
+  ptyLoggingMaxSize?: number;       // Max file size before rotation (bytes)
+  ptyLoggingMaxBackups?: number;    // Rotated files to keep
+  ptyLoggingBufferSize?: number;    // Write buffer size (bytes)
+  ptyLoggingFlushInterval?: string; // Flush interval (e.g., "5s")
+  ptyLoggingIncludeRaw?: boolean;   // Include base64 raw bytes
   envVars?: Record<string, string>;
   imageRepository?: string;
   imageTag?: string;
@@ -191,6 +228,17 @@ export interface UpdateProjectRequest {
   maxTabsPerClient?: number;
   maxTabsTotal?: number;
   dindEnabled?: boolean;
+  // GUI desktop support
+  guiEnabled?: boolean;
+  guiResolution?: string;
+  guiVNCPort?: number;
+  // PTY session logging for Loki integration
+  ptyLoggingEnabled?: boolean;
+  ptyLoggingMaxSize?: number;       // Max file size before rotation (bytes)
+  ptyLoggingMaxBackups?: number;    // Rotated files to keep
+  ptyLoggingBufferSize?: number;    // Write buffer size (bytes)
+  ptyLoggingFlushInterval?: string; // Flush interval (e.g., "5s")
+  ptyLoggingIncludeRaw?: boolean;   // Include base64 raw bytes
   envVars?: Record<string, string>;
   imageTag?: string;
 }
@@ -303,4 +351,70 @@ export interface DashboardUsage {
   topProjects: ProjectUsage[];
   peakHour: string;
   avgSessionDuration: number;
+}
+
+// Settings Types
+export type SettingCategory =
+  | 'project_defaults'
+  | 'auth'
+  | 'features'
+  | 'ui'
+  | 'controller'
+  | 'notifications'
+  | 'secrets';
+
+export type SettingValueType = 'string' | 'int' | 'bool' | 'json';
+
+export interface Setting {
+  id: string;
+  category: SettingCategory;
+  key: string;
+  value: unknown;
+  valueType: SettingValueType;
+  displayName: string;
+  description?: string;
+  isSensitive: boolean;
+  isReadonly: boolean;
+  validation?: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SettingHistory {
+  id: string;
+  settingId?: string;
+  category: SettingCategory;
+  key: string;
+  oldValue?: unknown;
+  newValue?: unknown;
+  changeType: 'insert' | 'update' | 'delete';
+  changedBy: string;
+  changedAt: string;
+  changeSource: string;
+  changeReason?: string;
+  clientIp?: string;
+  userAgent?: string;
+}
+
+export interface SettingsResponse {
+  settings: Setting[];
+  categories: Record<string, number>;
+  total: number;
+}
+
+export interface SettingCategoryInfo {
+  name: SettingCategory;
+  displayName: string;
+}
+
+export interface UpdateSettingRequest {
+  value: unknown;
+  changeReason?: string;
+}
+
+export interface SettingHistoryResponse {
+  history: SettingHistory[];
+  category?: SettingCategory;
+  key?: string;
+  total: number;
 }

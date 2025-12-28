@@ -1,0 +1,67 @@
+{{- $ctrlEnabled := false }}
+{{- if .Values.controller }}
+{{- $ctrlEnabled = .Values.controller.enabled | default false }}
+{{- end }}
+{{- if and .Values.rbac.create $ctrlEnabled }}
+{{- $fullName := include "kubetty.fullname" . }}
+{{- $saName := include "kubetty.serviceAccountName" . }}
+{{- $suffix := .Values.rbac.clusterResourceSuffix | default "" }}
+# ClusterRole for project controller to manage Kubernetes resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullName }}-controller{{ $suffix }}
+  labels:
+    app.kubernetes.io/name: {{ include "kubetty.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  # Controller: manage namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Controller: manage core resources in any namespace
+  - apiGroups: [""]
+    resources: ["services", "persistentvolumeclaims", "serviceaccounts", "secrets"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Controller: manage deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Controller: manage Jobs for template sync
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Controller: manage namespace-scoped RBAC
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Controller: manage cluster-scoped RBAC for project service accounts
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Controller: read pods for health checks
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Controller: read pod metrics for storage monitoring
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+# ClusterRoleBinding for project controller
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullName }}-controller{{ $suffix }}
+  labels:
+    app.kubernetes.io/name: {{ include "kubetty.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullName }}-controller{{ $suffix }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

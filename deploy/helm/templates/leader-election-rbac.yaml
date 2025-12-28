@@ -1,0 +1,39 @@
+{{- $leEnabled := false }}
+{{- if .Values.leaderElection }}
+{{- $leEnabled = .Values.leaderElection.enabled | default false }}
+{{- end }}
+{{- if and .Values.rbac.create $leEnabled }}
+# Role for leader election - allows managing Lease resources in the gateway namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kubetty.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "kubetty.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kubetty.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "kubetty.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kubetty.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "kubetty.fullname" . }}-leader-election
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

@@ -22,6 +22,8 @@ type Props = {
   healthUrl?: string;
   isFocused?: boolean;
   externalStatus?: 'connecting' | 'connected' | 'reconnecting' | 'closed';
+  /** Called when terminal receives bell character (ASCII 0x07) */
+  onBell?: () => void;
 };
 
 // PTY resize limits - must match server constants
@@ -52,12 +54,15 @@ const calculateReconnectDelay = (attempt: number): number => {
   return Math.round(baseDelay + jitter);
 };
 
-const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externalStatus }: Props) => {
+const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externalStatus, onBell }: Props) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const dataDisposable = useRef<{ dispose(): void } | null>(null);
+  const bellDisposable = useRef<{ dispose(): void } | null>(null);
+  const onBellRef = useRef(onBell);
+  onBellRef.current = onBell; // Keep ref current without triggering re-renders
   const [status, setStatus] = useState('Disconnected');
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closingRef = useRef(false);
@@ -75,6 +80,10 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
   const [reconnectCountdown, setReconnectCountdown] = useState<number | null>(null);
   const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastPongAt = useRef<number>(0); // Timestamp of last pong received
+
+  // Scroll tracking refs for viewport sync fix
+  const isUserScrolled = useRef(false); // Track if user manually scrolled up
+  const scrollToBottomPending = useRef(false); // Debounce scroll calls with rAF
 
   // Handler for when HTTP health check fails - trigger WebSocket reconnect
   const handleHealthUnhealthy = useCallback(() => {
@@ -99,10 +108,23 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
     setRetrySignal((prev) => prev + 1);
   }, []);
 
+  // Scroll to bottom helper with rAF debouncing to prevent excessive scroll calls
+  // Only scrolls if user hasn't manually scrolled up (respects user position)
+  const scrollToBottomIfNeeded = useCallback(() => {
+    if (isUserScrolled.current || scrollToBottomPending.current) return;
+
+    scrollToBottomPending.current = true;
+    requestAnimationFrame(() => {
+      termRef.current?.scrollToBottom();
+      scrollToBottomPending.current = false;
+    });
+  }, []);
+
   useEffect(() => {
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 14,
+      scrollback: 100000,  // 100K lines for large Claude outputs (default was 1000)
       theme: {
         background: '#050608',
         foreground: '#f2f4f8'
@@ -116,7 +138,29 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
       term.open(containerRef.current);
       fit.fit();
       term.focus();
+
+      // Listen for scroll events to detect when user manually scrolls up
+      // This prevents auto-scroll from overriding user's scroll position
+      const viewport = term.element?.querySelector('.xterm-viewport');
+      if (viewport) {
+        const handleScroll = () => {
+          // Check if user is at the bottom (with 10px tolerance for rounding)
+          const atBottom = viewport.scrollTop >= viewport.scrollHeight - viewport.clientHeight - 10;
+          isUserScrolled.current = !atBottom;
+        };
+        viewport.addEventListener('scroll', handleScroll);
+        // Store cleanup function for later
+        (term as unknown as { _scrollCleanup?: () => void })._scrollCleanup = () => {
+          viewport.removeEventListener('scroll', handleScroll);
+        };
+      }
     }
+
+    // Hook terminal bell event
+    bellDisposable.current = term.onBell(() => {
+      onBellRef.current?.();
+    });
+
     const resize = () => {
       fit.fit();
       notifyResize();
@@ -125,6 +169,9 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
     return () => {
       window.removeEventListener('resize', resize);
       dataDisposable.current?.dispose();
+      bellDisposable.current?.dispose();
+      // Clean up scroll listener before disposing terminal
+      (term as unknown as { _scrollCleanup?: () => void })._scrollCleanup?.();
       term.dispose();
       socketRef.current?.close();
       reconnectTimer.current && clearTimeout(reconnectTimer.current);
@@ -268,7 +315,7 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
 
     socket.onmessage = (event) => {
       const payload = event.data instanceof ArrayBuffer ? decoder.decode(event.data) : String(event.data);
-      // Filter out control messages (pong responses)
+      // Filter out control messages (pong responses, buffer info)
       if (payload.startsWith('{"type":')) {
         try {
           const msg = JSON.parse(payload);
@@ -277,6 +324,15 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
             lastPongAt.current = Date.now();
             devLog('Pong received');
             return; // Don't write pong to terminal
+          }
+          if (msg.type === 'buffer_info') {
+            // Buffer metadata from server (for future lazy-load support)
+            devLog('Buffer info received', {
+              totalWritten: msg.totalWritten,
+              availableBytes: msg.availableBytes,
+              oldestOffset: msg.oldestOffset,
+            });
+            return; // Don't write buffer_info to terminal
           }
         } catch {
           // Not valid JSON, write to terminal
@@ -322,11 +378,18 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
 
           return newCount;
         });
+
+        // Sync scroll position after write completes to fix viewport desync
+        // Uses rAF debouncing to prevent excessive scroll calls during rapid output
+        scrollToBottomIfNeeded();
       });
     };
 
     dataDisposable.current?.dispose();
     dataDisposable.current = termRef.current.onData((chunk) => {
+      // Reset scroll tracking when user types - they're likely at bottom interacting
+      isUserScrolled.current = false;
+
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(encoder.encode(chunk));
       }

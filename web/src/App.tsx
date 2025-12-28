@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
+import TabPane, { cleanupTabStorage } from "./components/TabPane";
 import TerminalView from "./components/TerminalView";
 import TabBar from "./components/TabBar";
 import StatusBar from "./components/StatusBar";
@@ -9,6 +10,7 @@ import PasswordChangeModal from "./components/PasswordChangeModal";
 import LogoutConfirmDialog from "./components/LogoutConfirmDialog";
 import AdminProjectList from "./components/AdminProjectList";
 import AdminDashboard from "./components/AdminDashboard";
+import AdminSettings from "./components/AdminSettings";
 import { useAuth } from "./contexts/AuthContext";
 import { GatewayTab, ProjectInfo, ProjectsResponse, TabEvent } from "./types";
 import { parseErrorResponse } from "./utils/errorParser";
@@ -16,7 +18,40 @@ import logo from "./assets/logo.svg";
 
 type GatewayState = "unknown" | "enabled" | "disabled";
 
-type ClientTab = GatewayTab & { wsUrl: string };
+type ClientTab = GatewayTab & {
+  wsUrl: string;
+  hasBellAlert?: boolean;
+};
+
+// Bell sound rate limiting
+let lastBellTime = 0;
+const BELL_COOLDOWN_MS = 1000; // 1 second between sounds
+
+const playBellSound = () => {
+  const now = Date.now();
+  if (now - lastBellTime < BELL_COOLDOWN_MS) {
+    return; // Rate limited
+  }
+  lastBellTime = now;
+
+  try {
+    const audioContext = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+    const oscillator = audioContext.createOscillator();
+    const gainNode = audioContext.createGain();
+
+    oscillator.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+
+    oscillator.frequency.value = 800; // Hz - pleasant tone
+    oscillator.type = 'sine';
+    gainNode.gain.value = 0.1; // Subtle volume
+
+    oscillator.start();
+    oscillator.stop(audioContext.currentTime + 0.1); // 100ms beep
+  } catch {
+    // Ignore audio errors (e.g., autoplay restrictions)
+  }
+};
 
 const App = () => {
   const { authState, user: authUser, authFetch } = useAuth();
@@ -32,6 +67,7 @@ const App = () => {
   const [logoutDialogOpen, setLogoutDialogOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
   const [dashboardOpen, setDashboardOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [eventRetry, setEventRetry] = useState(0);
   const authenticated = authState === "authenticated";
 
@@ -232,6 +268,8 @@ const App = () => {
           const errorMessage = await parseErrorResponse(res);
           throw new Error(errorMessage);
         }
+        // Clean up localStorage for view mode preferences
+        cleanupTabStorage(tabId);
         setTabs((prev) => {
           const next = prev.filter((tab) => tab.tabId !== tabId);
           setActiveTabId((current) => {
@@ -249,6 +287,28 @@ const App = () => {
     [showToast, authFetch]
   );
 
+  // Handle bell alerts from terminal
+  const handleBellAlert = useCallback((tabId: string) => {
+    // Only alert if tab is not focused
+    if (tabId !== activeTabId) {
+      setTabs(prev => prev.map(t =>
+        t.tabId === tabId
+          ? { ...t, hasBellAlert: true }
+          : t
+      ));
+      playBellSound();
+    }
+  }, [activeTabId]);
+
+  // Handle tab selection - clears bell alert
+  const handleTabSelect = useCallback((tabId: string) => {
+    setActiveTabId(tabId);
+    // Clear bell alert when tab is selected
+    setTabs(prev => prev.map(t =>
+      t.tabId === tabId ? { ...t, hasBellAlert: false } : t
+    ));
+  }, []);
+
   const showGatewayUI = authenticated && gatewayState === "enabled";
   const decoratedTabs = useMemo(
     () =>
@@ -256,7 +316,8 @@ const App = () => {
         tabId: tab.tabId,
         label: projectLabels.get(tab.projectId) || tab.projectId,
         status: tab.status,
-        metrics: tab.metrics
+        metrics: tab.metrics,
+        hasBellAlert: tab.hasBellAlert
       })),
     [tabs, projectLabels]
   );
@@ -274,6 +335,11 @@ const App = () => {
     [activeTab, projectLabels]
   );
 
+  // Helper to get project info for a tab (needed for GUI features)
+  const getProjectForTab = useCallback((projectId: string) => {
+    return projects.find(p => p.id === projectId) ?? null;
+  }, [projects]);
+
   const renderHeader = () => (
     <header className="header">
       <div className="brand">
@@ -289,6 +355,13 @@ const App = () => {
               </button>
               <button className="admin-link" onClick={() => setAdminOpen(true)}>
                 Projects
+              </button>
+              <button
+                className="admin-link settings-btn"
+                onClick={() => setSettingsOpen(true)}
+                title="Settings"
+              >
+                ⚙
               </button>
             </>
           )}
@@ -332,7 +405,7 @@ const App = () => {
           <TabBar
             tabs={decoratedTabs}
             activeTabId={activeTabId}
-            onSelect={setActiveTabId}
+            onSelect={handleTabSelect}
             onClose={handleCloseTab}
             onNew={() => setPickerOpen(true)}
             projects={projects}
@@ -354,12 +427,15 @@ const App = () => {
                   key={tab.tabId}
                   className={`terminal-pane${tab.tabId !== activeTabId ? ' hidden' : ''}`}
                 >
-                  <TerminalView
+                  <TabPane
+                    tabId={tab.tabId}
                     wsUrl={tab.wsUrl}
                     healthUrl={healthForTab(tab.tabId)}
                     isFocused={tab.tabId === activeTabId}
-                    onReconnect={handleReconnect}
+                    project={getProjectForTab(tab.projectId)}
                     externalStatus={tab.status as 'connecting' | 'connected' | 'reconnecting' | 'closed'}
+                    onReconnect={handleReconnect}
+                    onBell={() => handleBellAlert(tab.tabId)}
                   />
                 </div>
               ))
@@ -404,6 +480,9 @@ const App = () => {
       )}
       {dashboardOpen && (
         <AdminDashboard onClose={() => setDashboardOpen(false)} />
+      )}
+      {settingsOpen && (
+        <AdminSettings onClose={() => setSettingsOpen(false)} />
       )}
     </div>
   );

@@ -2,7 +2,7 @@ import { ProjectInfo, TabMetrics } from '../types';
 import MetricsIndicator from './MetricsIndicator';
 
 type TabBarProps = {
-  tabs: Array<{ tabId: string; label: string; status: string; metrics?: TabMetrics }>;
+  tabs: Array<{ tabId: string; label: string; status: string; metrics?: TabMetrics; hasBellAlert?: boolean }>;
   activeTabId: string | null;
   onSelect: (tabId: string) => void;
   onClose: (tabId: string) => void;
@@ -24,6 +24,9 @@ const TabBar = ({ tabs, activeTabId, onSelect, onClose, onNew, projects }: TabBa
               <div className="tab-header">
                 <span className="tab-label">{tab.label}</span>
                 <span className={`tab-status tab-status-${tab.status}`}></span>
+                {tab.hasBellAlert && tab.tabId !== activeTabId && (
+                  <span className="tab-bell-icon" title="Bell alert">🔔</span>
+                )}
                 <span
                   className="tab-close"
                   onClick={(event) => {

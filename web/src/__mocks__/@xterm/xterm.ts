@@ -4,6 +4,7 @@ import { vi } from 'vitest';
 export class Terminal {
   onData = vi.fn();
   onResize = vi.fn();
+  onBell = vi.fn(() => ({ dispose: vi.fn() }));
   open = vi.fn();
   write = vi.fn();
   clear = vi.fn();

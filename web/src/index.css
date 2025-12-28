@@ -562,6 +562,21 @@ button.secondary {
   background: #d9534f;
 }
 
+.tab-bell-icon {
+  font-size: 12px;
+  display: inline-block;
+  animation: bell-ring 0.6s ease-in-out infinite;
+  margin-left: 4px;
+}
+
+@keyframes bell-ring {
+  0%, 100% { transform: rotate(0deg); }
+  20% { transform: rotate(12deg); }
+  40% { transform: rotate(-12deg); }
+  60% { transform: rotate(8deg); }
+  80% { transform: rotate(-8deg); }
+}
+
 .tab-empty {
   margin: auto;
   text-align: center;
@@ -1144,10 +1159,28 @@ button.danger:hover:not(:disabled) {
 
 .admin-form-modal {
   width: 600px;
+  max-height: 90vh;
+}
+
+.admin-form-modal form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.admin-form-modal .modal-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .admin-detail-modal {
   width: 800px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
 }
 
 .admin-toolbar {
@@ -1166,7 +1199,9 @@ button.danger:hover:not(:disabled) {
 }
 
 .admin-detail-body {
-  max-height: 600px;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .primary-button {
@@ -1284,6 +1319,49 @@ button.danger:hover:not(:disabled) {
 .admin-table .link-button.danger {
   background: none;
   color: #ef4444;
+}
+
+/* Quick Upgrade Button */
+.admin-table .icon-button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.25rem 0.4rem;
+  border-radius: 4px;
+  font-size: 1rem;
+  transition: all 0.2s;
+}
+
+.admin-table .icon-button.upgrade-available {
+  color: #f59e0b;
+}
+
+.admin-table .icon-button.upgrade-available:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.15);
+  color: #d97706;
+}
+
+.admin-table .icon-button.upgrade-current {
+  color: #10b981;
+  cursor: default;
+}
+
+.admin-table .icon-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Version Column */
+.version-outdated {
+  color: #f59e0b;
+  font-family: monospace;
+  font-size: 0.85rem;
+}
+
+.version-current {
+  color: #10b981;
+  font-family: monospace;
+  font-size: 0.85rem;
 }
 
 /* Status Badge */
@@ -1881,6 +1959,24 @@ button.danger:hover:not(:disabled) {
   margin-top: 0.5rem;
   color: #8b8d98;
   font-size: 0.85rem;
+}
+
+.form-group.checkbox-group label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.form-group.checkbox-group input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #3b82f6;
+}
+
+.form-group.checkbox-group .form-help {
+  margin-left: 26px;
 }
 
 /* Secrets Modal */

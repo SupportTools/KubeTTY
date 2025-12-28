@@ -154,6 +154,22 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            {{- if .Values.ptyLogging.enabled }}
+            - name: PTY_FILE_LOG_ENABLED
+              value: "true"
+            - name: PTY_FILE_LOG_PATH
+              value: "/var/log/kubetty/pty-session.jsonl"
+            - name: PTY_FILE_LOG_MAX_SIZE
+              value: {{ .Values.ptyLogging.maxSize | quote }}
+            - name: PTY_FILE_LOG_MAX_BACKUPS
+              value: {{ .Values.ptyLogging.maxBackups | quote }}
+            - name: PTY_FILE_LOG_BUFFER_SIZE
+              value: {{ .Values.ptyLogging.bufferSize | quote }}
+            - name: PTY_FILE_LOG_FLUSH_INTERVAL
+              value: {{ .Values.ptyLogging.flushInterval | quote }}
+            - name: PTY_FILE_LOG_INCLUDE_RAW
+              value: {{ .Values.ptyLogging.includeRaw | quote }}
+            {{- end }}
           envFrom:
             - secretRef:
                 name: env-secrets
@@ -162,6 +178,9 @@ spec:
             - name: http
               containerPort: {{ .Values.service.port }}
           volumeMounts:
+            # Shared memory for browser automation (Playwright/Puppeteer)
+            - name: dshm
+              mountPath: /dev/shm
             {{- if .Values.pipelines.dind.enabled }}
             - name: dind-sock
               mountPath: /var/run/docker
@@ -174,9 +193,39 @@ spec:
               subPath: {{ $subPathName }}
             {{- end }}
             {{- end }}
+            {{- if .Values.ptyLogging.enabled }}
+            - name: pty-logs
+              mountPath: /var/log/kubetty
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+        {{- if .Values.ptyLogging.enabled }}
+        # PTY log tailer sidecar - streams JSONL logs to stdout for Promtail
+        - name: log-tailer
+          image: busybox:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Wait for log file to exist (kubetty may take a moment to start)
+              while [ ! -f /var/log/kubetty/pty-session.jsonl ]; do
+                sleep 1
+              done
+              # Tail the log file forever (capital -F follows by filename for rotation)
+              exec tail -F /var/log/kubetty/pty-session.jsonl
+          volumeMounts:
+            - name: pty-logs
+              mountPath: /var/log/kubetty
+              readOnly: true
+          resources:
+            {{- toYaml .Values.ptyLogging.sidecar.resources | nindent 12 }}
+        {{- end }}
       volumes:
+        # Shared memory volume for browser automation (Playwright/Puppeteer)
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.browser.shmSize | default "2Gi" }}
         {{- if .Values.dataPVC.enabled }}
         - name: data
           persistentVolumeClaim:
@@ -184,5 +233,10 @@ spec:
         {{- end }}
         {{- if .Values.pipelines.dind.enabled }}
         - name: dind-sock
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.ptyLogging.enabled }}
+        # emptyDir volume for PTY session logs (shared with log-tailer sidecar)
+        - name: pty-logs
           emptyDir: {}
         {{- end }}

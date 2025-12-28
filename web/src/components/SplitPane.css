@@ -1,0 +1,122 @@
+/* SplitPane - Resizable split view component */
+
+.split-pane {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+.split-pane--horizontal {
+  flex-direction: row;
+}
+
+.split-pane--vertical {
+  flex-direction: column;
+}
+
+.split-pane--dragging {
+  /* Prevent iframe/canvas from capturing mouse events during drag */
+  pointer-events: none;
+}
+
+.split-pane--dragging > * {
+  pointer-events: auto;
+}
+
+/* Panes */
+.split-pane__first,
+.split-pane__second {
+  overflow: hidden;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.split-pane__first {
+  flex-shrink: 0;
+}
+
+.split-pane__second {
+  flex: 1;
+}
+
+/* Divider */
+.split-pane__divider {
+  flex-shrink: 0;
+  position: relative;
+  background-color: #1a1d24;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  transition: background-color 0.15s ease;
+}
+
+.split-pane__divider:hover,
+.split-pane__divider:focus {
+  background-color: #252932;
+  outline: none;
+}
+
+.split-pane__divider:focus-visible {
+  box-shadow: 0 0 0 2px #3b82f6;
+}
+
+.split-pane__divider--horizontal {
+  width: 6px;
+  cursor: col-resize;
+}
+
+.split-pane__divider--vertical {
+  height: 6px;
+  cursor: row-resize;
+}
+
+/* Divider handle (visual indicator) */
+.split-pane__divider-handle {
+  background-color: #4a5568;
+  border-radius: 2px;
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.split-pane__divider--horizontal .split-pane__divider-handle {
+  width: 2px;
+  height: 32px;
+}
+
+.split-pane__divider--vertical .split-pane__divider-handle {
+  width: 32px;
+  height: 2px;
+}
+
+.split-pane__divider:hover .split-pane__divider-handle,
+.split-pane__divider:focus .split-pane__divider-handle {
+  background-color: #718096;
+}
+
+.split-pane--dragging .split-pane__divider-handle {
+  background-color: #3b82f6;
+  transform: scale(1.2);
+}
+
+/* Extend hit area for easier grabbing */
+.split-pane__divider::before {
+  content: '';
+  position: absolute;
+}
+
+.split-pane__divider--horizontal::before {
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+}
+
+.split-pane__divider--vertical::before {
+  left: 0;
+  right: 0;
+  top: -4px;
+  bottom: -4px;
+}

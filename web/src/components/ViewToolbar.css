@@ -1,0 +1,77 @@
+/* ViewToolbar - View mode toggle component */
+
+.view-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background-color: #0f1115;
+  border-radius: 6px;
+}
+
+.view-toolbar__group {
+  display: flex;
+  gap: 2px;
+}
+
+.view-toolbar__button {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background-color: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #9ca3af;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.view-toolbar__button:hover {
+  background-color: #1a1d24;
+  color: #e5e7eb;
+}
+
+.view-toolbar__button:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px #3b82f6;
+}
+
+.view-toolbar__button--active {
+  background-color: #1e40af;
+  border-color: #3b82f6;
+  color: #ffffff;
+}
+
+.view-toolbar__button--active:hover {
+  background-color: #1d4ed8;
+}
+
+.view-toolbar__icon {
+  font-family: monospace;
+  font-weight: bold;
+  font-size: 11px;
+  min-width: 16px;
+  text-align: center;
+}
+
+.view-toolbar__label {
+  font-weight: 500;
+}
+
+/* Compact mode for smaller screens */
+@media (max-width: 768px) {
+  .view-toolbar__label {
+    display: none;
+  }
+
+  .view-toolbar__button {
+    padding: 6px;
+  }
+
+  .view-toolbar__icon {
+    font-size: 12px;
+  }
+}

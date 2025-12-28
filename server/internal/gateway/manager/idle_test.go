@@ -147,6 +147,36 @@ func (m *mockTabStore) GetRecentErrors(ctx context.Context, limit int) ([]tabs.T
 	return result, nil
 }
 
+func (m *mockTabStore) UpdatePositions(ctx context.Context, clientID string, tabIDs []string) error {
+	return nil
+}
+
+func (m *mockTabStore) GetNextPosition(ctx context.Context, clientID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	maxPos := -1
+	for _, tab := range m.tabs {
+		if tab.ClientID == clientID && tab.Position > maxPos {
+			maxPos = tab.Position
+		}
+	}
+	return maxPos + 1, nil
+}
+
+func (m *mockTabStore) CleanOrphanedTabs(ctx context.Context, maxAge time.Duration) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	var deleted int64
+	for tabID, tab := range m.tabs {
+		if tab.UpdatedAt.Before(cutoff) && (tab.Status == tabs.StatusClosed || tab.Status == tabs.StatusReconnecting) {
+			delete(m.tabs, tabID)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 func TestManager_IdleTimeout_MinimumValidation(t *testing.T) {
 	catalog := gatewayconfig.Catalog{
 		Projects: []gatewayconfig.Project{

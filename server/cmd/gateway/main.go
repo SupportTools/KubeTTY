@@ -43,15 +43,14 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/leaderelection"
 	"github.com/supporttools/KubeTTY/server/internal/projects"
 	"github.com/supporttools/KubeTTY/server/internal/sessions"
+	"github.com/supporttools/KubeTTY/server/internal/settings"
 	apierrors "github.com/supporttools/KubeTTY/server/internal/shared/errors"
 	"github.com/supporttools/KubeTTY/server/internal/shared/health"
 	"github.com/supporttools/KubeTTY/server/internal/shared/metrics"
 	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
+	"github.com/supporttools/KubeTTY/server/migrations"
 )
-
-//go:embed migrations/*.sql
-var migrationsFS embed.FS
 
 //go:embed ui/dist ui/dist/*
 var embeddedUI embed.FS
@@ -179,6 +178,10 @@ func main() {
 	defer tabPool.Close()
 
 	tabStore := tabs.NewPGXStore(tabPool)
+
+	// Initialize settings store (reuses tab pool)
+	settingsStore := settings.NewStoreFromPool(tabPool)
+
 	tabManager := manager.NewWithConfig(cfg.ProjectCatalog, tabStore, manager.ManagerConfig{
 		IdleTimeout:     cfg.TabIdleTimeout,
 		MetricsEnabled:  cfg.MetricsEnabled,
@@ -203,6 +206,7 @@ func main() {
 			EnvSecretName:       cfg.Controller.EnvSecretName,
 			ResourceConfig: controller.ResourceConfig{
 				Namespace:        cfg.Controller.ProjectsNamespace,
+				GatewayNamespace: cfg.Controller.GatewayNamespace,
 				Prefix:           cfg.Controller.ResourcePrefix,
 				Env:              cfg.Controller.ParseEnvironment(),
 				ImagePullSecrets: cfg.Controller.ImagePullSecrets,
@@ -264,7 +268,9 @@ func main() {
 					}
 
 					log.WithFields(log.Fields{
-						"project": p.Name,
+						"project":     p.Name,
+						"gui_enabled": p.GUIEnabled,
+						"gui_port":    p.GUIVNCPort,
 					}).Info("gateway/main: controller callback - registering project with tabManager")
 					tabManager.RegisterProject(gatewayconfig.Project{
 						ID:          p.Name,
@@ -280,6 +286,8 @@ func main() {
 							CPUMillicores:    cpuMillicores,
 							MemoryBytes:      memoryBytes,
 						},
+						GUIEnabled: p.GUIEnabled,
+						GUIVNCPort: p.GUIVNCPort,
 					})
 				} else if status == projects.StatusDeleting || status == projects.StatusDeleted {
 					log.WithFields(log.Fields{
@@ -410,6 +418,8 @@ func main() {
 						CPUMillicores:    cpuMillicores,
 						MemoryBytes:      memoryBytes,
 					},
+					GUIEnabled: p.GUIEnabled,
+					GUIVNCPort: p.GUIVNCPort,
 				})
 			}
 			log.WithFields(log.Fields{
@@ -495,6 +505,8 @@ func main() {
 		adminHandlers.SetDeleteCallback(func(projectName string) {
 			tabManager.UnregisterProject(projectName)
 		})
+		// Wire settings store for applying defaults to new projects
+		adminHandlers.SetSettingsStore(settingsStore)
 		if srv.authEnabled() {
 			mux.Handle("GET /api/admin/projects", requireAuth(http.HandlerFunc(adminHandlers.ListProjects)))
 			mux.Handle("POST /api/admin/projects", requireAuth(http.HandlerFunc(adminHandlers.CreateProject)))
@@ -503,6 +515,8 @@ func main() {
 			mux.Handle("DELETE /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.DeleteProject)))
 			mux.Handle("POST /api/admin/projects/{id}/restart", requireAuth(http.HandlerFunc(adminHandlers.RestartProject)))
 			mux.Handle("POST /api/admin/projects/{id}/resync", requireAuth(http.HandlerFunc(adminHandlers.ResyncProject)))
+			mux.Handle("POST /api/admin/projects/{id}/pause", requireAuth(http.HandlerFunc(adminHandlers.PauseProject)))
+			mux.Handle("POST /api/admin/projects/{id}/unpause", requireAuth(http.HandlerFunc(adminHandlers.UnpauseProject)))
 			mux.Handle("GET /api/admin/projects/{id}/status", requireAuth(http.HandlerFunc(adminHandlers.GetProjectStatus)))
 			mux.Handle("GET /api/admin/projects/{id}/upgrade-info", requireAuth(http.HandlerFunc(adminHandlers.GetUpgradeInfo)))
 			mux.Handle("POST /api/admin/projects/{id}/upgrade", requireAuth(http.HandlerFunc(adminHandlers.UpgradeProject)))
@@ -516,6 +530,8 @@ func main() {
 			mux.HandleFunc("DELETE /api/admin/projects/{id}", adminHandlers.DeleteProject)
 			mux.HandleFunc("POST /api/admin/projects/{id}/restart", adminHandlers.RestartProject)
 			mux.HandleFunc("POST /api/admin/projects/{id}/resync", adminHandlers.ResyncProject)
+			mux.HandleFunc("POST /api/admin/projects/{id}/pause", adminHandlers.PauseProject)
+			mux.HandleFunc("POST /api/admin/projects/{id}/unpause", adminHandlers.UnpauseProject)
 			mux.HandleFunc("GET /api/admin/projects/{id}/status", adminHandlers.GetProjectStatus)
 			mux.HandleFunc("GET /api/admin/projects/{id}/upgrade-info", adminHandlers.GetUpgradeInfo)
 			mux.HandleFunc("POST /api/admin/projects/{id}/upgrade", adminHandlers.UpgradeProject)
@@ -538,6 +554,30 @@ func main() {
 		mux.HandleFunc("GET /api/admin/dashboard/usage", dashboardHandlers.GetUsage)
 	}
 
+	// Settings API handlers
+	settingsHandlers := handlers_admin.NewSettingsHandlers(settingsStore)
+	if srv.authEnabled() {
+		mux.Handle("GET /api/admin/settings", requireAuth(http.HandlerFunc(settingsHandlers.ListSettings)))
+		mux.Handle("GET /api/admin/settings/categories", requireAuth(http.HandlerFunc(settingsHandlers.GetCategories)))
+		mux.Handle("GET /api/admin/settings/history", requireAuth(http.HandlerFunc(settingsHandlers.GetAllHistory)))
+		mux.Handle("GET /api/admin/settings/{category}", requireAuth(http.HandlerFunc(settingsHandlers.ListByCategory)))
+		mux.Handle("GET /api/admin/settings/{category}/{key}", requireAuth(http.HandlerFunc(settingsHandlers.GetSetting)))
+		mux.Handle("PUT /api/admin/settings/{category}/{key}", requireAuth(http.HandlerFunc(settingsHandlers.UpdateSetting)))
+		mux.Handle("POST /api/admin/settings", requireAuth(http.HandlerFunc(settingsHandlers.CreateSetting)))
+		mux.Handle("DELETE /api/admin/settings/{category}/{key}", requireAuth(http.HandlerFunc(settingsHandlers.DeleteSetting)))
+		mux.Handle("GET /api/admin/settings/{category}/{key}/history", requireAuth(http.HandlerFunc(settingsHandlers.GetSettingHistory)))
+	} else {
+		mux.HandleFunc("GET /api/admin/settings", settingsHandlers.ListSettings)
+		mux.HandleFunc("GET /api/admin/settings/categories", settingsHandlers.GetCategories)
+		mux.HandleFunc("GET /api/admin/settings/history", settingsHandlers.GetAllHistory)
+		mux.HandleFunc("GET /api/admin/settings/{category}", settingsHandlers.ListByCategory)
+		mux.HandleFunc("GET /api/admin/settings/{category}/{key}", settingsHandlers.GetSetting)
+		mux.HandleFunc("PUT /api/admin/settings/{category}/{key}", settingsHandlers.UpdateSetting)
+		mux.HandleFunc("POST /api/admin/settings", settingsHandlers.CreateSetting)
+		mux.HandleFunc("DELETE /api/admin/settings/{category}/{key}", settingsHandlers.DeleteSetting)
+		mux.HandleFunc("GET /api/admin/settings/{category}/{key}/history", settingsHandlers.GetSettingHistory)
+	}
+
 	if srv.authEnabled() {
 		// Auth handlers (extracted)
 		mux.Handle("/api/auth/login", handlers_auth.NewAuthLoginHandler(srv.cfg, srv.authMgr, srv.authStore))
@@ -549,34 +589,26 @@ func main() {
 		// Session handlers (extracted)
 		mux.Handle("/session/logs", requireAuth(handlers_session.NewSessionLogsHandler(srv.store, srv)))
 
-		// Gateway WebSocket (not yet extracted)
+		// Gateway WebSocket endpoints (terminal and VNC)
 		mux.Handle("/ws", requireAuth(http.HandlerFunc(srv.handleGatewayWebsocket)))
-		mux.Handle("/api/projects", requireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if srv.tabManager == nil {
-				apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
-				return
-			}
-			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjectsWithStatus()})
-		})))
+		mux.Handle("/vnc", requireAuth(http.HandlerFunc(srv.handleVNCWebsocket)))
+		mux.Handle("/api/projects", requireAuth(http.HandlerFunc(srv.handleListProjects)))
 		mux.Handle("/api/tabs", requireAuth(http.HandlerFunc(srv.handleTabs)))
-		mux.Handle("/api/tabs/", requireAuth(http.HandlerFunc(srv.routeTabByID)))
+		mux.Handle("/api/tabs/reorder", requireAuth(http.HandlerFunc(srv.handleTabsReorder)))
 		mux.Handle("/api/tabs/events", requireAuth(http.HandlerFunc(srv.handleTabEvents)))
+		mux.Handle("/api/tabs/", requireAuth(http.HandlerFunc(srv.routeTabByID)))
 	} else {
 		// Session handlers (extracted) - no auth
 		mux.Handle("/session/logs", srv.appMetrics.InstrumentHandler("session_logs", handlers_session.NewSessionLogsHandler(srv.store, srv)))
 
-		// Gateway WebSocket (not yet extracted)
+		// Gateway WebSocket endpoints (terminal and VNC)
 		mux.Handle("/ws", srv.appMetrics.InstrumentHandler("ws", http.HandlerFunc(srv.handleGatewayWebsocket)))
-		mux.Handle("/api/projects", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if srv.tabManager == nil {
-				apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
-				return
-			}
-			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": srv.tabManager.ListProjectsWithStatus()})
-		}))
+		mux.Handle("/vnc", srv.appMetrics.InstrumentHandler("vnc", http.HandlerFunc(srv.handleVNCWebsocket)))
+		mux.Handle("/api/projects", http.HandlerFunc(srv.handleListProjects))
 		mux.Handle("/api/tabs", http.HandlerFunc(srv.handleTabs))
-		mux.Handle("/api/tabs/", http.HandlerFunc(srv.routeTabByID))
+		mux.Handle("/api/tabs/reorder", http.HandlerFunc(srv.handleTabsReorder))
 		mux.Handle("/api/tabs/events", http.HandlerFunc(srv.handleTabEvents))
+		mux.Handle("/api/tabs/", http.HandlerFunc(srv.routeTabByID))
 	}
 	// Static files are always public (React handles auth state)
 	mux.Handle("/", srv.appMetrics.InstrumentHandler("static", srv.staticHandler()))
@@ -722,6 +754,76 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// handleVNCWebsocket handles WebSocket connections for VNC/GUI tabs.
+// It validates the tab exists, is a VNC tab, and then proxies the connection.
+func (s *server) handleVNCWebsocket(w http.ResponseWriter, r *http.Request) {
+	if s.tabManager == nil {
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
+		return
+	}
+
+	tabID := r.URL.Query().Get("tab")
+	if tabID == "" {
+		apierrors.WriteError(w, apierrors.BadRequest("missing tab parameter", ""))
+		return
+	}
+
+	forceTakeover := r.URL.Query().Get("force") == "true"
+	clientID := s.ensureClientID(w, r)
+	remoteAddr := r.RemoteAddr
+
+	log.WithFields(log.Fields{
+		"tab_id":      tabID,
+		"remote_addr": remoteAddr,
+		"client_id":   clientID,
+		"force":       forceTakeover,
+	}).Debug("gateway/main: VNC WebSocket connection attempt")
+
+	// Validate the tab has VNC support (GUI-enabled project)
+	if !s.tabManager.HasVNCSupport(tabID) {
+		log.WithFields(log.Fields{
+			"tab_id":    tabID,
+			"client_id": clientID,
+		}).Warn("gateway/main: VNC WebSocket request for tab without VNC support")
+		apierrors.WriteError(w, apierrors.BadRequest("tab does not have VNC support (project GUI not enabled)", ""))
+		return
+	}
+
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"tab_id": tabID,
+			"error":  err.Error(),
+		}).Error("gateway/main: VNC WebSocket upgrade failed")
+		apierrors.WriteError(w, apierrors.InternalServerError("WebSocket upgrade failed", ""))
+		return
+	}
+	defer func() {
+		conn.Close()
+		log.WithFields(log.Fields{
+			"tab_id":    tabID,
+			"client_id": clientID,
+		}).Debug("gateway/main: VNC WebSocket connection closed")
+	}()
+
+	log.WithFields(log.Fields{
+		"tab_id":    tabID,
+		"client_id": clientID,
+	}).Info("gateway/main: VNC WebSocket connection established")
+
+	// Use shutdown context after WebSocket upgrade - the original request context
+	// is no longer valid after hijacking and can cause "invalid Body.Read" panics.
+	// VNCRelay.Proxy handles the bidirectional WebSocket<->TCP streaming.
+	if err := s.tabManager.AttachVNC(s.shutdownCtx, tabID, clientID, conn, forceTakeover); err != nil {
+		log.WithFields(log.Fields{
+			"tab_id": tabID,
+			"error":  err.Error(),
+		}).Error("gateway/main: VNC attach failed")
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()), time.Now().Add(time.Second))
+		return
+	}
+}
+
 func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 	if s.tabManager == nil || s.tabStore == nil {
 		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
@@ -743,6 +845,7 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req struct {
 			ProjectID string `json:"projectId"`
+			GUIMode   bool   `json:"guiMode"` // If true, create a VNC/GUI tab instead of terminal
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			apierrors.WriteError(w, apierrors.BadRequest("invalid request body", ""))
@@ -752,7 +855,21 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 			apierrors.WriteError(w, apierrors.BadRequest("projectId is required", ""))
 			return
 		}
-		tab, err := s.tabManager.CreateTab(r.Context(), req.ProjectID, clientID)
+
+		var tab tabs.Tab
+		var err error
+		var wsPath string
+
+		if req.GUIMode {
+			// Create VNC/GUI tab
+			tab, err = s.tabManager.CreateVNCTab(r.Context(), req.ProjectID, clientID)
+			wsPath = "/vnc" // VNC tabs use the /vnc endpoint
+		} else {
+			// Create terminal tab
+			tab, err = s.tabManager.CreateTab(r.Context(), req.ProjectID, clientID)
+			wsPath = "/ws" // Terminal tabs use the /ws endpoint
+		}
+
 		if err != nil {
 			// Check if error is due to tab limit exceeded
 			var limitErr *manager.TabLimitExceededError
@@ -763,17 +880,24 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 				))
 				return
 			}
+			// Check if error is due to GUI not enabled
+			if strings.Contains(err.Error(), "does not have GUI support enabled") {
+				apierrors.WriteError(w, apierrors.BadRequest("GUI mode not enabled for this project", ""))
+				return
+			}
 			log.WithFields(log.Fields{
 				"client_id":  clientID,
 				"project_id": req.ProjectID,
+				"gui_mode":   req.GUIMode,
 				"error":      err.Error(),
 			}).Error("gateway/main: failed to create tab")
 			apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
 			return
 		}
 		resp := map[string]any{
-			"tab":   tab,
-			"wsUrl": fmt.Sprintf("%s://%s/ws?tab=%s", util.WebSocketScheme(r), r.Host, tab.TabID),
+			"tab":     tab,
+			"wsUrl":   fmt.Sprintf("%s://%s%s?tab=%s", util.WebSocketScheme(r), r.Host, wsPath, tab.TabID),
+			"guiMode": req.GUIMode,
 		}
 		_ = util.WriteJSON(w, http.StatusCreated, resp)
 		s.broadcastTabSnapshot(clientID)
@@ -784,6 +908,59 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 			Message: "method not allowed",
 		})
 	}
+}
+
+// handleTabsReorder handles PUT /api/tabs/reorder to change tab positions.
+func (s *server) handleTabsReorder(w http.ResponseWriter, r *http.Request) {
+	if s.tabManager == nil {
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
+		return
+	}
+	if r.Method != http.MethodPut {
+		apierrors.WriteError(w, apierrors.ErrorResponse{
+			Status:  http.StatusMethodNotAllowed,
+			Error:   "method_not_allowed",
+			Message: "method not allowed",
+		})
+		return
+	}
+
+	clientID := s.ensureClientID(w, r)
+
+	var req struct {
+		TabIDs []string `json:"tabIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		apierrors.WriteError(w, apierrors.BadRequest("invalid request body", ""))
+		return
+	}
+	if len(req.TabIDs) == 0 {
+		apierrors.WriteError(w, apierrors.BadRequest("tabIds is required", ""))
+		return
+	}
+
+	if err := s.tabManager.ReorderTabs(r.Context(), clientID, req.TabIDs); err != nil {
+		log.WithFields(log.Fields{
+			"client_id": clientID,
+			"error":     err.Error(),
+		}).Error("gateway/main: failed to reorder tabs")
+		apierrors.WriteError(w, apierrors.InternalServerError("failed to reorder tabs", ""))
+		return
+	}
+
+	// Return updated tabs list
+	items, err := s.tabStore.ListByClient(r.Context(), clientID, 50)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"client_id": clientID,
+			"error":     err.Error(),
+		}).Error("gateway/main: failed to list tabs after reorder")
+		apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
+		return
+	}
+
+	_ = util.WriteJSON(w, http.StatusOK, map[string]any{"tabs": items})
+	s.broadcastTabSnapshot(clientID)
 }
 
 // routeTabByID dispatches tab-specific requests to the appropriate handler
@@ -1183,6 +1360,176 @@ func (s *server) observeStore(op string, start time.Time, err error) {
 	s.appMetrics.ObserveStore(op, time.Since(start), err)
 }
 
+// ProjectResponse represents a project in the /api/projects response.
+// It includes both lifecycle status (from DB) and health status (from tabManager).
+type ProjectResponse struct {
+	ID              string                      `json:"id"`
+	DisplayName     string                      `json:"displayName"`
+	Namespace       string                      `json:"namespace"`
+	Service         string                      `json:"service"`
+	Port            int                         `json:"port"`
+	Description     string                      `json:"description"`
+	Icon            string                      `json:"icon"`
+	Tags            []string                    `json:"tags"`
+	Limits          gatewayconfig.ProjectLimits `json:"limits"`
+	LifecycleStatus string                      `json:"lifecycleStatus"` // pending, syncing, running, failed, etc.
+	Paused          bool                        `json:"paused"`
+	HealthStatus    string                      `json:"status,omitempty"` // online, offline, degraded, unknown (only for running)
+	LastCheckedAt   *time.Time                  `json:"lastCheckedAt,omitempty"`
+
+	// GUI/VNC desktop support
+	GUIEnabled bool `json:"guiEnabled"`           // Whether GUI mode is enabled for this project
+	GUIVNCPort int  `json:"guiVNCPort,omitempty"` // VNC port (default: 5901)
+}
+
+// handleListProjects returns all projects from the database with their lifecycle status.
+// For running projects, it also includes health status from the tabManager.
+func (s *server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	log.Debug("gateway/main: handleListProjects called")
+
+	// Check if projectStore is available
+	if s.projectStore == nil {
+		log.Debug("gateway/main: projectStore is nil, checking tabManager fallback")
+		// Fall back to tabManager-only projects if no project store
+		if s.tabManager != nil {
+			tabProjects := s.tabManager.ListProjectsWithStatus()
+			log.WithFields(log.Fields{
+				"count": len(tabProjects),
+			}).Debug("gateway/main: returning projects from tabManager (no projectStore)")
+			_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": tabProjects})
+			return
+		}
+		log.Warn("gateway/main: both projectStore and tabManager are nil")
+		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
+		return
+	}
+
+	log.Trace("gateway/main: fetching projects from database")
+
+	// Get all non-deleted projects from database
+	dbProjects, err := s.projectStore.List(r.Context(), projects.ListFilter{})
+	if err != nil {
+		log.WithError(err).Error("gateway/main: failed to list projects from database")
+		apierrors.WriteError(w, apierrors.InternalServerError("failed to list projects", ""))
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"db_project_count": len(dbProjects),
+	}).Debug("gateway/main: fetched projects from database")
+
+	// Log each project from database for trace level
+	for _, p := range dbProjects {
+		log.WithFields(log.Fields{
+			"project_name":     p.Name,
+			"display_name":     p.DisplayName,
+			"status":           p.Status,
+			"paused":           p.Paused,
+			"target_namespace": p.TargetNamespace,
+			"service_name":     p.ServiceName,
+		}).Trace("gateway/main: database project details")
+	}
+
+	// Get health statuses from tabManager for running projects
+	var healthStatuses map[string]manager.ProjectWithStatus
+	if s.tabManager != nil {
+		statusList := s.tabManager.ListProjectsWithStatus()
+		log.WithFields(log.Fields{
+			"tabmanager_project_count": len(statusList),
+		}).Debug("gateway/main: fetched projects from tabManager")
+
+		healthStatuses = make(map[string]manager.ProjectWithStatus, len(statusList))
+		for _, ps := range statusList {
+			healthStatuses[ps.ID] = ps
+			log.WithFields(log.Fields{
+				"project_id":    ps.ID,
+				"health_status": ps.Status,
+			}).Trace("gateway/main: tabManager project health status")
+		}
+	} else {
+		log.Debug("gateway/main: tabManager is nil, no health statuses available")
+	}
+
+	// Build response combining DB data and health status
+	result := make([]ProjectResponse, 0, len(dbProjects))
+	for _, p := range dbProjects {
+		serviceName := p.ServiceName
+		if serviceName == "" {
+			serviceName = projects.ComputeServiceName(p.Name)
+			log.WithFields(log.Fields{
+				"project":               p.Name,
+				"computed_service_name": serviceName,
+			}).Trace("gateway/main: computed service name for project")
+		}
+
+		resp := ProjectResponse{
+			ID:              p.Name,
+			DisplayName:     p.DisplayName,
+			Namespace:       p.TargetNamespace,
+			Service:         serviceName,
+			Port:            8080,
+			Description:     p.Description,
+			Icon:            p.Icon,
+			LifecycleStatus: string(p.Status),
+			Paused:          p.Paused,
+		}
+
+		// Parse limits
+		if p.CPULimit != "" {
+			if qty, err := resource.ParseQuantity(p.CPULimit); err == nil {
+				resp.Limits.CPUMillicores = qty.MilliValue()
+			} else {
+				log.WithFields(log.Fields{
+					"project":   p.Name,
+					"cpu_limit": p.CPULimit,
+					"error":     err.Error(),
+				}).Warn("gateway/main: failed to parse CPU limit")
+			}
+		}
+		if p.MemoryLimit != "" {
+			if qty, err := resource.ParseQuantity(p.MemoryLimit); err == nil {
+				resp.Limits.MemoryBytes = qty.Value()
+			} else {
+				log.WithFields(log.Fields{
+					"project":      p.Name,
+					"memory_limit": p.MemoryLimit,
+					"error":        err.Error(),
+				}).Warn("gateway/main: failed to parse memory limit")
+			}
+		}
+		resp.Limits.MaxTabsPerClient = p.MaxTabsPerClient
+		resp.Limits.MaxTabsTotal = p.MaxTabsTotal
+
+		// Add GUI fields
+		resp.GUIEnabled = p.GUIEnabled
+		resp.GUIVNCPort = p.GUIVNCPort
+
+		// Add health status if project is running and registered with tabManager
+		if hs, ok := healthStatuses[p.Name]; ok {
+			resp.HealthStatus = hs.Status
+			resp.LastCheckedAt = hs.LastCheckedAt
+			log.WithFields(log.Fields{
+				"project":       p.Name,
+				"health_status": hs.Status,
+			}).Trace("gateway/main: added health status from tabManager")
+		} else {
+			log.WithFields(log.Fields{
+				"project":          p.Name,
+				"lifecycle_status": p.Status,
+				"paused":           p.Paused,
+			}).Trace("gateway/main: project not in tabManager (not running or not registered)")
+		}
+
+		result = append(result, resp)
+	}
+
+	log.WithFields(log.Fields{
+		"total_projects": len(result),
+	}).Debug("gateway/main: returning project list")
+
+	_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": result})
+}
+
 func cloneURL(u *url.URL) *url.URL {
 	if u == nil {
 		return &url.URL{Path: "/"}
@@ -1192,7 +1539,7 @@ func cloneURL(u *url.URL) *url.URL {
 }
 
 func runMigrations(ctx context.Context, connString string) error {
-	source, err := iofs.New(migrationsFS, "migrations")
+	source, err := iofs.New(migrations.FS, ".")
 	if err != nil {
 		return fmt.Errorf("migrations source: %w", err)
 	}

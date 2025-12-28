@@ -229,6 +229,7 @@ func (c *Controller) runHealthCheckLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			c.checkAllHealth(ctx)
+			c.healFailedProjects(ctx)
 		}
 	}
 }
@@ -345,6 +346,16 @@ func (c *Controller) handlePending(ctx context.Context, p *projects.Project) err
 				logger.WithError(statusErr).Error("Failed to update project status to failed")
 			}
 			return fmt.Errorf("failed to create Service: %w", err)
+		}
+	}
+
+	// Create NetworkPolicy if gateway namespace is configured
+	if cfg.GatewayNamespace != "" {
+		netPol := BuildNetworkPolicy(p, cfg, cfg.GatewayNamespace)
+		if _, err := c.clientset.NetworkingV1().NetworkPolicies(cfg.Namespace).Create(ctx, netPol, metav1.CreateOptions{}); err != nil {
+			if !errors.IsAlreadyExists(err) {
+				logger.WithError(err).Warn("Failed to create NetworkPolicy")
+			}
 		}
 	}
 
@@ -513,6 +524,20 @@ func (c *Controller) handleUpdating(ctx context.Context, p *projects.Project) er
 		// Don't fail the entire update - PVC expansion may not be supported by storage class
 	}
 
+	// Update Service to ensure ports are correct (e.g., VNC port when GUI enabled)
+	if err := c.updateServiceIfNeeded(ctx, p, cfg, resourceName); err != nil {
+		logger.WithError(err).Warn("Failed to update Service")
+		// Don't fail the entire update - service update is best-effort
+	}
+
+	// Update NetworkPolicy to ensure ingress rules are correct (e.g., VNC port when GUI enabled)
+	if cfg.GatewayNamespace != "" {
+		if err := c.updateNetworkPolicyIfNeeded(ctx, p, cfg); err != nil {
+			logger.WithError(err).Warn("Failed to update NetworkPolicy")
+			// Don't fail the entire update - network policy update is best-effort
+		}
+	}
+
 	// Update the deployment spec (use per-project secret name)
 	envSecretName := cfg.EnvSecretName(p.Name)
 	deploy := BuildDeployment(p, cfg, envSecretName)
@@ -667,6 +692,13 @@ func (c *Controller) checkAllHealth(ctx context.Context) {
 
 func (c *Controller) checkProjectHealth(ctx context.Context, p *projects.Project) {
 	logger := log.WithField("project", p.Name)
+
+	// Skip health check for paused projects - 0 replicas is expected
+	if p.Paused {
+		logger.Debug("Skipping health check for paused project")
+		return
+	}
+
 	cfg := c.cfg.ResourceConfig
 	resourceName := cfg.ResourceName(p.Name)
 
@@ -719,6 +751,110 @@ func (c *Controller) checkProjectHealth(ctx context.Context, p *projects.Project
 	if err := c.store.UpdateHealthCheck(ctx, p.ID, podIP); err != nil {
 		logger.WithError(err).Warn("Failed to update health check")
 	}
+}
+
+// healFailedProjects checks projects marked as 'failed' and recovers them if their
+// Kubernetes deployment has become healthy. This handles cases where:
+// - A pod crashed and was auto-restarted by Kubernetes
+// - Network issues caused temporary health check failures
+// - Manual intervention fixed the underlying issue
+func (c *Controller) healFailedProjects(ctx context.Context) {
+	// Get all failed projects
+	projectList, err := c.store.ListByStatuses(ctx, []projects.ProjectStatus{projects.StatusFailed})
+	if err != nil {
+		log.WithError(err).Error("Failed to list failed projects for healing")
+		return
+	}
+
+	if len(projectList) == 0 {
+		return
+	}
+
+	log.WithField("count", len(projectList)).Debug("Checking failed projects for auto-healing")
+
+	for _, p := range projectList {
+		c.tryHealProject(ctx, &p)
+	}
+}
+
+// tryHealProject attempts to recover a failed project if its deployment is now healthy.
+func (c *Controller) tryHealProject(ctx context.Context, p *projects.Project) {
+	logger := log.WithField("project", p.Name)
+
+	// Skip paused projects - they're intentionally at 0 replicas
+	if p.Paused {
+		logger.Debug("Skipping healing for paused project")
+		return
+	}
+
+	cfg := c.cfg.ResourceConfig
+	resourceName := cfg.ResourceName(p.Name)
+
+	// Check if deployment exists and is healthy
+	deploy, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Deployment doesn't exist - can't auto-heal, needs manual intervention
+			logger.Debug("Cannot auto-heal: deployment not found")
+			return
+		}
+		logger.WithError(err).Warn("Failed to get deployment for healing check")
+		return
+	}
+
+	// Check if deployment has ready replicas
+	if deploy.Status.ReadyReplicas < 1 || deploy.Status.AvailableReplicas < 1 {
+		logger.WithFields(logrus.Fields{
+			"readyReplicas":     deploy.Status.ReadyReplicas,
+			"availableReplicas": deploy.Status.AvailableReplicas,
+		}).Debug("Cannot auto-heal: deployment not ready")
+		return
+	}
+
+	// Get pod IP for health check update
+	podIP := ""
+	pods, err := c.clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s,%s=%s", labelApp, "kubetty", labelInstance, p.Name),
+	})
+	if err == nil && len(pods.Items) > 0 {
+		podIP = pods.Items[0].Status.PodIP
+	}
+
+	// Optional: Perform HTTP health check to verify the pod is truly healthy
+	healthURL := fmt.Sprintf("http://%s.%s.svc:8080/api/healthz", resourceName, cfg.Namespace)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(healthURL)
+	if err != nil {
+		logger.WithError(err).Debug("Cannot auto-heal: HTTP health check failed")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.WithField("status", resp.StatusCode).Debug("Cannot auto-heal: health check returned non-OK status")
+		return
+	}
+
+	// All checks passed - heal the project!
+	logger.Info("Auto-healing failed project: deployment is now healthy")
+
+	// Update health check timestamp and pod IP
+	if err := c.store.UpdateHealthCheck(ctx, p.ID, podIP); err != nil {
+		logger.WithError(err).Warn("Failed to update health check during healing")
+	}
+
+	// Set status to running
+	if err := c.store.SetStatus(ctx, p.ID, projects.StatusRunning, ""); err != nil {
+		logger.WithError(err).Error("Failed to update project status to running")
+		return
+	}
+
+	// Notify callback that project is now running (triggers gateway re-registration)
+	if c.statusCallback != nil {
+		c.statusCallback(p, projects.StatusRunning)
+	}
+
+	logger.Info("Project auto-healed successfully")
 }
 
 // ResyncProject triggers a full resync of the project resources.
@@ -785,6 +921,50 @@ func (c *Controller) RestartProject(ctx context.Context, p *projects.Project) er
 
 	// Exhausted retries
 	return fmt.Errorf("failed to restart deployment after %d retries: %w", maxRetries, lastErr)
+}
+
+// ScaleProject scales a project's deployment to the specified number of replicas.
+// This is used for pausing (scale to 0) and unpausing (scale to 1) projects.
+func (c *Controller) ScaleProject(ctx context.Context, p *projects.Project, replicas int32) error {
+	logger := log.WithField("project", p.Name).WithField("replicas", replicas)
+	logger.Info("Scaling project deployment")
+
+	cfg := c.cfg.ResourceConfig
+	resourceName := cfg.ResourceName(p.Name)
+
+	// Retry loop for handling optimistic concurrency conflicts
+	const maxRetries = 5
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Get current deployment
+		deploy, err := c.clientset.AppsV1().Deployments(cfg.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get deployment: %w", err)
+		}
+
+		// Update replicas
+		deploy.Spec.Replicas = &replicas
+
+		// Update deployment
+		_, err = c.clientset.AppsV1().Deployments(cfg.Namespace).Update(ctx, deploy, metav1.UpdateOptions{})
+		if err == nil {
+			logger.Info("Deployment scaled successfully")
+			return nil
+		}
+
+		// Check if it's a conflict error - retry with fresh data
+		if errors.IsConflict(err) {
+			logger.WithField("attempt", attempt).Warn("Deployment scale conflict, retrying with fresh data")
+			lastErr = err
+			continue
+		}
+
+		// Non-conflict error - fail immediately
+		return fmt.Errorf("failed to scale deployment: %w", err)
+	}
+
+	// Exhausted retries
+	return fmt.Errorf("failed to scale deployment after %d retries: %w", maxRetries, lastErr)
 }
 
 // GetDeploymentStatus returns the current status of a project's deployment.
@@ -962,6 +1142,123 @@ func (c *Controller) expandPVCIfNeeded(ctx context.Context, p *projects.Project,
 	}
 
 	logger.Info("PVC expansion requested successfully")
+	return nil
+}
+
+// updateServiceIfNeeded updates a project's Service to ensure correct ports.
+// This is needed when features like GUI are enabled after project creation,
+// which require additional ports (e.g., VNC port 5901).
+func (c *Controller) updateServiceIfNeeded(ctx context.Context, p *projects.Project, cfg ResourceConfig, resourceName string) error {
+	logger := log.WithField("project", p.Name)
+
+	// Get current Service
+	existingSvc, err := c.clientset.CoreV1().Services(cfg.Namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Service doesn't exist - this shouldn't happen, but create it
+			svc := BuildService(p, cfg)
+			_, err = c.clientset.CoreV1().Services(cfg.Namespace).Create(ctx, svc, metav1.CreateOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to create Service: %w", err)
+			}
+			logger.Info("Service created (was missing)")
+			return nil
+		}
+		return fmt.Errorf("failed to get Service: %w", err)
+	}
+
+	// Build desired Service spec
+	desiredSvc := BuildService(p, cfg)
+
+	// Check if ports need updating
+	portsMatch := len(existingSvc.Spec.Ports) == len(desiredSvc.Spec.Ports)
+	if portsMatch {
+		existingPorts := make(map[string]int32)
+		for _, port := range existingSvc.Spec.Ports {
+			existingPorts[port.Name] = port.Port
+		}
+		for _, port := range desiredSvc.Spec.Ports {
+			if existingPorts[port.Name] != port.Port {
+				portsMatch = false
+				break
+			}
+		}
+	}
+
+	if portsMatch {
+		logger.Debug("Service ports already match desired state")
+		return nil
+	}
+
+	// Update Service ports
+	logger.WithFields(logrus.Fields{
+		"existingPorts": len(existingSvc.Spec.Ports),
+		"desiredPorts":  len(desiredSvc.Spec.Ports),
+	}).Info("Updating Service ports")
+
+	existingSvc.Spec.Ports = desiredSvc.Spec.Ports
+	if _, err := c.clientset.CoreV1().Services(cfg.Namespace).Update(ctx, existingSvc, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("failed to update Service: %w", err)
+	}
+
+	logger.Info("Service ports updated successfully")
+	return nil
+}
+
+// updateNetworkPolicyIfNeeded updates a project's NetworkPolicy to ensure correct ingress rules.
+// This is needed when features like GUI are enabled after project creation,
+// which require additional ports in the ingress rules (e.g., VNC port 5901).
+func (c *Controller) updateNetworkPolicyIfNeeded(ctx context.Context, p *projects.Project, cfg ResourceConfig) error {
+	logger := log.WithField("project", p.Name)
+	netPolName := fmt.Sprintf("%s-ingress", cfg.ResourceName(p.Name))
+
+	// Get current NetworkPolicy
+	existingNetPol, err := c.clientset.NetworkingV1().NetworkPolicies(cfg.Namespace).Get(ctx, netPolName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// NetworkPolicy doesn't exist - create it
+			netPol := BuildNetworkPolicy(p, cfg, cfg.GatewayNamespace)
+			_, err = c.clientset.NetworkingV1().NetworkPolicies(cfg.Namespace).Create(ctx, netPol, metav1.CreateOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to create NetworkPolicy: %w", err)
+			}
+			logger.Info("NetworkPolicy created (was missing)")
+			return nil
+		}
+		return fmt.Errorf("failed to get NetworkPolicy: %w", err)
+	}
+
+	// Build desired NetworkPolicy
+	desiredNetPol := BuildNetworkPolicy(p, cfg, cfg.GatewayNamespace)
+
+	// Simple comparison: check if number of ingress rules/ports match
+	// For a more robust comparison, we'd need to compare the full spec
+	existingPortCount := 0
+	desiredPortCount := 0
+	if len(existingNetPol.Spec.Ingress) > 0 {
+		existingPortCount = len(existingNetPol.Spec.Ingress[0].Ports)
+	}
+	if len(desiredNetPol.Spec.Ingress) > 0 {
+		desiredPortCount = len(desiredNetPol.Spec.Ingress[0].Ports)
+	}
+
+	if existingPortCount == desiredPortCount {
+		logger.Debug("NetworkPolicy ingress rules already match desired state")
+		return nil
+	}
+
+	// Update NetworkPolicy
+	logger.WithFields(logrus.Fields{
+		"existingPorts": existingPortCount,
+		"desiredPorts":  desiredPortCount,
+	}).Info("Updating NetworkPolicy ingress rules")
+
+	existingNetPol.Spec = desiredNetPol.Spec
+	if _, err := c.clientset.NetworkingV1().NetworkPolicies(cfg.Namespace).Update(ctx, existingNetPol, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("failed to update NetworkPolicy: %w", err)
+	}
+
+	logger.Info("NetworkPolicy ingress rules updated successfully")
 	return nil
 }
 

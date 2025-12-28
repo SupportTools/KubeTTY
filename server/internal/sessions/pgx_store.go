@@ -7,12 +7,23 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Pool defines the interface for database pool operations.
+// This allows for mocking in tests using pgxmock.
+type Pool interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Ping(ctx context.Context) error
+	Close()
+}
+
 // PGXStore persists session metadata to CNPG via pgxpool.
 type PGXStore struct {
-	pool *pgxpool.Pool
+	pool Pool
 }
 
 // NewPGXStore creates the connection pool using a secure, structured configuration.
@@ -38,6 +49,12 @@ func NewPGXStore(ctx context.Context, config *pgxpool.Config) (*PGXStore, error)
 		return nil, fmt.Errorf("connect pgx: %w", err)
 	}
 	return &PGXStore{pool: pool}, nil
+}
+
+// NewPGXStoreWithPool creates a PGXStore with a pre-configured pool.
+// This is primarily used for testing with mock pools.
+func NewPGXStoreWithPool(pool Pool) *PGXStore {
+	return &PGXStore{pool: pool}
 }
 
 // Close releases the pool resources.

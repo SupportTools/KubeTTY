@@ -21,6 +21,14 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/gateway/metrics"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/relay"
 	"github.com/supporttools/KubeTTY/server/internal/gateway/tabs"
+	"github.com/supporttools/KubeTTY/server/internal/gateway/vnc"
+)
+
+// Stale tab cleanup configuration
+const (
+	// StaleReconnectingTimeout is how long a tab can stay in reconnecting state
+	// before being cleaned up. This prevents orphaned tabs when pods restart.
+	StaleReconnectingTimeout = 5 * time.Minute
 )
 
 // ProjectStore defines methods for updating project activity.
@@ -50,14 +58,18 @@ type Manager struct {
 }
 
 type tabEntry struct {
-	proxier       relay.Proxier // Can be either *relay.Relay or *exec.ExecRelay
-	clientID      string
-	project       gatewayconfig.Project
-	created       time.Time
-	lastActivity  time.Time // Last activity timestamp for idle timeout tracking
-	warned        bool      // Whether idle warning has been sent
-	downstreamURI string
-	cancel        context.CancelFunc
+	proxier           relay.Proxier // Terminal relay: *relay.Relay or *exec.ExecRelay
+	vncProxier        *vnc.VNCRelay // VNC relay for GUI-enabled projects (nil if GUI not enabled)
+	clientID          string
+	project           gatewayconfig.Project
+	created           time.Time
+	lastActivity      time.Time // Last activity timestamp for idle timeout tracking
+	warned            bool      // Whether idle warning has been sent
+	downstreamURI     string
+	cancel            context.CancelFunc
+	isVNC             bool         // True if this is a VNC-only tab (created via CreateVNCTab)
+	currentStatus     relay.Status // Current relay status for stale detection
+	reconnectingSince time.Time    // When the tab entered reconnecting state (zero if not reconnecting)
 }
 
 // ManagerConfig holds configuration for the Manager.
@@ -199,11 +211,21 @@ func (m *Manager) CreateTab(ctx context.Context, projectID, clientID string) (ta
 
 	m.mu.Unlock()
 
+	// Get the next position for the new tab
+	position, err := m.store.GetNextPosition(ctx, clientID)
+	if err != nil {
+		m.mu.Lock()
+		delete(m.tabs, id)
+		m.mu.Unlock()
+		return tabs.Tab{}, fmt.Errorf("get next position: %w", err)
+	}
+
 	tab := tabs.Tab{
 		TabID:         id,
 		ProjectID:     projectID,
 		ClientID:      clientID,
 		Status:        tabs.StatusConnecting,
+		Position:      position,
 		CreatedAt:     e.created,
 		UpdatedAt:     e.created,
 		DownstreamURI: &e.downstreamURI,
@@ -220,6 +242,104 @@ func (m *Manager) CreateTab(ctx context.Context, projectID, clientID string) (ta
 
 	m.startTracking(id, e)
 	return tab, nil
+}
+
+// CreateVNCTab allocates a VNC tab for a GUI-enabled project.
+// Returns an error if the project doesn't have GUI support enabled.
+func (m *Manager) CreateVNCTab(ctx context.Context, projectID, clientID string) (tabs.Tab, error) {
+	m.mu.Lock()
+
+	project, ok := m.projects[projectID]
+	if !ok {
+		m.mu.Unlock()
+		return tabs.Tab{}, fmt.Errorf("unknown project %q", projectID)
+	}
+
+	// Verify GUI is enabled for this project
+	if !project.GUIEnabled {
+		m.mu.Unlock()
+		return tabs.Tab{}, fmt.Errorf("project %q does not have GUI support enabled", projectID)
+	}
+
+	// Enforce per-client tab limit using in-memory count (atomic with creation)
+	if project.Limits.MaxTabsPerClient > 0 {
+		count := m.countTabsForClientProjectLocked(clientID, projectID)
+		if count >= project.Limits.MaxTabsPerClient {
+			m.mu.Unlock()
+			return tabs.Tab{}, &TabLimitExceededError{
+				ProjectID: projectID,
+				Limit:     project.Limits.MaxTabsPerClient,
+			}
+		}
+	}
+
+	id := uuid.NewString()
+	e := m.newVNCEntry(project, clientID, time.Now())
+	m.tabs[id] = e
+
+	m.mu.Unlock()
+
+	// Get the next position for the new tab
+	position, err := m.store.GetNextPosition(ctx, clientID)
+	if err != nil {
+		m.mu.Lock()
+		delete(m.tabs, id)
+		m.mu.Unlock()
+		return tabs.Tab{}, fmt.Errorf("get next position: %w", err)
+	}
+
+	tab := tabs.Tab{
+		TabID:         id,
+		ProjectID:     projectID,
+		ClientID:      clientID,
+		Status:        tabs.StatusConnecting,
+		Position:      position,
+		CreatedAt:     e.created,
+		UpdatedAt:     e.created,
+		DownstreamURI: &e.downstreamURI,
+	}
+
+	// Persist to database - if this fails, we need to clean up
+	if err := m.store.Create(ctx, tab); err != nil {
+		// Remove from in-memory map
+		m.mu.Lock()
+		delete(m.tabs, id)
+		m.mu.Unlock()
+		return tabs.Tab{}, err
+	}
+
+	m.startTracking(id, e)
+
+	log.WithFields(log.Fields{
+		"tab_id":     id,
+		"project_id": projectID,
+		"client_id":  clientID,
+		"vnc_port":   project.GUIVNCPort,
+	}).Info("gateway/manager: created VNC tab")
+
+	return tab, nil
+}
+
+// IsGUIEnabled returns whether the project has GUI support enabled.
+func (m *Manager) IsGUIEnabled(projectID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	project, ok := m.projects[projectID]
+	return ok && project.GUIEnabled
+}
+
+// IsVNCTab returns whether the specified tab is a VNC/GUI tab.
+// Returns false if the tab doesn't exist.
+func (m *Manager) IsVNCTab(tabID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, ok := m.tabs[tabID]
+	return ok && entry.isVNC
+}
+
+// ReorderTabs updates the positions of tabs for a client.
+func (m *Manager) ReorderTabs(ctx context.Context, clientID string, tabIDs []string) error {
+	return m.store.UpdatePositions(ctx, clientID, tabIDs)
 }
 
 // countTabsForClientProjectLocked counts in-memory tabs for a client/project.
@@ -271,10 +391,110 @@ func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string,
 			}
 		}()
 	}
+
+	// Health check: verify relay is in a connectable state before attaching
+	if err := m.ensureHealthyConnection(tabID, e); err != nil {
+		m.mu.Unlock()
+		log.WithFields(log.Fields{
+			"tab_id":     tabID,
+			"project_id": e.project.ID,
+			"error":      err.Error(),
+		}).Warn("gateway/manager: relay unhealthy, attach rejected")
+		return err
+	}
+
 	m.mu.Unlock()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	return e.proxier.Proxy(ctx, upstream)
+}
+
+// ensureHealthyConnection checks if the relay is in a state that can accept new connections.
+// MUST be called with mutex held.
+// Returns nil if healthy, or an error describing why it's unhealthy.
+func (m *Manager) ensureHealthyConnection(tabID string, entry *tabEntry) error {
+	// Check for closed state - relay is dead
+	if entry.currentStatus == relay.StatusClosed {
+		return fmt.Errorf("relay in closed state, cannot attach")
+	}
+
+	// Check if stuck in reconnecting state for too long
+	// This indicates the downstream pod may have restarted or be unreachable
+	if entry.currentStatus == relay.StatusReconnecting && !entry.reconnectingSince.IsZero() {
+		reconnectingDuration := time.Since(entry.reconnectingSince)
+		// If reconnecting for more than 30 seconds, consider it unhealthy
+		// The keepalive should have triggered a reconnect by now if the pod is healthy
+		if reconnectingDuration > 30*time.Second {
+			return fmt.Errorf("relay stuck in reconnecting state for %v", reconnectingDuration.Round(time.Second))
+		}
+	}
+
+	// StatusIdle, StatusConnecting, StatusConnected are all acceptable
+	// The relay.Proxy() call will handle connection establishment if needed
+	return nil
+}
+
+// AttachVNC proxies between the caller WebSocket and the VNC relay.
+// Returns an error if the tab doesn't have a VNC relay (project not GUI-enabled).
+func (m *Manager) AttachVNC(ctx context.Context, tabID, clientID string, upstream *websocket.Conn, forceTakeover bool) error {
+	m.mu.Lock()
+	e, ok := m.tabs[tabID]
+	if !ok {
+		m.mu.Unlock()
+		return tabs.ErrNotFound
+	}
+
+	// Check if this tab has a VNC relay
+	if e.vncProxier == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("tab %s does not have VNC support (project GUI not enabled)", tabID)
+	}
+
+	if e.clientID != clientID {
+		if !forceTakeover {
+			m.mu.Unlock()
+			return fmt.Errorf("tab %s owned by another client", tabID)
+		}
+		// Force takeover: update clientID
+		log.WithFields(log.Fields{
+			"tab_id":        tabID,
+			"old_client_id": e.clientID,
+			"new_client_id": clientID,
+		}).Info("gateway/manager: force VNC takeover of tab")
+		e.clientID = clientID
+		// Update in database
+		go func() {
+			if err := m.store.UpdateClientID(context.Background(), tabID, clientID); err != nil {
+				log.WithFields(log.Fields{
+					"tab_id":    tabID,
+					"client_id": clientID,
+					"error":     err.Error(),
+				}).Warn("gateway/manager: failed to update client ID in database")
+			}
+		}()
+	}
+
+	vncRelay := e.vncProxier
+	m.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	log.WithFields(log.Fields{
+		"tab_id":     tabID,
+		"client_id":  clientID,
+		"vnc_target": vncRelay.Target(),
+	}).Info("gateway/manager: attaching VNC relay")
+
+	return vncRelay.Proxy(ctx, upstream)
+}
+
+// HasVNCSupport returns whether the tab has VNC support (project GUI enabled).
+func (m *Manager) HasVNCSupport(tabID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, ok := m.tabs[tabID]
+	return ok && entry.vncProxier != nil
 }
 
 // CloseTab tears down the relay and removes persisted metadata.
@@ -290,6 +510,10 @@ func (m *Manager) CloseTab(ctx context.Context, tabID string) error {
 			e.cancel()
 		}
 		_ = e.proxier.Close()
+		// Also close VNC relay if present
+		if e.vncProxier != nil {
+			_ = e.vncProxier.Close()
+		}
 		// Unregister from metrics collection
 		m.unregisterTabForMetrics(tabID)
 	}
@@ -417,7 +641,7 @@ func (m *Manager) newEntry(project gatewayconfig.Project, clientID string, creat
 		})
 	}
 
-	return &tabEntry{
+	entry := &tabEntry{
 		proxier:       proxier,
 		clientID:      clientID,
 		project:       project,
@@ -425,6 +649,71 @@ func (m *Manager) newEntry(project gatewayconfig.Project, clientID string, creat
 		lastActivity:  time.Now(), // Initialize with current time
 		warned:        false,
 		downstreamURI: uri,
+		isVNC:         false,
+	}
+
+	// For GUI-enabled projects, also create a VNC relay for hybrid terminal+GUI support
+	if project.GUIEnabled {
+		vncPort := project.GUIVNCPort
+		if vncPort == 0 {
+			vncPort = 5901 // Default VNC port
+		}
+
+		target := fmt.Sprintf("%s.%s.svc:%d", project.Service, project.Namespace, vncPort)
+
+		log.WithFields(log.Fields{
+			"project_id": project.ID,
+			"namespace":  project.Namespace,
+			"service":    project.Service,
+			"vnc_target": target,
+		}).Info("gateway/manager: creating VNC relay for GUI-enabled project")
+
+		entry.vncProxier = vnc.NewRelay(target,
+			vnc.WithDialTimeout(10*time.Second),
+			vnc.WithMaxRetries(3),
+			vnc.WithRetryDelay(2*time.Second),
+		)
+	}
+
+	return entry
+}
+
+// newVNCEntry creates a tabEntry with a VNC relay for GUI-enabled projects.
+func (m *Manager) newVNCEntry(project gatewayconfig.Project, clientID string, created time.Time) *tabEntry {
+	// VNC target: service.namespace.svc:vncPort
+	vncPort := project.GUIVNCPort
+	if vncPort == 0 {
+		vncPort = 5901 // Default VNC port
+	}
+
+	target := fmt.Sprintf("%s.%s.svc:%d", project.Service, project.Namespace, vncPort)
+
+	log.WithFields(log.Fields{
+		"project_id": project.ID,
+		"namespace":  project.Namespace,
+		"service":    project.Service,
+		"vnc_target": target,
+	}).Info("gateway/manager: creating VNC relay for tab")
+
+	// Create VNC relay with appropriate options
+	vncRelay := vnc.NewRelay(target,
+		vnc.WithDialTimeout(10*time.Second),
+		vnc.WithMaxRetries(3),
+		vnc.WithRetryDelay(2*time.Second),
+	)
+
+	// Use vnc:// scheme for downstream URI to identify VNC tabs
+	downstreamURI := fmt.Sprintf("vnc://%s", target)
+
+	return &tabEntry{
+		proxier:       vncRelay,
+		clientID:      clientID,
+		project:       project,
+		created:       created,
+		lastActivity:  time.Now(),
+		warned:        false,
+		downstreamURI: downstreamURI,
+		isVNC:         true,
 	}
 }
 
@@ -503,6 +792,23 @@ func (m *Manager) watchStatus(ctx context.Context, tabID string, entry *tabEntry
 				errStr = &msg
 			}
 			downURI := entry.downstreamURI
+
+			// Track reconnecting state for stale tab cleanup
+			m.mu.Lock()
+			prevStatus := entry.currentStatus
+			entry.currentStatus = evt.Status
+			if evt.Status == relay.StatusReconnecting && prevStatus != relay.StatusReconnecting {
+				// Just entered reconnecting state - record when
+				entry.reconnectingSince = time.Now()
+				log.WithFields(log.Fields{
+					"tab_id":     tabID,
+					"project_id": entry.project.ID,
+				}).Debug("gateway/manager: tab entered reconnecting state")
+			} else if evt.Status != relay.StatusReconnecting {
+				// Exited reconnecting state - clear the timestamp
+				entry.reconnectingSince = time.Time{}
+			}
+			m.mu.Unlock()
 
 			logFields := log.Fields{
 				"tab_id":     tabID,
@@ -722,6 +1028,34 @@ func (m *Manager) checkIdleTabs(ctx context.Context) {
 				"timeout":       m.idleTimeout.String(),
 			}).Info("gateway/manager: closing idle tab")
 			// closeIdleTabLocked expects mutex to be held and will handle unlock/relock
+			m.closeIdleTabLocked(ctx, tabID, entry)
+			m.mu.Unlock()
+			continue
+		}
+
+		// Check for stale reconnecting tabs - tabs stuck in reconnecting state for too long
+		// This can happen when a project pod restarts and the relay can't reconnect
+		if !entry.reconnectingSince.IsZero() {
+			reconnectingDuration := now.Sub(entry.reconnectingSince)
+			if reconnectingDuration >= StaleReconnectingTimeout {
+				log.WithFields(log.Fields{
+					"tab_id":                tabID,
+					"project_id":            entry.project.ID,
+					"reconnecting_duration": reconnectingDuration.String(),
+					"timeout":               StaleReconnectingTimeout.String(),
+				}).Info("gateway/manager: closing stale reconnecting tab")
+				m.closeIdleTabLocked(ctx, tabID, entry)
+				m.mu.Unlock()
+				continue
+			}
+		}
+
+		// Also clean tabs in closed status that somehow weren't removed
+		if entry.currentStatus == relay.StatusClosed {
+			log.WithFields(log.Fields{
+				"tab_id":     tabID,
+				"project_id": entry.project.ID,
+			}).Info("gateway/manager: cleaning up closed tab")
 			m.closeIdleTabLocked(ctx, tabID, entry)
 			m.mu.Unlock()
 			continue

@@ -61,6 +61,7 @@ type LeaderElectionConfig struct {
 type ControllerConfig struct {
 	Enabled             bool          // Enable project controller (default: false)
 	ProjectsNamespace   string        // Target namespace for projects (e.g., "kubetty-projects-dev")
+	GatewayNamespace    string        // Namespace where gateway runs (for NetworkPolicy ingress rules, from POD_NAMESPACE)
 	ResourcePrefix      string        // Prefix for all resources (default: "kubetty-project-")
 	ReconcileInterval   time.Duration // Reconciliation interval (default: 30s)
 	HealthCheckInterval time.Duration // Health check interval (default: 60s)
@@ -120,6 +121,7 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 		Controller: ControllerConfig{
 			Enabled:                sharedconfig.GetEnvBool("CONTROLLER_ENABLED", false),
 			ProjectsNamespace:      os.Getenv("PROJECTS_NAMESPACE"),
+			GatewayNamespace:       os.Getenv("POD_NAMESPACE"), // Set via Kubernetes downward API
 			ResourcePrefix:         sharedconfig.GetEnv("RESOURCE_PREFIX", "kubetty-project-"),
 			ReconcileInterval:      sharedconfig.GetEnvDuration("RECONCILE_INTERVAL", 30*time.Second),
 			HealthCheckInterval:    sharedconfig.GetEnvDuration("HEALTH_CHECK_INTERVAL", 60*time.Second),

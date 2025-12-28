@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,6 +29,16 @@ const (
 
 	managedByValue = "kubetty-controller"
 )
+
+// imagePullPolicyForTag returns the appropriate ImagePullPolicy for a given image tag.
+// Returns PullAlways for "latest" tags (to avoid stale cache issues).
+// Returns PullIfNotPresent for versioned tags (for efficiency).
+func imagePullPolicyForTag(tag string) corev1.PullPolicy {
+	if tag == "latest" || tag == "" {
+		return corev1.PullAlways
+	}
+	return corev1.PullIfNotPresent
+}
 
 // ResourceConfig holds configuration for building Kubernetes resources.
 // It provides the shared namespace, resource prefix, and environment suffix
@@ -52,6 +63,11 @@ type ResourceConfig struct {
 	// TemplatePVCName is the name of the template PVC to copy base files from.
 	// If empty, template sync is disabled.
 	TemplatePVCName string
+
+	// GatewayNamespace is the namespace where the gateway runs.
+	// Used for NetworkPolicy to allow VNC traffic from gateway.
+	// (e.g., "kubetty-gateway-dev")
+	GatewayNamespace string
 }
 
 // dnsNameRegex validates DNS subdomain names per RFC 1123
@@ -186,7 +202,7 @@ func BuildTemplateSyncJob(p *projects.Project, cfg ResourceConfig) *batchv1.Job 
 					Containers: []corev1.Container{
 						{
 							Name:  "template-sync",
-							Image: "alpine:3.19",
+							Image: fmt.Sprintf("%s:%s", p.ImageRepository, p.ImageTag),
 							Command: []string{"/bin/sh", "-c", `
 set -euo pipefail
 
@@ -198,7 +214,7 @@ sync_with_retry() {
     attempt=1
     while [ $attempt -le $MAX_RETRIES ]; do
         echo "Syncing template files (attempt $attempt/$MAX_RETRIES)..."
-        if cp -r /template/. /data/; then
+        if rsync -av --delete /template/ /data/; then
             echo "Template sync completed successfully"
             # Create marker file with timestamp
             date -Iseconds > "$MARKER_FILE"
@@ -276,6 +292,30 @@ func BuildServiceAccount(p *projects.Project, cfg ResourceConfig) *corev1.Servic
 func BuildService(p *projects.Project, cfg ResourceConfig) *corev1.Service {
 	resourceName := cfg.ResourceName(p.Name)
 
+	// Base HTTP port for terminal WebSocket
+	ports := []corev1.ServicePort{
+		{
+			Name:       "http",
+			Port:       8080,
+			TargetPort: intstr.FromInt(8080),
+			Protocol:   corev1.ProtocolTCP,
+		},
+	}
+
+	// Add VNC port if GUI is enabled
+	if p.GUIEnabled {
+		vncPort := int32(p.GUIVNCPort)
+		if vncPort == 0 {
+			vncPort = 5901
+		}
+		ports = append(ports, corev1.ServicePort{
+			Name:       "vnc",
+			Port:       vncPort,
+			TargetPort: intstr.FromInt(int(vncPort)),
+			Protocol:   corev1.ProtocolTCP,
+		})
+	}
+
 	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
@@ -289,12 +329,77 @@ func BuildService(p *projects.Project, cfg ResourceConfig) *corev1.Service {
 		Spec: corev1.ServiceSpec{
 			Type:     corev1.ServiceTypeClusterIP,
 			Selector: projectSelectorLabels(p, cfg),
-			Ports: []corev1.ServicePort{
+			Ports:    ports,
+		},
+	}
+}
+
+// BuildNetworkPolicy creates a NetworkPolicy that allows ingress from gateway pods.
+// This enables the gateway to connect to project pods for terminal WebSocket and VNC traffic.
+// Name format: {prefix}{project-name}-ingress
+func BuildNetworkPolicy(p *projects.Project, cfg ResourceConfig, gatewayNamespace string) *networkingv1.NetworkPolicy {
+	resourceName := fmt.Sprintf("%s-ingress", cfg.ResourceName(p.Name))
+
+	// Define ports to allow - HTTP is always included
+	ingressPorts := []networkingv1.NetworkPolicyPort{
+		{
+			Protocol: func() *corev1.Protocol { p := corev1.ProtocolTCP; return &p }(),
+			Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 8080},
+		},
+	}
+
+	// Add VNC port if GUI is enabled
+	if p.GUIEnabled {
+		vncPort := int32(p.GUIVNCPort)
+		if vncPort == 0 {
+			vncPort = 5901
+		}
+		ingressPorts = append(ingressPorts, networkingv1.NetworkPolicyPort{
+			Protocol: func() *corev1.Protocol { p := corev1.ProtocolTCP; return &p }(),
+			Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: vncPort},
+		})
+	}
+
+	return &networkingv1.NetworkPolicy{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "networking.k8s.io/v1",
+			Kind:       "NetworkPolicy",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      resourceName,
+			Namespace: cfg.Namespace,
+			Labels:    projectLabels(p, cfg),
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			// Apply to pods matching this project
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: projectSelectorLabels(p, cfg),
+			},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeIngress,
+			},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
 				{
-					Name:       "http",
-					Port:       8080,
-					TargetPort: intstr.FromInt(8080),
-					Protocol:   corev1.ProtocolTCP,
+					// Allow from gateway namespace
+					From: []networkingv1.NetworkPolicyPeer{
+						{
+							NamespaceSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"kubernetes.io/metadata.name": gatewayNamespace,
+								},
+							},
+						},
+					},
+					Ports: ingressPorts,
+				},
+				{
+					// Allow from same namespace (for health checks, prometheus)
+					From: []networkingv1.NetworkPolicyPeer{
+						{
+							PodSelector: &metav1.LabelSelector{},
+						},
+					},
+					Ports: ingressPorts,
 				},
 			},
 		},
@@ -383,6 +488,26 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 		})
 	}
 
+	// Add GUI environment variables if enabled
+	if p.GUIEnabled {
+		guiResolution := p.GUIResolution
+		if guiResolution == "" {
+			guiResolution = "1920x1080x24"
+		}
+		guiVNCPort := p.GUIVNCPort
+		if guiVNCPort == 0 {
+			guiVNCPort = 5901
+		}
+
+		kubettyEnv = append(kubettyEnv,
+			corev1.EnvVar{Name: "GUI_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "GUI_DISPLAY", Value: ":99"},
+			corev1.EnvVar{Name: "GUI_RESOLUTION", Value: guiResolution},
+			corev1.EnvVar{Name: "VNC_PORT", Value: fmt.Sprintf("%d", guiVNCPort)},
+			corev1.EnvVar{Name: "DISPLAY", Value: ":99"},
+		)
+	}
+
 	// Add custom environment variables
 	for k, v := range p.EnvVars {
 		kubettyEnv = append(kubettyEnv, corev1.EnvVar{Name: k, Value: v})
@@ -401,15 +526,28 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 		})
 	}
 
+	// Build container ports - HTTP is always included, VNC when GUI enabled
+	containerPorts := []corev1.ContainerPort{
+		{Name: "http", ContainerPort: 8080},
+	}
+	if p.GUIEnabled {
+		vncPort := int32(p.GUIVNCPort)
+		if vncPort == 0 {
+			vncPort = 5901
+		}
+		containerPorts = append(containerPorts, corev1.ContainerPort{
+			Name:          "vnc",
+			ContainerPort: vncPort,
+		})
+	}
+
 	kubettyContainer := corev1.Container{
 		Name:            "kubetty",
 		Image:           fmt.Sprintf("%s:%s", p.ImageRepository, p.ImageTag),
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: imagePullPolicyForTag(p.ImageTag),
 		Env:             kubettyEnv,
-		Ports: []corev1.ContainerPort{
-			{Name: "http", ContainerPort: 8080},
-		},
-		VolumeMounts: kubettyVolumeMounts,
+		Ports:           containerPorts,
+		VolumeMounts:    kubettyVolumeMounts,
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    cpuRequest,
@@ -472,7 +610,7 @@ chown -R mmattox:mmattox /data/opt /data/home /data/usr-local-go
 	initContainers = append(initContainers, corev1.Container{
 		Name:            "init-home",
 		Image:           fmt.Sprintf("%s:%s", p.ImageRepository, p.ImageTag),
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: imagePullPolicyForTag(p.ImageTag),
 		Command: []string{"/bin/bash", "-c", `
 set -euo pipefail
 if [ ! -f /pvc-home/mmattox/.bash_profile ]; then

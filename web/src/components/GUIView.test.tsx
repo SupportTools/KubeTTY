@@ -56,8 +56,12 @@ describe('GUIView', () => {
   });
 
   afterEach(() => {
-    cleanup();
+    // Restore real timers first - critical for React concurrent mode
+    vi.useRealTimers();
+    // Clear any pending timers before React cleanup
     vi.clearAllTimers();
+    cleanup();
+    vi.clearAllMocks();
   });
 
   it('renders the GUI view container', () => {
@@ -74,10 +78,14 @@ describe('GUIView', () => {
     expect(document.querySelector('.gui-view__status-indicator')).toBeInTheDocument();
   });
 
-  it('shows connecting overlay initially', () => {
+  it('shows connecting overlay after connection starts', async () => {
+    // Component has a 50ms delay before connecting
     render(<GUIView {...defaultProps} />);
 
-    expect(document.querySelector('.gui-view__overlay')).toBeInTheDocument();
+    // Wait for the connecting state (after 50ms delay)
+    await waitFor(() => {
+      expect(document.querySelector('.gui-view__overlay')).toBeInTheDocument();
+    });
     expect(document.querySelector('.gui-view__spinner')).toBeInTheDocument();
   });
 
@@ -86,8 +94,10 @@ describe('GUIView', () => {
 
     render(<GUIView {...defaultProps} onStatusChange={onStatusChange} />);
 
-    // Should be called with 'connecting' initially
-    expect(onStatusChange).toHaveBeenCalledWith('connecting');
+    // Wait for connection to start (after 50ms delay)
+    await waitFor(() => {
+      expect(onStatusChange).toHaveBeenCalledWith('connecting');
+    });
   });
 
   it('applies custom VNC settings', () => {
@@ -106,8 +116,13 @@ describe('GUIView', () => {
     expect(document.querySelector('.gui-view')).toBeInTheDocument();
   });
 
-  it('cleans up RFB on unmount', () => {
+  it('cleans up RFB on unmount', async () => {
     const { unmount } = render(<GUIView {...defaultProps} />);
+
+    // Wait for RFB to be created (after 50ms connection delay)
+    await waitFor(() => {
+      expect(mockFns.addEventListener).toHaveBeenCalled();
+    });
 
     unmount();
 
@@ -115,12 +130,17 @@ describe('GUIView', () => {
     expect(mockFns.disconnect).toHaveBeenCalled();
   });
 
-  it('renders with correct status indicator class', () => {
+  it('renders with correct status indicator class', async () => {
     render(<GUIView {...defaultProps} />);
 
-    // Initially connecting
+    // Initially disconnected, then transitions to connecting after 50ms delay
     const indicator = document.querySelector('.gui-view__status-indicator');
-    expect(indicator).toHaveClass('gui-view__status-indicator--connecting');
+    expect(indicator).toHaveClass('gui-view__status-indicator--disconnected');
+
+    // Wait for connecting state
+    await waitFor(() => {
+      expect(indicator).toHaveClass('gui-view__status-indicator--connecting');
+    });
   });
 
   it('handles focus changes', async () => {
@@ -138,11 +158,16 @@ describe('GUIView', () => {
     expect(document.querySelector('.gui-view')).toBeInTheDocument();
   });
 
-  it('displays status message', () => {
+  it('displays status message', async () => {
     render(<GUIView {...defaultProps} />);
 
+    // Wait for connection to start (after 50ms delay) - message is in overlay
+    await waitFor(() => {
+      const message = document.querySelector('.gui-view__message');
+      expect(message).toBeInTheDocument();
+    });
+
     const message = document.querySelector('.gui-view__message');
-    expect(message).toBeInTheDocument();
     expect(message?.textContent).toContain('Connecting');
   });
 

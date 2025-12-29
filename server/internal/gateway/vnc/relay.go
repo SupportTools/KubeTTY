@@ -31,13 +31,14 @@ const (
 type VNCRelay struct {
 	config Config
 
-	mu         sync.RWMutex
-	vncConn    net.Conn
-	status     RelayStatus
-	lastError  error
-	observers  []chan relay.StatusEvent
-	activityCh chan struct{}
-	retryCount int
+	mu               sync.RWMutex
+	vncConn          net.Conn
+	status           RelayStatus
+	lastError        error
+	observers        []chan relay.StatusEvent
+	activityCh       chan struct{}
+	retryCount       int
+	explicitlyClosed bool // true when Close() was called explicitly
 
 	// Context for graceful shutdown
 	cancelFunc context.CancelFunc
@@ -146,7 +147,7 @@ func (r *VNCRelay) connect(ctx context.Context) (net.Conn, error) {
 // reconnect attempts to re-establish the VNC connection after a failure.
 func (r *VNCRelay) reconnect(ctx context.Context) error {
 	r.mu.Lock()
-	if r.status == RelayStatusClosed {
+	if r.explicitlyClosed {
 		r.mu.Unlock()
 		return fmt.Errorf("relay is closed")
 	}
@@ -259,6 +260,7 @@ func (r *VNCRelay) Proxy(ctx context.Context, upstream *websocket.Conn) error {
 // ensureConnection establishes the VNC connection if not already connected.
 // If the relay was previously closed due to a failed connection, it resets
 // the status to allow retry. This supports noVNC's reconnection behavior.
+// However, if Close() was explicitly called, no retry is allowed.
 func (r *VNCRelay) ensureConnection(ctx context.Context) error {
 	r.mu.Lock()
 	if r.vncConn != nil && r.status == RelayStatusConnected {
@@ -266,8 +268,14 @@ func (r *VNCRelay) ensureConnection(ctx context.Context) error {
 		return nil
 	}
 
-	// Reset closed state for retry - allows reconnection after failure
-	// The relay should only stay closed after explicit Close() call
+	// If explicitly closed by user, do not allow reconnection
+	if r.explicitlyClosed {
+		r.mu.Unlock()
+		return fmt.Errorf("relay is closed")
+	}
+
+	// Reset closed state for retry - allows reconnection after connection failure
+	// (but not after explicit Close() call, which is handled above)
 	if r.status == RelayStatusClosed {
 		log.WithFields(log.Fields{
 			"target": r.config.Target,
@@ -280,8 +288,9 @@ func (r *VNCRelay) ensureConnection(ctx context.Context) error {
 
 	conn, err := r.connect(ctx)
 	if err != nil {
-		// Don't set to Closed on connection failure - allow future retries
-		// Just return the error so the current Proxy call fails
+		// Set status to Closed on connection failure, but leave explicitlyClosed=false
+		// This allows future retries via the "reset closed state" logic above
+		r.setStatus(RelayStatusClosed, err)
 		return err
 	}
 
@@ -507,7 +516,7 @@ func (r *VNCRelay) vncToWS(ctx context.Context, vnc net.Conn, ws *websocket.Conn
 func (r *VNCRelay) Close() error {
 	r.mu.Lock()
 	// Check if already closed
-	if r.status == RelayStatusClosed {
+	if r.status == RelayStatusClosed && r.explicitlyClosed {
 		r.mu.Unlock()
 		return nil
 	}
@@ -519,6 +528,7 @@ func (r *VNCRelay) Close() error {
 	observers := r.observers
 	r.observers = nil
 	r.status = RelayStatusClosed
+	r.explicitlyClosed = true // Mark as explicitly closed by user
 	r.mu.Unlock()
 
 	log.WithFields(log.Fields{

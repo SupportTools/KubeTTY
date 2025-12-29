@@ -7,6 +7,15 @@ vi.mock('@xterm/xterm', () => {
     Terminal: class MockTerminal {
       cols = 80;
       rows = 24;
+      element = {
+        querySelector: vi.fn(() => ({
+          scrollTop: 0,
+          scrollHeight: 100,
+          clientHeight: 100,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        })),
+      };
       loadAddon = vi.fn();
       open = vi.fn();
       write = vi.fn((data: unknown, callback?: () => void) => {
@@ -14,6 +23,8 @@ vi.mock('@xterm/xterm', () => {
       });
       focus = vi.fn();
       onData = vi.fn(() => ({ dispose: vi.fn() }));
+      onBell = vi.fn(() => ({ dispose: vi.fn() }));
+      scrollToBottom = vi.fn();
       dispose = vi.fn();
     }
   };
@@ -112,6 +123,10 @@ describe('TerminalView', () => {
   });
 
   afterEach(async () => {
+    // Restore real timers first - critical for React concurrent mode
+    vi.useRealTimers();
+    // Clear any pending timers before React cleanup
+    vi.clearAllTimers();
     cleanup();
     global.WebSocket = originalWebSocket;
     vi.clearAllMocks();
@@ -362,25 +377,26 @@ describe('TerminalView', () => {
 
   it('sends ping messages on WebSocket connection', async () => {
     vi.useFakeTimers();
+    try {
+      await act(async () => {
+        render(<TerminalView />);
+      });
 
-    await act(async () => {
-      render(<TerminalView />);
-    });
+      await act(async () => {
+        MockWebSocket.getLatest()?.simulateOpen();
+      });
 
-    await act(async () => {
-      MockWebSocket.getLatest()?.simulateOpen();
-    });
+      // Fast forward 10 seconds (ping interval)
+      await act(async () => {
+        vi.advanceTimersByTime(10000);
+      });
 
-    // Fast forward 10 seconds (ping interval)
-    await act(async () => {
-      vi.advanceTimersByTime(10000);
-    });
-
-    // Check that ping was sent
-    const ws = MockWebSocket.getLatest();
-    expect(ws?.send).toHaveBeenCalledWith(expect.stringContaining('"type":"ping"'));
-
-    vi.useRealTimers();
+      // Check that ping was sent
+      const ws = MockWebSocket.getLatest();
+      expect(ws?.send).toHaveBeenCalledWith(expect.stringContaining('"type":"ping"'));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('handles pong response without writing to terminal', async () => {
@@ -480,69 +496,71 @@ describe('TerminalView', () => {
 
   it('closes connection on pong timeout', async () => {
     vi.useFakeTimers();
+    try {
+      await act(async () => {
+        render(<TerminalView />);
+      });
 
-    await act(async () => {
-      render(<TerminalView />);
-    });
+      const ws = MockWebSocket.getLatest();
+      await act(async () => {
+        ws?.simulateOpen();
+      });
 
-    const ws = MockWebSocket.getLatest();
-    await act(async () => {
-      ws?.simulateOpen();
-    });
-
-    // First ping happens at 10s - advance to trigger it
-    await act(async () => {
-      vi.advanceTimersByTime(10000);
-    });
-
-    // Should have sent ping
-    expect(ws?.send).toHaveBeenCalledWith(expect.stringContaining('"type":"ping"'));
-
-    // Now advance past the pong timeout (25s) to trigger timeout check on next ping
-    // The next ping at 20s will check if sincePong > 25s (it won't be yet)
-    // The next ping at 30s will check - at that point sincePong ~= 30s > 25s
-    await act(async () => {
-      vi.advanceTimersByTime(20000); // Total 30s from open
-    });
-
-    // Should have closed the connection due to pong timeout
-    expect(ws?.close).toHaveBeenCalled();
-
-    vi.useRealTimers();
-  });
-
-  it('does not close connection when pong is received', async () => {
-    vi.useFakeTimers();
-
-    await act(async () => {
-      render(<TerminalView />);
-    });
-
-    const ws = MockWebSocket.getLatest();
-    await act(async () => {
-      ws?.simulateOpen();
-    });
-
-    // Advance time but send pong periodically
-    for (let i = 0; i < 3; i++) {
-      // Advance 10 seconds
+      // First ping happens at 10s - advance to trigger it
       await act(async () => {
         vi.advanceTimersByTime(10000);
       });
 
-      // Simulate pong response
+      // Should have sent ping
+      expect(ws?.send).toHaveBeenCalledWith(expect.stringContaining('"type":"ping"'));
+
+      // Now advance past the pong timeout (25s) to trigger timeout check on next ping
+      // The next ping at 20s will check if sincePong > 25s (it won't be yet)
+      // The next ping at 30s will check - at that point sincePong ~= 30s > 25s
       await act(async () => {
-        if (ws?.onmessage) {
-          ws.onmessage(new MessageEvent('message', { data: '{"type":"pong"}' }));
-        }
+        vi.advanceTimersByTime(20000); // Total 30s from open
       });
+
+      // Should have closed the connection due to pong timeout
+      expect(ws?.close).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
     }
+  });
 
-    // Connection should still be open (close not called for timeout)
-    // Note: close may be called on cleanup, so check specific reason
-    expect(screen.getByText('Connected')).toBeInTheDocument();
+  it('does not close connection when pong is received', async () => {
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        render(<TerminalView />);
+      });
 
-    vi.useRealTimers();
+      const ws = MockWebSocket.getLatest();
+      await act(async () => {
+        ws?.simulateOpen();
+      });
+
+      // Advance time but send pong periodically
+      for (let i = 0; i < 3; i++) {
+        // Advance 10 seconds
+        await act(async () => {
+          vi.advanceTimersByTime(10000);
+        });
+
+        // Simulate pong response
+        await act(async () => {
+          if (ws?.onmessage) {
+            ws.onmessage(new MessageEvent('message', { data: '{"type":"pong"}' }));
+          }
+        });
+      }
+
+      // Connection should still be open (close not called for timeout)
+      // Note: close may be called on cleanup, so check specific reason
+      expect(screen.getByText('Connected')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

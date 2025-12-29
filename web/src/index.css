@@ -530,6 +530,21 @@ button.secondary {
   justify-content: center;
 }
 
+/* Sortable tab wrapper for drag-and-drop */
+.sortable-tab {
+  display: flex;
+  touch-action: none; /* Prevents touch scrolling during drag */
+}
+
+.sortable-tab.dragging {
+  z-index: 100;
+}
+
+.sortable-tab.dragging .tab-button {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  border-color: #3f7df4;
+}
+
 .tab-label {
   max-width: 140px;
   white-space: nowrap;

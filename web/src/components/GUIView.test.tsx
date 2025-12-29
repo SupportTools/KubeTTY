@@ -83,10 +83,11 @@ describe('GUIView', () => {
     render(<GUIView {...defaultProps} />);
 
     // Wait for the connecting state (after 50ms delay)
+    // Both assertions inside waitFor to avoid race with mock connection
     await waitFor(() => {
       expect(document.querySelector('.gui-view__overlay')).toBeInTheDocument();
+      expect(document.querySelector('.gui-view__spinner')).toBeInTheDocument();
     });
-    expect(document.querySelector('.gui-view__spinner')).toBeInTheDocument();
   });
 
   it('calls onStatusChange when connection status changes', async () => {

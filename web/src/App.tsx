@@ -309,6 +309,35 @@ const App = () => {
     ));
   }, []);
 
+  // Handle tab reordering via drag-and-drop
+  const handleReorderTabs = useCallback(
+    async (tabIds: string[]) => {
+      // Optimistically reorder local state
+      setTabs(prev => {
+        const tabMap = new Map(prev.map(t => [t.tabId, t]));
+        return tabIds.map(id => tabMap.get(id)).filter(Boolean) as typeof prev;
+      });
+
+      // Persist to backend
+      try {
+        const res = await authFetch('/api/tabs/reorder', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tabIds }),
+        });
+        if (!res.ok) {
+          const errorMessage = await parseErrorResponse(res);
+          throw new Error(errorMessage);
+        }
+        // SSE will sync final state
+      } catch {
+        showToast('Failed to reorder tabs');
+        // SSE will restore correct order
+      }
+    },
+    [authFetch, showToast]
+  );
+
   const showGatewayUI = authenticated && gatewayState === "enabled";
   const decoratedTabs = useMemo(
     () =>
@@ -408,6 +437,7 @@ const App = () => {
             onSelect={handleTabSelect}
             onClose={handleCloseTab}
             onNew={() => setPickerOpen(true)}
+            onReorder={handleReorderTabs}
             projects={projects}
           />
           {activeTab && (

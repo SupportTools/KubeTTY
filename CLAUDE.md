@@ -54,7 +54,7 @@ The Dockerfile and Helm chart use `KUBETTY_MODE` environment variable to select 
 ## Technology Stack
 
 ### Backend (server/)
-- **Language**: Go 1.23
+- **Language**: Go 1.24
 - **HTTP Server**: net/http with ServeMux
 - **WebSocket**: gorilla/websocket
 - **Database**: PostgreSQL via pgxpool (pgx/v5)
@@ -274,7 +274,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 ## Important Rules
 
-1. **Go 1.23** - Always use Go 1.23 (check server/go.mod)
+1. **Go 1.24** - Always use Go 1.24 (check server/go.mod)
 2. **No console.log** - Remove debug logs before committing
 3. **Input validation** - Validate all user inputs
 4. **Test coverage** - Write tests for all new code

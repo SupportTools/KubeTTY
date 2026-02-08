@@ -14,7 +14,7 @@ on:
 env:
   REGISTRY: harbor.support.tools
   IMAGE_NAME: kubetty/kubetty
-  GO_VERSION: '1.23'
+  GO_VERSION: '1.24'
   NODE_VERSION: '20'
 
 jobs:
@@ -35,7 +35,7 @@ jobs:
       - name: Verify Go version
         run: |
           go version
-          go version | grep -q "go1.23" || (echo "ERROR: Must use Go 1.23.x" && exit 1)
+          go version | grep -q "go1.24" || (echo "ERROR: Must use Go 1.24.x" && exit 1)
 
       - name: Check Go formatting
         working-directory: server
@@ -194,7 +194,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            GO_VERSION=1.23.3
+            GO_VERSION=1.24.3
             NODE_MAJOR=20
 
   # Stage 4: Security Scanning (disabled - image too large for CI timeout)

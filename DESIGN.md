@@ -809,7 +809,7 @@ metadata:
   namespace: kubetty-projects-dev
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: longhorn
+  storageClassName: freenas-iscsi-csi
   resources:
     requests:
       storage: 50Gi

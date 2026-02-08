@@ -36,7 +36,7 @@ dataPVC:
   enabled: true
   create: true
   name: "project-data"
-  storageClass: longhorn
+  storageClass: freenas-iscsi-csi
   accessModes:
     - ReadWriteOnce
   size: 50Gi

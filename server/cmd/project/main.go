@@ -34,6 +34,13 @@ import (
 //go:embed ui/dist ui/dist/*
 var embeddedUI embed.FS
 
+// Build-time variables set via -ldflags
+var (
+	version   = "dev"
+	gitCommit = "unknown"
+	buildTime = "unknown"
+)
+
 // PTY input validation limits
 const (
 	maxPTYCols = 500
@@ -362,6 +369,9 @@ func main() {
 		return srv.pty != nil && srv.pty.isAlive()
 	})
 	mux.Handle("/api/healthz", health.NewCompatHandler(nil, ptyChecker))
+
+	// Version endpoint - returns the application version
+	mux.HandleFunc("/api/version", handleVersion)
 
 	// Project endpoints - PTY WebSocket only (no session logs without DB)
 	mux.HandleFunc("/ws", srv.handleWebsocket)
@@ -1133,21 +1143,11 @@ type networkMetric struct {
 	TxRate  int64 `json:"txRate"` // Calculated by gateway
 }
 
-// getDiskMetrics returns disk usage for the Longhorn PVC.
-// It specifically looks for mount points backed by /dev/longhorn/pvc-* devices
-// to ensure we only report PVC storage, not container overlay filesystem.
+// getDiskMetrics returns disk usage for the PVC mounted at /home.
 func getDiskMetrics() resourceMetric {
-	// Find mount point backed by Longhorn PVC
-	mountPath := findLonghornPVCMount()
-	if mountPath == "" {
-		// Fallback to /home if no Longhorn mount found
-		mountPath = "/home"
-		log.Debug("No Longhorn PVC mount found, falling back to /home")
-	}
-
 	var stat syscall.Statfs_t
-	if err := syscall.Statfs(mountPath, &stat); err != nil {
-		log.WithError(err).WithField("path", mountPath).Debug("Failed to get disk stats")
+	if err := syscall.Statfs("/home", &stat); err != nil {
+		log.WithError(err).Debug("Failed to get disk stats for /home")
 		return resourceMetric{}
 	}
 
@@ -1165,57 +1165,6 @@ func getDiskMetrics() resourceMetric {
 		Limit:   total,
 		Percent: percent,
 	}
-}
-
-// findLonghornPVCMount parses /proc/mounts to find a mount backed by a Longhorn PVC.
-// Returns the mount path if found, empty string otherwise.
-// Looks for devices matching /dev/longhorn/pvc-* pattern.
-func findLonghornPVCMount() string {
-	file, err := os.Open("/proc/mounts")
-	if err != nil {
-		log.WithError(err).Debug("Failed to open /proc/mounts")
-		return ""
-	}
-	defer file.Close()
-
-	buf := make([]byte, 8192)
-	n, err := file.Read(buf)
-	if err != nil {
-		log.WithError(err).Debug("Failed to read /proc/mounts")
-		return ""
-	}
-
-	// Parse /proc/mounts format:
-	// device mountpoint fstype options dump pass
-	// Example: /dev/longhorn/pvc-abc123 /home ext4 rw,relatime 0 0
-	for _, line := range splitLines(string(buf[:n])) {
-		fields := splitFields(line)
-		if len(fields) < 2 {
-			continue
-		}
-
-		device := fields[0]
-		mountPoint := fields[1]
-
-		// Check if device is a Longhorn PVC
-		if hasPrefix(device, "/dev/longhorn/pvc-") {
-			log.WithFields(log.Fields{
-				"device": device,
-				"mount":  mountPoint,
-			}).Debug("Found Longhorn PVC mount")
-			return mountPoint
-		}
-	}
-
-	return ""
-}
-
-// hasPrefix checks if string s has the given prefix (without importing strings).
-func hasPrefix(s, prefix string) bool {
-	if len(s) < len(prefix) {
-		return false
-	}
-	return s[:len(prefix)] == prefix
 }
 
 // getNetworkMetrics reads network statistics from /proc/net/dev.
@@ -1307,6 +1256,16 @@ func splitFields(s string) []string {
 		fields = append(fields, s[start:])
 	}
 	return fields
+}
+
+// handleVersion returns the application version and build info.
+func handleVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"version":   version,
+		"gitCommit": gitCommit,
+		"buildTime": buildTime,
+	})
 }
 
 func containsChar(s string, c byte) bool {

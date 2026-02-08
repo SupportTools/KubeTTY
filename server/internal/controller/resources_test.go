@@ -23,7 +23,7 @@ func testProject(name string) *projects.Project {
 		MemoryRequest:   "2Gi",
 		MemoryLimit:     "8Gi",
 		StorageSize:     "50Gi",
-		StorageClass:    "longhorn",
+		StorageClass:    "freenas-iscsi-csi",
 		ImageRepository: "harbor.support.tools/kubetty/kubetty",
 		ImageTag:        "latest",
 		DinDEnabled:     false,

@@ -207,7 +207,7 @@ const (
 	DefaultMemoryRequest    = "2Gi"
 	DefaultMemoryLimit      = "8Gi"
 	DefaultStorageSize      = "50Gi"
-	DefaultStorageClass     = "longhorn"
+	DefaultStorageClass     = "freenas-iscsi-csi"
 	DefaultMaxTabsPerClient = 3
 	DefaultMaxTabsTotal     = 10
 	DefaultImageRepository  = "harbor.support.tools/kubetty/kubetty"

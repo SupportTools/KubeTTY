@@ -50,7 +50,7 @@ spec:
   # Smaller storage for dev
   storage:
     size: 2Gi
-    storageClass: longhorn
+    storageClass: local-path-cnpg
     resizeInUseVolumes: true
 
   # PostgreSQL configuration (simplified from prod)

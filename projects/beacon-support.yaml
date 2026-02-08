@@ -64,7 +64,7 @@ dataPVC:
   create: true
   existingClaim: ""
   name: ""
-  storageClass: longhorn
+  storageClass: freenas-iscsi-csi
   accessModes:
     - ReadWriteOnce
   size: 50Gi

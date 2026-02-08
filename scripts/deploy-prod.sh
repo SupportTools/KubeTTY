@@ -202,7 +202,7 @@ spec:
   resources:
     requests:
       storage: ${SOURCE_SIZE:-10Gi}
-  storageClassName: ${SOURCE_SC:-longhorn}
+  storageClassName: ${SOURCE_SC:-freenas-iscsi-csi}
 EOF
 
         # Step 2: Scale down old deployment

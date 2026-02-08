@@ -109,7 +109,7 @@ dataPVC:
   name: ""
 
   # Storage class
-  storageClass: longhorn
+  storageClass: freenas-iscsi-csi
 
   # Access modes
   accessModes:

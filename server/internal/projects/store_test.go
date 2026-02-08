@@ -209,7 +209,7 @@ func TestDefaultConstants(t *testing.T) {
 		{"DefaultMemoryRequest", DefaultMemoryRequest, "2Gi"},
 		{"DefaultMemoryLimit", DefaultMemoryLimit, "8Gi"},
 		{"DefaultStorageSize", DefaultStorageSize, "50Gi"},
-		{"DefaultStorageClass", DefaultStorageClass, "longhorn"},
+		{"DefaultStorageClass", DefaultStorageClass, "freenas-iscsi-csi"},
 		{"DefaultImageRepository", DefaultImageRepository, "harbor.support.tools/kubetty/kubetty"},
 		{"DefaultImageTag", DefaultImageTag, "latest"},
 	}

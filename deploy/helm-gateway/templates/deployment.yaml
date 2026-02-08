@@ -50,6 +50,14 @@ spec:
           env:
             - name: KUBETTY_MODE
               value: "gateway"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: DEPLOYMENT_ID
               value: {{ .Values.deploymentId | quote }}
             # Database configuration

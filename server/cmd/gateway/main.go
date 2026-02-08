@@ -69,6 +69,13 @@ const (
 // usernameRegex allows only alphanumeric characters, underscores, and dashes
 var usernameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
+// Build-time variables set via -ldflags
+var (
+	version   = "dev"
+	gitCommit = "unknown"
+	buildTime = "unknown"
+)
+
 func main() {
 	// Create cancellable context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -494,6 +501,9 @@ func main() {
 
 	// Leader status endpoint for monitoring leader election
 	mux.Handle("/api/healthz/leader", health.NewLeaderStatusHandler(srv.leaderElector))
+
+	// Version endpoint - returns the application version
+	mux.HandleFunc("/api/version", handleVersion)
 
 	// Auth middleware
 	requireAuth := handlers_auth.RequireAuth(srv.cfg, srv.authMgr)
@@ -1528,6 +1538,16 @@ func (s *server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	}).Debug("gateway/main: returning project list")
 
 	_ = util.WriteJSON(w, http.StatusOK, map[string]any{"projects": result})
+}
+
+// handleVersion returns the application version and build info.
+func handleVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"version":   version,
+		"gitCommit": gitCommit,
+		"buildTime": buildTime,
+	})
 }
 
 func cloneURL(u *url.URL) *url.URL {

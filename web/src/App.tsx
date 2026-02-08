@@ -69,6 +69,7 @@ const App = () => {
   const [dashboardOpen, setDashboardOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [eventRetry, setEventRetry] = useState(0);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const authenticated = authState === "authenticated";
 
   const showToast = useCallback((message: string) => {
@@ -87,6 +88,14 @@ const App = () => {
 
   const healthForTab = useCallback((tabId: string) => {
     return `${window.location.origin}/api/tabs/${encodeURIComponent(tabId)}/health`;
+  }, []);
+
+  // Fetch application version on mount
+  useEffect(() => {
+    fetch("/api/version")
+      .then(res => res.json())
+      .then(data => setAppVersion(data.version))
+      .catch(() => setAppVersion(null));
   }, []);
 
   useEffect(() => {
@@ -289,14 +298,16 @@ const App = () => {
 
   // Handle bell alerts from terminal
   const handleBellAlert = useCallback((tabId: string) => {
-    // Only alert if tab is not focused
+    // Always play sound (for both active and inactive tabs)
+    playBellSound();
+
+    // Only show visual indicator if tab is not focused
     if (tabId !== activeTabId) {
       setTabs(prev => prev.map(t =>
         t.tabId === tabId
           ? { ...t, hasBellAlert: true }
           : t
       ));
-      playBellSound();
     }
   }, [activeTabId]);
 
@@ -374,6 +385,7 @@ const App = () => {
       <div className="brand">
         <img src={logo} alt="KubeTTY" className="logo" />
         <h1>KubeTTY</h1>
+        {appVersion && <span className="version-badge">{appVersion}</span>}
       </div>
       {authenticated && (
         <div className="session-info">

@@ -13,7 +13,7 @@ ARG KUBETTY_VERSION=dev
 FROM node:${NODE_MAJOR}-bullseye AS ui-builder
 WORKDIR /workspace
 
-# Copy both web and server so Vite's output path (../server/ui/dist) exists.
+# Copy both web and server so Vite's output path (../server/cmd/gateway/ui/dist) exists.
 COPY web ./web
 COPY server ./server
 
@@ -25,17 +25,25 @@ RUN npm run build
 # Build Go backend binary     #
 ###############################
 FROM golang:${GO_VERSION}-bullseye AS go-builder
+ARG KUBETTY_VERSION=dev
+ARG GIT_COMMIT=unknown
 WORKDIR /workspace
 
 COPY server/go.mod server/go.sum ./server/
 RUN cd server && go mod download
 
 COPY server ./server
-COPY --from=ui-builder /workspace/server/ui/dist ./server/ui/dist
+# Vite outputs to server/cmd/gateway/ui/dist; both binaries embed ui/dist relative to their cmd dir
+COPY --from=ui-builder /workspace/server/cmd/gateway/ui/dist ./server/cmd/gateway/ui/dist
+COPY --from=ui-builder /workspace/server/cmd/gateway/ui/dist ./server/cmd/project/ui/dist
 
 WORKDIR /workspace/server
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /workspace/kubetty-gateway ./cmd/gateway && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /workspace/kubetty-project ./cmd/project
+
+# Build with version info injected via ldflags
+RUN BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ') && \
+    LDFLAGS="-X main.version=${KUBETTY_VERSION} -X main.gitCommit=${GIT_COMMIT} -X main.buildTime=${BUILD_TIME}" && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o /workspace/kubetty-gateway ./cmd/gateway && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o /workspace/kubetty-project ./cmd/project
 
 ###############################
 # Runtime image with tooling  #

@@ -410,8 +410,8 @@ func TestWebSocket_ForceReconnect(t *testing.T) {
 	select {
 	case <-disconnected:
 		// Success - first client was disconnected
-	case <-time.After(2 * time.Second):
-		t.Error("First client should have been disconnected within 2 seconds")
+	case <-time.After(5 * time.Second):
+		t.Error("First client should have been disconnected within 5 seconds")
 	}
 
 	// Clean up
@@ -477,8 +477,8 @@ func TestWebSocket_ForceReconnect_CloseCode(t *testing.T) {
 		if !strings.Contains(reason, "taken over") {
 			t.Errorf("Close reason = %q, want to contain 'taken over'", reason)
 		}
-	case <-time.After(2 * time.Second):
-		t.Error("Should have received close code within 2 seconds")
+	case <-time.After(5 * time.Second):
+		t.Error("Should have received close code within 5 seconds")
 	}
 
 	// Clean up

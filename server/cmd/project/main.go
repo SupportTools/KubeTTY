@@ -254,6 +254,7 @@ type ptySession struct {
 
 	mu           sync.RWMutex
 	clients      map[*websocket.Conn]*wsClient
+	reserved     int                // reserved slots for in-progress WebSocket upgrades
 	outputBuffer *buffer.RingBuffer // Ring buffer for PTY output replay (default 8MB)
 
 	// Metrics reference for broadcast error tracking
@@ -452,8 +453,8 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	forceParam := r.URL.Query().Get("force")
 	forceConnect := forceParam == "true" || forceParam == "1"
 
-	if ps.hasClients() {
-		if forceConnect {
+	if forceConnect {
+		if ps.hasClients() {
 			// Force takeover: disconnect existing clients with explanation
 			log.WithFields(log.Fields{
 				"session_uuid": sessionUUID,
@@ -462,7 +463,11 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 				"client_count": ps.getClientCount(),
 			}).Info("project/ws: Force takeover requested - disconnecting existing client(s)")
 			ps.disconnectAllClients("session taken over by another client")
-		} else {
+		}
+	} else {
+		// Atomically check-and-reserve to prevent TOCTOU race between
+		// hasClients check and addClient after WebSocket upgrade
+		if !ps.reserveSlot() {
 			log.WithFields(log.Fields{
 				"session_uuid": sessionUUID,
 				"conn_id":      connID,
@@ -472,6 +477,10 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			apierrors.WriteError(w, apierrors.Conflict("session already attached", "only one client allowed; use ?force=true to take over"))
 			return
 		}
+		// If WebSocket upgrade fails below, release the reserved slot
+		defer func() {
+			ps.releaseSlot()
+		}()
 	}
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
@@ -901,6 +910,11 @@ func (ps *ptySession) addClient(conn *websocket.Conn) *wsClient {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
+	// Consume reserved slot (set by reserveSlot before WebSocket upgrade)
+	if ps.reserved > 0 {
+		ps.reserved--
+	}
+
 	client := &wsClient{conn: conn}
 
 	// Get ring buffer info for metadata
@@ -998,7 +1012,28 @@ func (ps *ptySession) removeClient(conn *websocket.Conn) {
 func (ps *ptySession) hasClients() bool {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
-	return len(ps.clients) > 0
+	return len(ps.clients) > 0 || ps.reserved > 0
+}
+
+// reserveSlot atomically checks for existing clients and reserves a slot.
+// Returns true if the slot was reserved (no existing clients), false if busy.
+func (ps *ptySession) reserveSlot() bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if len(ps.clients) > 0 || ps.reserved > 0 {
+		return false
+	}
+	ps.reserved++
+	return true
+}
+
+// releaseSlot releases a previously reserved slot (e.g. after upgrade failure).
+func (ps *ptySession) releaseSlot() {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.reserved > 0 {
+		ps.reserved--
+	}
 }
 
 func (ps *ptySession) getClientCount() int {

@@ -298,36 +298,36 @@ jobs:
         with:
           version: 'v3.15.2'
 
-      - name: Lint Helm chart
+      - name: Lint Helm charts
         run: |
-          # Lint with minimal required values for validation
-          helm lint deploy/helm/ \
-            --set cnpg.host=test-db.svc.cluster.local \
-            --set cnpg.userSecret=test-secret \
-            --set env.sessionID=00000000-0000-0000-0000-000000000001
-          helm lint deploy/helm/ -f deploy/helm/values.project-template.yaml \
+          # Gateway chart - default values
+          helm lint deploy/helm-gateway/
+          # Gateway chart - production values
+          helm lint deploy/helm-gateway/ -f deploy/helm-gateway/values.prd.yaml
+          # Project chart - requires projectId and sessionID
+          helm lint deploy/helm-project/ \
+            --set projectId=lint-test \
             --set env.sessionID=00000000-0000-0000-0000-000000000001
 
       - name: Validate Helm templates
         run: |
-          # Template with minimal required values for validation
-          helm template kubetty deploy/helm/ \
-            --set cnpg.host=test-db.svc.cluster.local \
-            --set cnpg.userSecret=test-secret \
-            --set env.sessionID=00000000-0000-0000-0000-000000000001 > /dev/null
-          helm template kubetty-project deploy/helm/ -f deploy/helm/values.project-template.yaml \
+          helm template gateway deploy/helm-gateway/ > /dev/null
+          helm template gateway deploy/helm-gateway/ -f deploy/helm-gateway/values.prd.yaml > /dev/null
+          helm template project deploy/helm-project/ \
+            --set projectId=template-test \
             --set env.sessionID=00000000-0000-0000-0000-000000000001 > /dev/null
 
-      - name: Package Helm chart
+      - name: Package Helm charts
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         run: |
-          helm package deploy/helm/ --destination ./helm-packages
+          helm package deploy/helm-gateway/ --destination ./helm-packages
+          helm package deploy/helm-project/ --destination ./helm-packages
 
-      - name: Upload Helm chart as artifact
+      - name: Upload Helm charts as artifact
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
-          name: helm-chart
+          name: helm-charts
           path: helm-packages/*.tgz
 
   # Stage 6: Deploy to Production
@@ -409,30 +409,20 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Deploying version: ${TAG}"
 
-      - name: Validate CNPG credentials
-        run: |
-          if [ -z "${{ secrets.CNPG_HOST }}" ]; then
-            echo "ERROR: CNPG_HOST secret not configured"
-            echo "Please configure CNPG database secrets in repository settings"
-            exit 1
-          fi
-
       - name: Deploy to production
         id: deploy
         run: |
           # Capture current revision for potential rollback
-          CURRENT_REVISION=$(helm history kubetty -n kubetty --max 1 -o json 2>/dev/null | jq -r '.[0].revision // "0"') || CURRENT_REVISION="0"
+          CURRENT_REVISION=$(helm history gateway -n kubetty-gateway-prd --max 1 -o json 2>/dev/null | jq -r '.[0].revision // "0"') || CURRENT_REVISION="0"
           echo "current-revision=${CURRENT_REVISION}" >> "$GITHUB_OUTPUT"
           echo "Deploying version: ${{ steps.extract-tag.outputs.tag }}"
           echo "Current revision: ${CURRENT_REVISION}"
 
-          helm upgrade --install kubetty deploy/helm/ \
-            --namespace kubetty \
-            --create-namespace \
+          helm upgrade --install gateway deploy/helm-gateway/ \
+            -n kubetty-gateway-prd \
+            -f deploy/helm-gateway/values.prd.yaml \
             --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
             --set image.tag=${{ steps.extract-tag.outputs.tag }} \
-            --set cnpg.host=${{ secrets.CNPG_HOST }} \
-            --set cnpg.userSecret=${{ secrets.CNPG_USER_SECRET }} \
             --wait \
             --timeout=5m \
             --history-max=20 \
@@ -441,12 +431,12 @@ jobs:
       - name: Verify deployment
         run: |
           kubectl wait --for=condition=ready pod \
-            -l app.kubernetes.io/name=kubetty \
-            -n kubetty \
+            -l app.kubernetes.io/name=kubetty-gateway \
+            -n kubetty-gateway-prd \
             --timeout=300s
 
           # Check pod health
-          READY_PODS=$(kubectl get pods -n kubetty -l app.kubernetes.io/name=kubetty -o json | jq '[.items[] | select(.status.phase == "Running")] | length')
+          READY_PODS=$(kubectl get pods -n kubetty-gateway-prd -l app.kubernetes.io/name=kubetty-gateway -o json | jq '[.items[] | select(.status.phase == "Running")] | length')
           if [ "$READY_PODS" -eq 0 ]; then
             echo "ERROR: No pods are running after deployment"
             exit 1
@@ -456,15 +446,15 @@ jobs:
       - name: Run smoke tests
         run: |
           echo "=== Pod Status ==="
-          kubectl get pods -n kubetty -l app.kubernetes.io/name=kubetty
+          kubectl get pods -n kubetty-gateway-prd -l app.kubernetes.io/name=kubetty-gateway
 
           echo ""
           echo "=== Service Endpoints ==="
-          kubectl get svc -n kubetty
+          kubectl get svc -n kubetty-gateway-prd
 
           echo ""
           echo "=== Deployment Status ==="
-          kubectl rollout status deployment -n kubetty -l app.kubernetes.io/name=kubetty --timeout=60s
+          kubectl rollout status deployment/gateway -n kubetty-gateway-prd --timeout=60s
 
       - name: Rollback on failure
         if: failure() && steps.deploy.outputs.current-revision != '0'
@@ -472,12 +462,12 @@ jobs:
           echo "❌ PRODUCTION DEPLOYMENT FAILED ❌"
           echo "Attempting automatic rollback to revision ${{ steps.deploy.outputs.current-revision }}..."
 
-          helm rollback kubetty ${{ steps.deploy.outputs.current-revision }} -n kubetty --wait
+          helm rollback gateway ${{ steps.deploy.outputs.current-revision }} -n kubetty-gateway-prd --wait
 
           # Verify rollback succeeded
           kubectl wait --for=condition=ready pod \
-            -l app.kubernetes.io/name=kubetty \
-            -n kubetty \
+            -l app.kubernetes.io/name=kubetty-gateway \
+            -n kubetty-gateway-prd \
             --timeout=180s || echo "⚠️  WARNING: Rollback verification failed - manual intervention required"
 
           echo "Rollback completed. Please investigate the failure before attempting another deployment."
@@ -486,12 +476,12 @@ jobs:
         if: failure()
         run: |
           echo "=== Failed Pod Logs ==="
-          for pod in $(kubectl get pods -n kubetty -l app.kubernetes.io/name=kubetty -o name | head -5); do
+          for pod in $(kubectl get pods -n kubetty-gateway-prd -l app.kubernetes.io/name=kubetty-gateway -o name | head -5); do
             echo "Logs from ${pod}:"
-            kubectl logs ${pod} -n kubetty --tail=100 || echo "Could not retrieve logs for ${pod}"
+            kubectl logs ${pod} -n kubetty-gateway-prd --tail=100 || echo "Could not retrieve logs for ${pod}"
             echo "---"
           done
 
           echo ""
           echo "=== Recent Events ==="
-          kubectl get events -n kubetty --sort-by='.lastTimestamp' | tail -30
+          kubectl get events -n kubetty-gateway-prd --sort-by='.lastTimestamp' | tail -30

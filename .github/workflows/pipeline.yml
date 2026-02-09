@@ -413,12 +413,12 @@ jobs:
         id: deploy
         run: |
           # Capture current revision for potential rollback
-          CURRENT_REVISION=$(helm history gateway -n kubetty-gateway-prd --max 1 -o json 2>/dev/null | jq -r '.[0].revision // "0"') || CURRENT_REVISION="0"
+          CURRENT_REVISION=$(helm history kubetty-gateway -n kubetty-gateway-prd --max 1 -o json 2>/dev/null | jq -r '.[0].revision // "0"') || CURRENT_REVISION="0"
           echo "current-revision=${CURRENT_REVISION}" >> "$GITHUB_OUTPUT"
           echo "Deploying version: ${{ steps.extract-tag.outputs.tag }}"
           echo "Current revision: ${CURRENT_REVISION}"
 
-          helm upgrade --install gateway deploy/helm-gateway/ \
+          helm upgrade --install kubetty-gateway deploy/helm-gateway/ \
             -n kubetty-gateway-prd \
             -f deploy/helm-gateway/values.prd.yaml \
             --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
@@ -462,7 +462,7 @@ jobs:
           echo "❌ PRODUCTION DEPLOYMENT FAILED ❌"
           echo "Attempting automatic rollback to revision ${{ steps.deploy.outputs.current-revision }}..."
 
-          helm rollback gateway ${{ steps.deploy.outputs.current-revision }} -n kubetty-gateway-prd --wait
+          helm rollback kubetty-gateway ${{ steps.deploy.outputs.current-revision }} -n kubetty-gateway-prd --wait
 
           # Verify rollback succeeded
           kubectl wait --for=condition=ready pod \

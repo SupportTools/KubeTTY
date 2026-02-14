@@ -243,6 +243,10 @@ spec:
             - name: TEMPLATE_PVC_NAME
               value: {{ .Values.controller.templatePVCName | quote }}
 {{- end }}
+{{- if .Values.controller.pvcSuffix }}
+            - name: PVC_SUFFIX
+              value: {{ .Values.controller.pvcSuffix | quote }}
+{{- end }}
 {{- /* Storage monitoring configuration */}}
             - name: STORAGE_MONITOR_ENABLED
               value: {{ if .Values.controller.storageMonitor }}{{ default "true" .Values.controller.storageMonitor.enabled | quote }}{{ else }}"true"{{ end }}

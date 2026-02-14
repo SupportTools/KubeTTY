@@ -349,6 +349,12 @@ controller:
   # Leave empty to disable template sync
   templatePVCName: ""
 
+  # PVC name suffix appended to project resource names
+  # Default: "-data" (e.g., "kubetty-project-alpha-data")
+  # Set to "-data-truenas" for environments migrated to TrueNAS storage
+  # Leave empty to use the code default of "-data"
+  pvcSuffix: ""
+
   # Storage monitoring and auto-expansion configuration
   # Automatically expands project PVCs when storage usage exceeds threshold
   storageMonitor:

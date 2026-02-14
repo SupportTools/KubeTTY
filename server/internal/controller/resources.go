@@ -68,6 +68,10 @@ type ResourceConfig struct {
 	// Used for NetworkPolicy to allow VNC traffic from gateway.
 	// (e.g., "kubetty-gateway-dev")
 	GatewayNamespace string
+
+	// PVCSuffix is appended to the resource name to form the PVC name.
+	// Default: "-data". Set to "-data-truenas" for migrated environments.
+	PVCSuffix string
 }
 
 // dnsNameRegex validates DNS subdomain names per RFC 1123
@@ -105,6 +109,16 @@ func (c ResourceConfig) ResourceName(projectName string) string {
 	return fmt.Sprintf("%s%s", c.Prefix, sanitized)
 }
 
+// PVCName returns the full PVC name for a project.
+// Uses PVCSuffix if set, otherwise defaults to "-data".
+func (c ResourceConfig) PVCName(projectName string) string {
+	suffix := c.PVCSuffix
+	if suffix == "" {
+		suffix = "-data"
+	}
+	return fmt.Sprintf("%s%s", c.ResourceName(projectName), suffix)
+}
+
 // ClusterRoleName returns the name for a cluster-scoped RBAC resource.
 // Format: {prefix}{project-name}-{role}-{env}
 // If Env is empty, it omits the environment suffix.
@@ -129,10 +143,10 @@ func buildImagePullSecrets(secretNames []string) []corev1.LocalObjectReference {
 }
 
 // BuildPVC creates a PersistentVolumeClaim for project data storage.
-// Name format: {prefix}{project-name}-data
+// Name format: {prefix}{project-name}{pvc-suffix}
 func BuildPVC(p *projects.Project, cfg ResourceConfig) *corev1.PersistentVolumeClaim {
 	storageQuantity := resource.MustParse(p.StorageSize)
-	resourceName := fmt.Sprintf("%s-data", cfg.ResourceName(p.Name))
+	resourceName := cfg.PVCName(p.Name)
 
 	return &corev1.PersistentVolumeClaim{
 		TypeMeta: metav1.TypeMeta{
@@ -170,9 +184,8 @@ func (c ResourceConfig) TemplateSyncJobName(projectName string) string {
 // the template PVC attached to a running pod, which would block other projects.
 // Name format: {prefix}{project-name}-sync
 func BuildTemplateSyncJob(p *projects.Project, cfg ResourceConfig) *batchv1.Job {
-	resourceName := cfg.ResourceName(p.Name)
 	jobName := cfg.TemplateSyncJobName(p.Name)
-	pvcName := fmt.Sprintf("%s-data", resourceName)
+	pvcName := cfg.PVCName(p.Name)
 
 	// Job configuration
 	backoffLimit := int32(3)
@@ -411,7 +424,7 @@ func BuildNetworkPolicy(p *projects.Project, cfg ResourceConfig, gatewayNamespac
 func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName string) *appsv1.Deployment {
 	replicas := int32(1)
 	resourceName := cfg.ResourceName(p.Name)
-	pvcName := fmt.Sprintf("%s-data", resourceName)
+	pvcName := cfg.PVCName(p.Name)
 	saName := fmt.Sprintf("%s-sa", resourceName)
 
 	// Parse resource quantities

@@ -99,8 +99,7 @@ func (c *Controller) checkAllProjectStorage(ctx context.Context) {
 // checkProjectStorage checks a single project's storage and expands if needed.
 func (c *Controller) checkProjectStorage(ctx context.Context, p *projects.Project) error {
 	cfg := c.cfg.ResourceConfig
-	resourceName := cfg.ResourceName(p.Name)
-	pvcName := fmt.Sprintf("%s-data", resourceName)
+	pvcName := cfg.PVCName(p.Name)
 
 	// Get disk metrics from project pod
 	diskUsed, diskLimit, err := c.getProjectDiskMetrics(ctx, p, cfg)

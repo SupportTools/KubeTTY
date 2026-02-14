@@ -68,6 +68,7 @@ type ControllerConfig struct {
 	EnvSecretName       string        // Name of secret containing project env vars (default: "env-secrets")
 	ImagePullSecrets    []string      // List of image pull secret names (default: ["harbor-supporttools"])
 	TemplatePVCName     string        // Name of template PVC for base file sync (optional, empty disables sync)
+	PVCSuffix           string        // PVC name suffix (default: "-data", use "-data-truenas" for migrated envs)
 
 	// Storage monitoring configuration
 	StorageMonitorEnabled  bool          // Enable automatic PVC expansion when storage is low (default: true)
@@ -128,6 +129,7 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 			EnvSecretName:          sharedconfig.GetEnv("ENV_SECRET_NAME", "env-secrets"),
 			ImagePullSecrets:       parseImagePullSecrets(sharedconfig.GetEnv("IMAGE_PULL_SECRETS", "harbor-supporttools")),
 			TemplatePVCName:        os.Getenv("TEMPLATE_PVC_NAME"),
+			PVCSuffix:              sharedconfig.GetEnv("PVC_SUFFIX", "-data"),
 			StorageMonitorEnabled:  sharedconfig.GetEnvBool("STORAGE_MONITOR_ENABLED", true),
 			StorageMonitorInterval: sharedconfig.GetEnvDuration("STORAGE_MONITOR_INTERVAL", 60*time.Second),
 			StorageExpandThreshold: sharedconfig.GetEnvFloat64("STORAGE_EXPAND_THRESHOLD", 0.70),

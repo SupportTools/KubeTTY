@@ -519,7 +519,7 @@ func (c *Controller) handleUpdating(ctx context.Context, p *projects.Project) er
 	resourceName := cfg.ResourceName(p.Name)
 
 	// Handle PVC expansion if storage size changed
-	if err := c.expandPVCIfNeeded(ctx, p, cfg, resourceName); err != nil {
+	if err := c.expandPVCIfNeeded(ctx, p, cfg); err != nil {
 		logger.WithError(err).Warn("Failed to expand PVC (may require manual intervention)")
 		// Don't fail the entire update - PVC expansion may not be supported by storage class
 	}
@@ -1098,9 +1098,9 @@ func (c *Controller) UpdateProjectSecrets(ctx context.Context, p *projects.Proje
 
 // expandPVCIfNeeded expands a project's PVC if the requested storage is larger than current.
 // This only works if the storage class supports volume expansion (allowVolumeExpansion: true).
-func (c *Controller) expandPVCIfNeeded(ctx context.Context, p *projects.Project, cfg ResourceConfig, resourceName string) error {
+func (c *Controller) expandPVCIfNeeded(ctx context.Context, p *projects.Project, cfg ResourceConfig) error {
 	logger := log.WithField("project", p.Name)
-	pvcName := fmt.Sprintf("%s-data", resourceName)
+	pvcName := cfg.PVCName(p.Name)
 
 	// Get current PVC
 	pvc, err := c.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Get(ctx, pvcName, metav1.GetOptions{})

@@ -77,6 +77,49 @@ func TestResourceConfig_ResourceName(t *testing.T) {
 	}
 }
 
+func TestResourceConfig_PVCName(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         ResourceConfig
+		projectName string
+		expected    string
+	}{
+		{
+			name:        "default suffix",
+			cfg:         ResourceConfig{Prefix: "kubetty-project-"},
+			projectName: "alpha",
+			expected:    "kubetty-project-alpha-data",
+		},
+		{
+			name:        "custom suffix for truenas migration",
+			cfg:         ResourceConfig{Prefix: "kubetty-project-", PVCSuffix: "-data-truenas"},
+			projectName: "dr-syncer",
+			expected:    "kubetty-project-dr-syncer-data-truenas",
+		},
+		{
+			name:        "empty suffix defaults to -data",
+			cfg:         ResourceConfig{Prefix: "kubetty-project-", PVCSuffix: ""},
+			projectName: "beta",
+			expected:    "kubetty-project-beta-data",
+		},
+		{
+			name:        "custom suffix with different prefix",
+			cfg:         ResourceConfig{Prefix: "proj-", PVCSuffix: "-storage"},
+			projectName: "myapp",
+			expected:    "proj-myapp-storage",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.cfg.PVCName(tt.projectName)
+			if result != tt.expected {
+				t.Errorf("PVCName() = %q, expected %q", result, tt.expected)
+			}
+		})
+	}
+}
+
 func TestSanitizeName(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -223,6 +266,39 @@ func TestBuildPVC(t *testing.T) {
 	// Test storage class
 	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != p.StorageClass {
 		t.Errorf("PVC storageClass = %v, expected %q", pvc.Spec.StorageClassName, p.StorageClass)
+	}
+}
+
+func TestBuildPVC_CustomSuffix(t *testing.T) {
+	p := testProject("dr-syncer")
+	cfg := testConfig()
+	cfg.PVCSuffix = "-data-truenas"
+
+	pvc := BuildPVC(p, cfg)
+
+	expectedName := "kubetty-project-dr-syncer-data-truenas"
+	if pvc.Name != expectedName {
+		t.Errorf("PVC name = %q, expected %q", pvc.Name, expectedName)
+	}
+}
+
+func TestBuildDeployment_CustomPVCSuffix(t *testing.T) {
+	p := testProject("fruition")
+	cfg := testConfig()
+	cfg.PVCSuffix = "-data-truenas"
+
+	deploy := BuildDeployment(p, cfg, "")
+
+	expectedPVCName := "kubetty-project-fruition-data-truenas"
+	foundPVC := false
+	for _, vol := range deploy.Spec.Template.Spec.Volumes {
+		if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == expectedPVCName {
+			foundPVC = true
+			break
+		}
+	}
+	if !foundPVC {
+		t.Errorf("Deployment should reference PVC %q", expectedPVCName)
 	}
 }
 

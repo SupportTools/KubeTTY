@@ -218,6 +218,7 @@ func main() {
 				Env:              cfg.Controller.ParseEnvironment(),
 				ImagePullSecrets: cfg.Controller.ImagePullSecrets,
 				TemplatePVCName:  cfg.Controller.TemplatePVCName,
+				PVCSuffix:        cfg.Controller.PVCSuffix,
 			},
 			StorageMonitor: controller.StorageMonitorConfig{
 				Enabled:         cfg.Controller.StorageMonitorEnabled,

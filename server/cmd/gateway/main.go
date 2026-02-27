@@ -50,6 +50,7 @@ import (
 	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
 	"github.com/supporttools/KubeTTY/server/internal/shared/util"
 	"github.com/supporttools/KubeTTY/server/migrations"
+	"github.com/supporttools/KubeTTY/server/pkg/logging"
 )
 
 //go:embed ui/dist ui/dist/*
@@ -77,6 +78,8 @@ var (
 )
 
 func main() {
+	logging.Init()
+
 	// Create cancellable context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

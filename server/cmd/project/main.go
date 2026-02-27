@@ -29,6 +29,7 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/shared/health"
 	"github.com/supporttools/KubeTTY/server/internal/shared/ptylogger"
 	sharedserver "github.com/supporttools/KubeTTY/server/internal/shared/server"
+	"github.com/supporttools/KubeTTY/server/pkg/logging"
 )
 
 //go:embed ui/dist ui/dist/*
@@ -282,9 +283,7 @@ type server struct {
 }
 
 func main() {
-	log.SetFormatter(&log.TextFormatter{
-		FullTimestamp: true,
-	})
+	logging.Init()
 
 	cfg, err := config.LoadProjectConfig()
 	if err != nil {

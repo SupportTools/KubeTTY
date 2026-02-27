@@ -430,3 +430,85 @@ func TestConfig_NilFields(t *testing.T) {
 		t.Error("Dialer should be defaulted to websocket.DefaultDialer")
 	}
 }
+
+// TestPipe_ContextCancellation_UnblocksReadMessage verifies that cancelling the
+// context causes a goroutine blocked inside ReadMessage() to exit promptly.
+//
+// This is the regression test for the zombie-TCP-connection bug:
+// gorilla/websocket.ReadMessage() blocks indefinitely and auto-responds to
+// ping frames. Without the watcher goroutine in pipe(), the downstream TCP
+// connection (and the project's single-client slot) could remain open for
+// hours after the relay had logically shut down.
+func TestPipe_ContextCancellation_UnblocksReadMessage(t *testing.T) {
+	// Downstream server: accepts the upgrade then deliberately never sends any
+	// data, so the up→down pipe goroutine will block indefinitely in
+	// ReadMessage(). A short-lived context (200 ms) simulates the relay being
+	// cancelled while a ReadMessage() is in flight.
+	downstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, _ := upgrader.Upgrade(w, req, nil)
+		defer conn.Close()
+		// Hold open; the test controls shutdown via context cancellation.
+		time.Sleep(5 * time.Second)
+	}))
+	defer downstreamSrv.Close()
+
+	endpoint, _ := url.Parse("ws" + strings.TrimPrefix(downstreamSrv.URL, "http"))
+	r := New(Config{ProjectID: "test-ctx-cancel", Endpoint: endpoint})
+
+	// Upstream server: an ephemeral WS server that lets the test retrieve the
+	// server-side *websocket.Conn for passing to runPipes directly.
+	connCh := make(chan *websocket.Conn, 1)
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, _ := upgrader.Upgrade(w, req, nil)
+		connCh <- conn
+		time.Sleep(5 * time.Second)
+		conn.Close()
+	}))
+	defer upstreamSrv.Close()
+
+	// Dial the upstream server to get a client-side conn.
+	upURL := "ws" + strings.TrimPrefix(upstreamSrv.URL, "http")
+	upConn, _, err := websocket.DefaultDialer.Dial(upURL, nil)
+	if err != nil {
+		t.Fatalf("upstream dial: %v", err)
+	}
+	defer upConn.Close()
+
+	// Connect relay to the downstream server.
+	connectCtx, connectCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer connectCancel()
+	ds, err := r.Connect(connectCtx, DefaultBackoff())
+	if err != nil {
+		t.Fatalf("Connect() failed: %v", err)
+	}
+	defer r.Close()
+
+	// Use a short context that we cancel manually after pipes are running.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Run runPipes in a goroutine; capture when it returns.
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		_ = r.runPipes(ctx, upConn, ds)
+	}()
+
+	// Give the pipe goroutines a moment to start and block in ReadMessage().
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel the context. The watcher goroutine inside pipe() should call
+	// SetReadDeadline, unblocking ReadMessage() within ~100 ms.
+	cancel()
+
+	// runPipes must return well within the old 5-second goroutine-leak window.
+	// We allow 1 second to give ample margin while keeping the test fast.
+	select {
+	case <-doneCh:
+		// Pass: pipes exited promptly after context cancellation.
+	case <-time.After(1 * time.Second):
+		t.Fatal("pipe goroutine did not exit after context cancellation — goroutine leak detected")
+	}
+}

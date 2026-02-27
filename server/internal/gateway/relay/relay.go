@@ -971,6 +971,23 @@ func (r *Relay) pipe(ctx context.Context, label string, src *websocket.Conn, dst
 		"direction":  label,
 	}).Debug("gateway/relay: pipe goroutine started")
 
+	// Watcher goroutine: when the context is cancelled, set a short read
+	// deadline on src so any blocked ReadMessage() call returns promptly.
+	// Without this, gorilla/websocket's ReadMessage() blocks indefinitely
+	// and auto-responds to ping frames, keeping the downstream TCP connection
+	// alive (and holding the project's single-client slot) for hours after
+	// the relay has logically shut down.
+	stopWatcher := make(chan struct{})
+	defer close(stopWatcher)
+	go func() {
+		select {
+		case <-ctx.Done():
+			// Force any blocked ReadMessage to return within 100 ms.
+			_ = src.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		case <-stopWatcher:
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -984,6 +1001,21 @@ func (r *Relay) pipe(ctx context.Context, label string, src *websocket.Conn, dst
 		}
 		msgType, data, err := src.ReadMessage()
 		if err != nil {
+			// If the context was cancelled, the watcher goroutine may have
+			// triggered a deadline timeout to unblock ReadMessage(). Treat
+			// this as a clean shutdown rather than a connection error.
+			select {
+			case <-ctx.Done():
+				log.WithFields(log.Fields{
+					"project_id": r.cfg.ProjectID,
+					"direction":  label,
+				}).Debug("gateway/relay: pipe goroutine unblocked by context cancellation")
+				// Reset the deadline so the connection can be reused on reconnect.
+				_ = src.SetReadDeadline(time.Time{})
+				errCh <- ctx.Err()
+				return
+			default:
+			}
 			log.WithFields(log.Fields{
 				"project_id": r.cfg.ProjectID,
 				"direction":  label,

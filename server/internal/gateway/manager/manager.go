@@ -428,9 +428,28 @@ func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string,
 	}
 	defer e.proxyMu.Unlock()
 
+	proxyStart := time.Now()
+	log.WithFields(log.Fields{
+		"tab_id":         tabID,
+		"project_id":     e.project.ID,
+		"client_id":      clientID,
+		"relay_status":   e.currentStatus,
+		"force_takeover": forceTakeover,
+	}).Debug("gateway/manager: proxy session starting")
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	return e.proxier.Proxy(ctx, upstream)
+	err := e.proxier.Proxy(ctx, upstream)
+
+	log.WithFields(log.Fields{
+		"tab_id":     tabID,
+		"project_id": e.project.ID,
+		"client_id":  clientID,
+		"duration":   time.Since(proxyStart).Round(time.Millisecond).String(),
+		"error":      fmt.Sprintf("%v", err),
+	}).Debug("gateway/manager: proxy session ended")
+
+	return err
 }
 
 // ensureHealthyConnection checks if the relay is in a state that can accept new connections.

@@ -899,7 +899,28 @@ func (r *Relay) runPipes(ctx context.Context, upstream, downstream *websocket.Co
 	select {
 	case <-ctx.Done():
 		firstErr = ctx.Err()
+		log.WithFields(log.Fields{
+			"project_id": r.cfg.ProjectID,
+			"endpoint":   r.cfg.Endpoint.String(),
+			"reason":     firstErr.Error(),
+		}).Debug("gateway/relay: pipe loop exiting — parent context cancelled")
 	case firstErr = <-errCh:
+		var pe *pipeError
+		if errors.As(firstErr, &pe) {
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"endpoint":   r.cfg.Endpoint.String(),
+				"direction":  pe.direction,
+				"is_read":    pe.isRead,
+				"error":      pe.err.Error(),
+			}).Debug("gateway/relay: pipe loop exiting — pipe error")
+		} else {
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"endpoint":   r.cfg.Endpoint.String(),
+				"error":      firstErr.Error(),
+			}).Debug("gateway/relay: pipe loop exiting — context error from pipe")
+		}
 	}
 
 	// Cancel context to signal other pipe to exit
@@ -983,6 +1004,10 @@ func (r *Relay) pipe(ctx context.Context, label string, src *websocket.Conn, dst
 		select {
 		case <-ctx.Done():
 			// Force any blocked ReadMessage to return within 100 ms.
+			log.WithFields(log.Fields{
+				"project_id": r.cfg.ProjectID,
+				"direction":  label,
+			}).Debug("gateway/relay: pipe watcher firing — setting read deadline to unblock ReadMessage")
 			_ = src.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		case <-stopWatcher:
 		}

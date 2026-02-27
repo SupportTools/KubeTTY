@@ -70,6 +70,13 @@ type tabEntry struct {
 	isVNC             bool         // True if this is a VNC-only tab (created via CreateVNCTab)
 	currentStatus     relay.Status // Current relay status for stale detection
 	reconnectingSince time.Time    // When the tab entered reconnecting state (zero if not reconnecting)
+
+	// proxyMu serializes Proxy() calls for this entry.
+	// Only one goroutine may be inside Proxy() at a time; concurrent callers
+	// receive an immediate error and should retry after a short back-off.
+	// This prevents the concurrent-connect storm that produces 409 rejections
+	// on the project pod's single-client enforcement (discovered in beacon outage).
+	proxyMu sync.Mutex
 }
 
 // ManagerConfig holds configuration for the Manager.
@@ -404,6 +411,23 @@ func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string,
 	}
 
 	m.mu.Unlock()
+
+	// Prevent concurrent Proxy() calls on the same tabEntry.
+	// The project pod enforces single-client access; a second concurrent
+	// Proxy() would race to connect and one would receive a 409, then loop
+	// into a reconnection storm that keeps the slot occupied indefinitely.
+	// TryLock fails fast so the browser's reconnection logic retries after
+	// a short back-off, by which time the prior Proxy() will have exited.
+	if !e.proxyMu.TryLock() {
+		log.WithFields(log.Fields{
+			"tab_id":     tabID,
+			"project_id": e.project.ID,
+			"client_id":  clientID,
+		}).Warn("gateway/manager: concurrent Proxy() attempt rejected — another session is already active")
+		return fmt.Errorf("tab %s: another proxy session is already active", tabID)
+	}
+	defer e.proxyMu.Unlock()
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	return e.proxier.Proxy(ctx, upstream)

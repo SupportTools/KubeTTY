@@ -640,6 +640,97 @@ func TestCreateVNCTab_LimitEnforcement(t *testing.T) {
 	}
 }
 
+// blockingProxier is a test fake whose Proxy() blocks until unblocked.
+// It records how many concurrent Proxy() calls were made.
+type blockingProxier struct {
+	startCh chan struct{} // closed when Proxy() should return
+	enterCh chan struct{} // receives a token each time Proxy() is entered
+}
+
+func newBlockingProxier() *blockingProxier {
+	return &blockingProxier{
+		startCh: make(chan struct{}),
+		enterCh: make(chan struct{}, 10),
+	}
+}
+
+func (b *blockingProxier) Proxy(ctx context.Context, upstream *websocket.Conn) error {
+	b.enterCh <- struct{}{}
+	select {
+	case <-b.startCh:
+	case <-ctx.Done():
+	}
+	return nil
+}
+func (b *blockingProxier) Close() error                        { return nil }
+func (b *blockingProxier) Subscribe() <-chan relay.StatusEvent { return make(chan relay.StatusEvent) }
+func (b *blockingProxier) ActivityChan() <-chan struct{}       { return make(chan struct{}) }
+
+// TestAttach_ConcurrentProxyRejected verifies that a second concurrent Attach() on the
+// same tab is rejected immediately while the first Proxy() is still running.
+//
+// Regression test for the zombie-connection bug: without the proxyMu TryLock guard,
+// multiple concurrent Attach() calls each called Proxy() independently, each
+// establishing a downstream connection. The project pod's single-client enforcement
+// meant only one succeeded; the rest received 409 and looped into a reconnection storm
+// that held the single-client slot open for hours.
+func TestAttach_ConcurrentProxyRejected(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{{ID: "proj", Namespace: "ns", Service: "svc", Port: 8080}},
+	}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	// Create a tab and replace its proxier with our blocking fake.
+	tab, err := mgr.CreateTab(context.Background(), "proj", "client1")
+	if err != nil {
+		t.Fatalf("CreateTab: %v", err)
+	}
+	fake := newBlockingProxier()
+	mgr.mu.Lock()
+	mgr.tabs[tab.TabID].proxier = fake
+	mgr.mu.Unlock()
+
+	// First Attach — blocks inside Proxy() until we signal.
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- mgr.Attach(context.Background(), tab.TabID, "client1", nil)
+	}()
+
+	// Wait for the first Attach to enter Proxy().
+	select {
+	case <-fake.enterCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Proxy() did not start in time")
+	}
+
+	// Second Attach — must be rejected immediately (not block, not enter Proxy()).
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err = mgr.Attach(ctx, tab.TabID, "client1", nil)
+	if err == nil {
+		t.Fatal("expected second Attach to be rejected, got nil error")
+	}
+
+	// The second call must NOT have entered Proxy() — fake.enterCh should be empty.
+	select {
+	case <-fake.enterCh:
+		t.Fatal("second Attach should not have entered Proxy()")
+	default:
+	}
+
+	// Unblock the first Proxy() and confirm it exits cleanly.
+	close(fake.startCh)
+	select {
+	case firstErr := <-firstDone:
+		if firstErr != nil {
+			t.Errorf("first Attach returned unexpected error: %v", firstErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Attach did not exit after startCh was closed")
+	}
+}
+
 // TestCreateVNCTab_DefaultVNCPort verifies default VNC port is used when not specified.
 func TestCreateVNCTab_DefaultVNCPort(t *testing.T) {
 	cat := gatewayconfig.Catalog{

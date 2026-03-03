@@ -1,9 +1,14 @@
 import { useState, useMemo } from 'react';
-import { ProjectInfo, ProjectHealthStatus } from '../types';
+import { ProjectInfo, ProjectHealthStatus, SessionMode } from '../types';
 
 type Props = {
   projects: ProjectInfo[];
-  onSelect: (projectId: string) => void;
+  existingTabs: Array<{ tabId: string; projectId: string }>;
+  onSelect: (selection: {
+    projectId: string;
+    openAction?: 'create_new' | 'attach_recent' | 'attach_specific';
+    existingTabId?: string;
+  }) => void;
   onClose: () => void;
 };
 
@@ -11,6 +16,19 @@ type SortField = 'name' | 'namespace' | 'status';
 type SortDirection = 'asc' | 'desc';
 
 const ITEMS_PER_PAGE = 5;
+
+const defaultOpenActionForMode = (mode?: SessionMode): 'create_new' | 'attach_recent' => {
+  switch (mode) {
+    case 'exclusive_takeover':
+      return 'attach_recent';
+    case 'independent_shells':
+      return 'create_new';
+    case 'shared_concurrent':
+      return 'create_new';
+    default:
+      return 'attach_recent';
+  }
+};
 
 const getStatusClass = (status?: ProjectHealthStatus): string => {
   switch (status) {
@@ -51,11 +69,12 @@ const getStatusPriority = (status?: ProjectHealthStatus): number => {
   }
 };
 
-const ProjectPicker = ({ projects, onSelect, onClose }: Props) => {
+const ProjectPicker = ({ projects, existingTabs, onSelect, onClose }: Props) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortField, setSortField] = useState<SortField>('name');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [currentPage, setCurrentPage] = useState(1);
+  const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
 
   // Filter projects based on search query
   const filteredProjects = useMemo(() => {
@@ -117,6 +136,16 @@ const ProjectPicker = ({ projects, onSelect, onClose }: Props) => {
     return sortDirection === 'asc' ? ' ▲' : ' ▼';
   };
 
+  const tabsByProject = useMemo(() => {
+    const map = new Map<string, string[]>();
+    existingTabs.forEach((tab) => {
+      const list = map.get(tab.projectId) ?? [];
+      list.push(tab.tabId);
+      map.set(tab.projectId, list);
+    });
+    return map;
+  }, [existingTabs]);
+
   return (
     <div className="project-picker-backdrop">
       <div className="project-picker">
@@ -170,7 +199,15 @@ const ProjectPicker = ({ projects, onSelect, onClose }: Props) => {
           <ul>
             {paginatedProjects.map((project) => (
               <li key={project.id}>
-                <button className="project-option" onClick={() => onSelect(project.id)}>
+                <button
+                  className="project-option"
+                  onClick={() =>
+                    onSelect({
+                      projectId: project.id,
+                      openAction: defaultOpenActionForMode(project.sessionMode),
+                    })
+                  }
+                >
                   <div className="project-info">
                     <div className="project-header">
                       <strong>{project.displayName || project.id}</strong>
@@ -183,6 +220,50 @@ const ProjectPicker = ({ projects, onSelect, onClose }: Props) => {
                   </div>
                   <span className="project-namespace">{project.namespace}</span>
                 </button>
+                {((tabsByProject.get(project.id)?.length || 0) > 0) && (
+                  <div className="picker-existing-tabs">
+                    <button
+                      className="page-btn"
+                      onClick={() =>
+                        onSelect({
+                          projectId: project.id,
+                          openAction: 'attach_recent',
+                        })
+                      }
+                    >
+                      Attach Most Recent
+                    </button>
+                    <button
+                      className="page-btn"
+                      onClick={() =>
+                        setExpandedProjectId((current) =>
+                          current === project.id ? null : project.id
+                        )
+                      }
+                    >
+                      {expandedProjectId === project.id ? 'Hide Tabs' : 'Choose Existing Tab'}
+                    </button>
+                  </div>
+                )}
+                {expandedProjectId === project.id && (
+                  <div className="picker-tab-list">
+                    {(tabsByProject.get(project.id) || []).map((tabId) => (
+                      <button
+                        key={tabId}
+                        className="page-btn"
+                        onClick={() =>
+                          onSelect({
+                            projectId: project.id,
+                            openAction: 'attach_specific',
+                            existingTabId: tabId,
+                          })
+                        }
+                      >
+                        Attach {tabId.slice(0, 8)}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </li>
             ))}
           </ul>

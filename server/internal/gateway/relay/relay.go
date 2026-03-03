@@ -328,6 +328,10 @@ type Relay struct {
 
 	// Keepalive goroutine management
 	keepaliveCancel context.CancelFunc // Cancels the keepalive goroutine
+
+	forceNextConnect atomic.Bool // Append force=true to the next downstream dial.
+	nextConnectMu    sync.Mutex
+	nextShellID      string
 }
 
 // Status represents connection state.
@@ -379,6 +383,27 @@ func (r *Relay) Status() Status {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.status
+}
+
+// RequestForceNextConnect marks the next downstream connect to include force=true.
+func (r *Relay) RequestForceNextConnect() {
+	r.forceNextConnect.Store(true)
+}
+
+// RequestShellNextConnect marks the next downstream connect to include shell=<id>.
+func (r *Relay) RequestShellNextConnect(shellID string) {
+	r.nextConnectMu.Lock()
+	r.nextShellID = strings.TrimSpace(shellID)
+	r.nextConnectMu.Unlock()
+}
+
+func (r *Relay) consumeNextConnectParams() (bool, string) {
+	force := r.forceNextConnect.Swap(false)
+	r.nextConnectMu.Lock()
+	shell := r.nextShellID
+	r.nextShellID = ""
+	r.nextConnectMu.Unlock()
+	return force, shell
 }
 
 // LastError returns the most recent failure.
@@ -601,7 +626,21 @@ func (r *Relay) Connect(ctx context.Context, backoff Backoff) (*websocket.Conn, 
 			"cb_failures": r.circuitBreaker.Failures(),
 		}).Debug("gateway/relay: attempting to connect downstream")
 
-		conn, resp, err := r.cfg.Dialer.DialContext(ctx, r.cfg.Endpoint.String(), r.cfg.Headers)
+		dialURL := r.cfg.Endpoint.String()
+		forceNext, shellNext := r.consumeNextConnectParams()
+		if forceNext || shellNext != "" {
+			u := *r.cfg.Endpoint
+			q := u.Query()
+			if forceNext {
+				q.Set("force", "true")
+			}
+			if shellNext != "" {
+				q.Set("shell", shellNext)
+			}
+			u.RawQuery = q.Encode()
+			dialURL = u.String()
+		}
+		conn, resp, err := r.cfg.Dialer.DialContext(ctx, dialURL, r.cfg.Headers)
 		if err == nil {
 			r.mu.Lock()
 			r.downstream = conn

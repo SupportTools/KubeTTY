@@ -43,6 +43,9 @@ env:
   # Project mode provides single-user terminal accessed via gateway
   kubettyMode: "project"
 
+  # Gateway-only setting (ignored in project mode)
+  kubettyExecMode: "websocket"
+
   # Project identifier (must match the gateway catalog entry)
   # CHANGE THIS - Should match deploymentId and gateway projects.yaml entry
   kubettyProject: "your-project"

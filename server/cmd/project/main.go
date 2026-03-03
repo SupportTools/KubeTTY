@@ -266,8 +266,11 @@ type server struct {
 	cfg *config.ProjectConfig
 
 	// PTY session management
-	mu  sync.RWMutex
-	pty *ptySession
+	mu sync.RWMutex
+	// pty is a compatibility pointer for the default shell session.
+	// New independent-shell mode uses ptys map keyed by shell ID.
+	pty  *ptySession
+	ptys map[string]*ptySession
 
 	// WebSocket upgrader
 	upgrader websocket.Upgrader
@@ -330,7 +333,8 @@ func main() {
 	}
 
 	srv := &server{
-		cfg: &cfg,
+		cfg:  &cfg,
+		ptys: make(map[string]*ptySession),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -366,7 +370,7 @@ func main() {
 
 	// Health check with PTY component status (no database)
 	ptyChecker := health.NewPTYChecker(&srv.mu, func() bool {
-		return srv.pty != nil && srv.pty.isAlive()
+		return srv.hasLivePTY()
 	})
 	mux.Handle("/api/healthz", health.NewCompatHandler(nil, ptyChecker))
 
@@ -422,61 +426,92 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		"path":         r.URL.Path,
 	}).Debug("project/ws: WebSocket connection attempt")
 
+	sessionMode := strings.TrimSpace(strings.ToLower(s.cfg.SessionMode))
+	if sessionMode == "" {
+		sessionMode = "exclusive_takeover"
+	}
+	shellKey := "default"
+	if sessionMode == "independent_shells" {
+		if shell := strings.TrimSpace(r.URL.Query().Get("shell")); shell != "" {
+			if !isValidShellKey(shell) {
+				apierrors.WriteError(w, apierrors.BadRequest("invalid shell identifier", "shell must be 1-128 chars of [a-zA-Z0-9_-]"))
+				return
+			}
+			shellKey = shell
+		}
+	}
+
 	// Ensure PTY exists
-	if err := s.initPTY(ctx); err != nil {
+	if err := s.initPTY(ctx, shellKey); err != nil {
 		log.WithFields(log.Fields{
 			"session_uuid": sessionUUID,
 			"conn_id":      connID,
+			"shell_key":    shellKey,
 			"error":        err.Error(),
 		}).Error("project/ws: PTY initialization failed")
 		apierrors.WriteError(w, apierrors.InternalServerError("PTY unavailable", ""))
 		return
 	}
 
-	// Get PTY reference and check for existing client (single-client enforcement)
-	s.mu.RLock()
-	ps := s.pty
-	s.mu.RUnlock()
+	ps := s.getPTY(shellKey)
 
 	if ps == nil {
 		log.WithFields(log.Fields{
 			"session_uuid": sessionUUID,
 			"conn_id":      connID,
+			"shell_key":    shellKey,
 		}).Error("project/ws: PTY not initialized after init")
 		apierrors.WriteError(w, apierrors.InternalServerError("PTY not initialized", ""))
 		return
 	}
 
-	// Enforce single client per session
-	// Support ?force=true to disconnect existing client and take over
 	forceParam := r.URL.Query().Get("force")
 	forceConnect := forceParam == "true" || forceParam == "1"
 
-	if forceConnect {
-		if ps.hasClients() {
-			// Force takeover: disconnect existing clients with explanation
-			log.WithFields(log.Fields{
-				"session_uuid": sessionUUID,
-				"conn_id":      connID,
-				"remote_addr":  remoteAddr,
-				"client_count": ps.getClientCount(),
-			}).Info("project/ws: Force takeover requested - disconnecting existing client(s)")
-			ps.disconnectAllClients("session taken over by another client")
+	// Session admission policy.
+	switch sessionMode {
+	case "shared_concurrent":
+		// Allow multiple concurrent clients with no reservation/takeover logic.
+	case "exclusive_takeover", "independent_shells":
+		// independent_shells is currently admission-compatible with exclusive mode
+		// in project service; shell fan-out is coordinated at gateway/tab layer.
+		if forceConnect {
+			if ps.hasClients() {
+				// Force takeover: disconnect existing clients with explanation
+				log.WithFields(log.Fields{
+					"session_uuid": sessionUUID,
+					"conn_id":      connID,
+					"remote_addr":  remoteAddr,
+					"client_count": ps.getClientCount(),
+					"session_mode": sessionMode,
+				}).Info("project/ws: Force takeover requested - disconnecting existing client(s)")
+				ps.disconnectAllClients("session taken over by another client")
+			}
+		} else {
+			// Atomically check-and-reserve to prevent TOCTOU race between
+			// hasClients check and addClient after WebSocket upgrade.
+			if !ps.reserveSlot() {
+				log.WithFields(log.Fields{
+					"session_uuid": sessionUUID,
+					"conn_id":      connID,
+					"remote_addr":  remoteAddr,
+					"client_count": ps.getClientCount(),
+					"session_mode": sessionMode,
+				}).Warn("project/ws: Rejected - another client is already connected (single-client enforcement)")
+				apierrors.WriteError(w, apierrors.Conflict("session already attached", "only one client allowed; use ?force=true to take over"))
+				return
+			}
+			// If WebSocket upgrade fails below, release the reserved slot.
+			defer func() {
+				ps.releaseSlot()
+			}()
 		}
-	} else {
-		// Atomically check-and-reserve to prevent TOCTOU race between
-		// hasClients check and addClient after WebSocket upgrade
+	default:
+		// Safe fallback.
 		if !ps.reserveSlot() {
-			log.WithFields(log.Fields{
-				"session_uuid": sessionUUID,
-				"conn_id":      connID,
-				"remote_addr":  remoteAddr,
-				"client_count": ps.getClientCount(),
-			}).Warn("project/ws: Rejected - another client is already connected (single-client enforcement)")
 			apierrors.WriteError(w, apierrors.Conflict("session already attached", "only one client allowed; use ?force=true to take over"))
 			return
 		}
-		// If WebSocket upgrade fails below, release the reserved slot
 		defer func() {
 			ps.releaseSlot()
 		}()
@@ -727,18 +762,26 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 // Shutdown implements the ShutdownHandler interface for graceful shutdown.
 func (s *server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
-	pty := s.pty
+	ptys := make([]*ptySession, 0, len(s.ptys))
+	for _, ps := range s.ptys {
+		ptys = append(ptys, ps)
+	}
+	s.pty = nil
+	s.ptys = make(map[string]*ptySession)
 	s.mu.Unlock()
 
-	if pty != nil {
-		pty.broadcastClose()
-		if pty.cmd != nil && pty.cmd.Process != nil {
-			_ = pty.cmd.Process.Signal(syscall.SIGTERM)
-			time.Sleep(100 * time.Millisecond)
-			_ = pty.cmd.Process.Kill()
+	for _, ps := range ptys {
+		if ps == nil {
+			continue
 		}
-		if pty.ptmx != nil {
-			_ = pty.ptmx.Close()
+		ps.broadcastClose()
+		if ps.cmd != nil && ps.cmd.Process != nil {
+			_ = ps.cmd.Process.Signal(syscall.SIGTERM)
+			time.Sleep(100 * time.Millisecond)
+			_ = ps.cmd.Process.Kill()
+		}
+		if ps.ptmx != nil {
+			_ = ps.ptmx.Close()
 		}
 	}
 
@@ -759,11 +802,43 @@ func (ps *ptySession) isAlive() bool {
 	return ps.cmd.ProcessState == nil || !ps.cmd.ProcessState.Exited()
 }
 
-func (s *server) initPTY(ctx context.Context) error {
+func (s *server) getPTY(shellKey string) *ptySession {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ptys[shellKey]
+}
+
+func (s *server) hasLivePTY() bool {
+	for _, ps := range s.ptys {
+		if ps != nil && ps.isAlive() {
+			return true
+		}
+	}
+	return false
+}
+
+func isValidShellKey(shell string) bool {
+	if len(shell) == 0 || len(shell) > 128 {
+		return false
+	}
+	for _, ch := range shell {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func (s *server) initPTY(ctx context.Context, shellKey string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.pty != nil && s.pty.isAlive() {
+	if s.ptys == nil {
+		s.ptys = make(map[string]*ptySession)
+	}
+
+	if existing := s.ptys[shellKey]; existing != nil && existing.isAlive() {
 		log.Debug("project/pty: PTY already initialized and alive")
 		return nil // Already initialized
 	}
@@ -789,13 +864,17 @@ func (s *server) initPTY(ctx context.Context) error {
 		return fmt.Errorf("start pty: %w", err)
 	}
 
-	s.pty = &ptySession{
+	ps := &ptySession{
 		cmd:          cmd,
 		ptmx:         ptmx,
 		createdAt:    time.Now(),
 		clients:      make(map[*websocket.Conn]*wsClient),
 		outputBuffer: buffer.NewRingBuffer(s.cfg.OutputBufferSize), // Ring buffer (default 8MB)
 		appMetrics:   s.appMetrics,                                 // For broadcast error tracking
+	}
+	s.ptys[shellKey] = ps
+	if shellKey == "default" {
+		s.pty = ps
 	}
 
 	// Set buffer capacity metric
@@ -830,15 +909,15 @@ func (s *server) initPTY(ctx context.Context) error {
 
 				// Store in ring buffer for replay to new clients
 				// Ring buffer is thread-safe and handles wrapping internally
-				s.pty.outputBuffer.Write(data)
+				ps.outputBuffer.Write(data)
 
 				// Update buffer metrics
 				if s.appMetrics != nil {
 					s.appMetrics.observeOutputBufferWrite(n)
-					s.appMetrics.setOutputBufferUsage(s.pty.outputBuffer.Len())
+					s.appMetrics.setOutputBufferUsage(ps.outputBuffer.Len())
 				}
 
-				s.pty.broadcast(data)
+				ps.broadcast(data)
 
 				// Log PTY output for Loki capture
 				if s.ptyLogger != nil {
@@ -884,7 +963,8 @@ func (s *server) initPTY(ctx context.Context) error {
 			"exit_code": exitCode,
 			"error":     fmt.Sprintf("%v", err),
 			"pid":       cmd.Process.Pid,
-			"runtime":   time.Since(s.pty.createdAt).String(),
+			"runtime":   time.Since(ps.createdAt).String(),
+			"shell_key": shellKey,
 		}).Info("project/pty: PTY process exited")
 
 		if s.appMetrics != nil {
@@ -892,11 +972,14 @@ func (s *server) initPTY(ctx context.Context) error {
 		}
 
 		s.mu.Lock()
-		if s.pty != nil {
-			s.pty.broadcastClose()
+		if current := s.ptys[shellKey]; current == ps {
+			ps.broadcastClose()
 			log.Debug("project/pty: Cleaning up PTY session")
+			delete(s.ptys, shellKey)
+			if shellKey == "default" && s.pty == ps {
+				s.pty = nil
+			}
 		}
-		s.pty = nil
 		s.mu.Unlock()
 
 		log.Debug("project/pty: PTY monitor goroutine exited")

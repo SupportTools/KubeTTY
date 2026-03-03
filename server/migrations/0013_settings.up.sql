@@ -126,6 +126,7 @@ INSERT INTO kubetty_settings (category, key, value, value_type, display_name, de
     ('project_defaults', 'storage_class', '"longhorn"', 'string', 'Default Storage Class', 'Default Kubernetes storage class for new projects'),
     ('project_defaults', 'max_tabs_per_client', '3', 'int', 'Max Tabs Per Client', 'Maximum terminal tabs per client connection'),
     ('project_defaults', 'max_tabs_total', '10', 'int', 'Max Tabs Total', 'Maximum total terminal tabs per project'),
+    ('project_defaults', 'session_mode', '"exclusive_takeover"', 'string', 'Session Mode', 'Client attachment policy: exclusive_takeover, shared_concurrent, independent_shells'),
     ('project_defaults', 'image_repository', '"harbor.support.tools/kubetty/kubetty"', 'string', 'Default Image Repository', 'Default container image repository for projects'),
     ('project_defaults', 'image_tag', '"latest"', 'string', 'Default Image Tag', 'Default container image tag for new projects'),
     ('project_defaults', 'dind_enabled', 'true', 'bool', 'Docker-in-Docker Enabled', 'Enable Docker-in-Docker by default for new projects'),

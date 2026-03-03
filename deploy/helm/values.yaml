@@ -35,6 +35,11 @@ env:
   # - "project": Single project terminal (accessed via gateway)
   kubettyMode: "gateway"
 
+  # Gateway downstream connection mode
+  # - "websocket": proxy to project /ws endpoint
+  # - "exec": use Kubernetes exec remotecommand stream
+  kubettyExecMode: "websocket"
+
   # User identity for this deployment
   # Used for file ownership and session attribution
   kubettyUser: "mmattox"

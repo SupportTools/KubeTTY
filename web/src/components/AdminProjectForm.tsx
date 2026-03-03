@@ -21,6 +21,7 @@ const defaultValues: CreateProjectRequest = {
   storageClass: "longhorn",
   maxTabsPerClient: 3,
   maxTabsTotal: 10,
+  sessionMode: "exclusive_takeover",
   dindEnabled: true,
   guiEnabled: false,
   guiResolution: "1280x720x24",
@@ -266,6 +267,18 @@ const AdminProjectForm = ({ onClose, onSuccess }: Props) => {
                         onChange={(e) => updateField("maxTabsTotal", parseInt(e.target.value) || 10)}
                       />
                     </div>
+                  </div>
+                  <div className="form-field">
+                    <label>Session Mode</label>
+                    <select
+                      value={form.sessionMode || "exclusive_takeover"}
+                      disabled={submitting}
+                      onChange={(e) => updateField("sessionMode", e.target.value as CreateProjectRequest["sessionMode"])}
+                    >
+                      <option value="exclusive_takeover">Exclusive + Takeover</option>
+                      <option value="shared_concurrent">Shared Concurrent</option>
+                      <option value="independent_shells">Independent Shells</option>
+                    </select>
                   </div>
 
                   <h3>Image Configuration</h3>

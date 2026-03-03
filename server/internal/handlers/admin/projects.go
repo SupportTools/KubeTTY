@@ -74,6 +74,9 @@ func (h *ProjectHandlers) applySettingsDefaults(ctx context.Context, req *projec
 	if req.MaxTabsTotal == 0 {
 		req.MaxTabsTotal = h.settingsStore.GetInt(ctx, cat, "max_tabs_total", projects.DefaultMaxTabsTotal)
 	}
+	if req.SessionMode == "" {
+		req.SessionMode = projects.SessionMode(h.settingsStore.GetString(ctx, cat, "session_mode", string(projects.DefaultSessionMode)))
+	}
 	if req.ImageRepository == "" {
 		req.ImageRepository = h.settingsStore.GetString(ctx, cat, "image_repository", projects.DefaultImageRepository)
 	}
@@ -159,6 +162,11 @@ func (h *ProjectHandlers) CreateProject(w http.ResponseWriter, r *http.Request) 
 		_ = apierrors.WriteError(w, apierrors.BadRequest("userName is required", ""))
 		return
 	}
+	if req.SessionMode != "" && !req.SessionMode.IsValid() {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(
+			"sessionMode must be one of: exclusive_takeover, shared_concurrent, independent_shells", ""))
+		return
+	}
 
 	// Validate GUI configuration if provided
 	if !isValidGUIResolution(req.GUIResolution) {
@@ -238,6 +246,11 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 	var req projects.UpdateProjectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
+		return
+	}
+	if req.SessionMode != nil && !req.SessionMode.IsValid() {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(
+			"sessionMode must be one of: exclusive_takeover, shared_concurrent, independent_shells", ""))
 		return
 	}
 

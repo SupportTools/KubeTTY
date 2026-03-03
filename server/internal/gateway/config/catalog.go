@@ -31,6 +31,7 @@ type Project struct {
 	Tags        []string      `yaml:"tags" json:"tags"`
 	HealthCheck *HealthCheck  `yaml:"healthCheck" json:"healthCheck"`
 	Limits      ProjectLimits `yaml:"limits" json:"limits"`
+	SessionMode string        `yaml:"sessionMode" json:"sessionMode"`
 
 	// GUI desktop support
 	GUIEnabled bool `yaml:"guiEnabled" json:"guiEnabled"`
@@ -112,6 +113,9 @@ func (c *Catalog) normalize() {
 		// Apply default VNC port for GUI-enabled projects
 		if c.Projects[i].GUIEnabled && c.Projects[i].GUIVNCPort == 0 {
 			c.Projects[i].GUIVNCPort = defaultGUIVNCPort
+		}
+		if c.Projects[i].SessionMode == "" {
+			c.Projects[i].SessionMode = "exclusive_takeover"
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 type ProjectConfig struct {
 	Port           string
 	SessionID      string
+	SessionMode    string
 	DeploymentID   string
 	Shell          string
 	KubettyUser    string
@@ -50,6 +51,7 @@ func LoadProjectConfig() (ProjectConfig, error) {
 	cfg := ProjectConfig{
 		Port:           sharedconfig.GetEnv("PORT", "8080"),
 		SessionID:      sessionID,
+		SessionMode:    sharedconfig.GetEnv("SESSION_MODE", "exclusive_takeover"),
 		DeploymentID:   deploymentID,
 		Shell:          sharedconfig.GetEnv("SHELL", "/bin/bash"),
 		KubettyUser:    sharedconfig.GetEnv("KUBETTY_USER", os.Getenv("USER")),

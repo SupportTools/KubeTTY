@@ -86,6 +86,7 @@ const AdminProjectDetail = ({
     description: "",
     maxTabsPerClient: 3,
     maxTabsTotal: 10,
+    sessionMode: "exclusive_takeover",
     dindEnabled: false,
     guiEnabled: false,
     guiResolution: "1280x720x24",
@@ -255,6 +256,7 @@ const AdminProjectDetail = ({
       description: project.description || "",
       maxTabsPerClient: project.maxTabsPerClient,
       maxTabsTotal: project.maxTabsTotal,
+      sessionMode: project.sessionMode || "exclusive_takeover",
       dindEnabled: project.dindEnabled,
       guiEnabled: project.guiEnabled,
       guiResolution: project.guiResolution || "1280x720x24",
@@ -284,6 +286,7 @@ const AdminProjectDetail = ({
           description: editSettings.description,
           maxTabsPerClient: editSettings.maxTabsPerClient,
           maxTabsTotal: editSettings.maxTabsTotal,
+          sessionMode: editSettings.sessionMode,
           dindEnabled: editSettings.dindEnabled,
           guiEnabled: editSettings.guiEnabled,
           guiResolution: editSettings.guiEnabled ? editSettings.guiResolution : undefined,
@@ -542,6 +545,10 @@ const AdminProjectDetail = ({
               <div className="detail-item">
                 <label>Max Tabs (Total)</label>
                 <span>{project.maxTabsTotal}</span>
+              </div>
+              <div className="detail-item">
+                <label>Session Mode</label>
+                <span>{project.sessionMode}</span>
               </div>
               <div className="detail-item">
                 <label>Docker-in-Docker</label>
@@ -952,6 +959,21 @@ const AdminProjectDetail = ({
                     onChange={(e) => handleEditSettingsChange("maxTabsTotal", parseInt(e.target.value, 10) || 1)}
                     disabled={savingSettings}
                   />
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="sessionMode">Session Mode:</label>
+                  <select
+                    id="sessionMode"
+                    className="form-input"
+                    value={editSettings.sessionMode}
+                    onChange={(e) => handleEditSettingsChange("sessionMode", e.target.value)}
+                    disabled={savingSettings}
+                  >
+                    <option value="exclusive_takeover">Exclusive + Takeover</option>
+                    <option value="shared_concurrent">Shared Concurrent</option>
+                    <option value="independent_shells">Independent Shells</option>
+                  </select>
                 </div>
 
                 <div className="form-group checkbox-group">

@@ -20,6 +20,24 @@ const (
 	StatusDeleted  ProjectStatus = "deleted"
 )
 
+// SessionMode defines how clients attach to project terminal sessions.
+type SessionMode string
+
+const (
+	SessionModeExclusiveTakeover SessionMode = "exclusive_takeover"
+	SessionModeSharedConcurrent  SessionMode = "shared_concurrent"
+	SessionModeIndependentShells SessionMode = "independent_shells"
+)
+
+func (m SessionMode) IsValid() bool {
+	switch m {
+	case SessionModeExclusiveTakeover, SessionModeSharedConcurrent, SessionModeIndependentShells:
+		return true
+	default:
+		return false
+	}
+}
+
 // ServiceNamePrefix is the prefix used to generate Kubernetes service names.
 const ServiceNamePrefix = "kubetty-project-"
 
@@ -63,8 +81,9 @@ type Project struct {
 	ReadNamespaces  []string `json:"readNamespaces"`
 
 	// Tab limits
-	MaxTabsPerClient int `json:"maxTabsPerClient"`
-	MaxTabsTotal     int `json:"maxTabsTotal"`
+	MaxTabsPerClient int         `json:"maxTabsPerClient"`
+	MaxTabsTotal     int         `json:"maxTabsTotal"`
+	SessionMode      SessionMode `json:"sessionMode"`
 
 	// Feature flags
 	DinDEnabled bool `json:"dindEnabled"`
@@ -124,8 +143,9 @@ type CreateProjectRequest struct {
 	ReadNamespaces  []string `json:"readNamespaces,omitempty"`
 
 	// Tab limits
-	MaxTabsPerClient int `json:"maxTabsPerClient,omitempty"`
-	MaxTabsTotal     int `json:"maxTabsTotal,omitempty"`
+	MaxTabsPerClient int         `json:"maxTabsPerClient,omitempty"`
+	MaxTabsTotal     int         `json:"maxTabsTotal,omitempty"`
+	SessionMode      SessionMode `json:"sessionMode,omitempty"`
 
 	// Feature flags
 	DinDEnabled *bool `json:"dindEnabled,omitempty"`
@@ -165,8 +185,9 @@ type UpdateProjectRequest struct {
 	StorageSize   *string `json:"storageSize,omitempty"` // PVC expansion (requires storage class support)
 
 	// Tab limits
-	MaxTabsPerClient *int `json:"maxTabsPerClient,omitempty"`
-	MaxTabsTotal     *int `json:"maxTabsTotal,omitempty"`
+	MaxTabsPerClient *int         `json:"maxTabsPerClient,omitempty"`
+	MaxTabsTotal     *int         `json:"maxTabsTotal,omitempty"`
+	SessionMode      *SessionMode `json:"sessionMode,omitempty"`
 
 	// Feature flags
 	DinDEnabled *bool `json:"dindEnabled,omitempty"`
@@ -210,6 +231,7 @@ const (
 	DefaultStorageClass     = "freenas-iscsi-csi"
 	DefaultMaxTabsPerClient = 3
 	DefaultMaxTabsTotal     = 10
+	DefaultSessionMode      = SessionModeExclusiveTakeover
 	DefaultImageRepository  = "harbor.support.tools/kubetty/kubetty"
 	DefaultImageTag         = "latest"
 
@@ -252,6 +274,9 @@ func (r *CreateProjectRequest) ApplyDefaults() {
 	}
 	if r.MaxTabsTotal == 0 {
 		r.MaxTabsTotal = DefaultMaxTabsTotal
+	}
+	if r.SessionMode == "" {
+		r.SessionMode = DefaultSessionMode
 	}
 	if r.DinDEnabled == nil {
 		enabled := true

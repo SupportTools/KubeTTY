@@ -160,6 +160,8 @@ spec:
               value: {{ .Values.deploymentId | quote }}
             - name: KUBETTY_MODE
               value: {{ .Values.env.kubettyMode | default "gateway" | quote }}
+            - name: KUBETTY_EXEC_MODE
+              value: {{ .Values.env.kubettyExecMode | default "websocket" | quote }}
             - name: KUBETTY_USER
               value: {{ .Values.env.kubettyUser | default "mmattox" | quote }}
             - name: KUBETTY_PROJECT

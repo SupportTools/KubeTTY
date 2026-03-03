@@ -489,6 +489,7 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 		{Name: "KUBETTY_MODE", Value: "project"},
 		{Name: "DEPLOYMENT_ID", Value: p.Name},
 		{Name: "SESSION_ID", Value: p.SessionID.String()},
+		{Name: "SESSION_MODE", Value: string(p.SessionMode)},
 		{Name: "KUBETTY_USER", Value: p.UserName},
 		{Name: "KUBETTY_PROJECT", Value: p.Name},
 	}

@@ -234,12 +234,20 @@ const App = () => {
   }, [projects]);
 
   const handleCreateTab = useCallback(
-    async (projectId: string) => {
+    async (selection: {
+      projectId: string;
+      openAction?: "create_new" | "attach_recent" | "attach_specific";
+      existingTabId?: string;
+    }) => {
       try {
         const res = await authFetch("/api/tabs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ projectId })
+          body: JSON.stringify({
+            projectId: selection.projectId,
+            openAction: selection.openAction,
+            existingTabId: selection.existingTabId
+          })
         });
         if (!res.ok) {
           const errorMessage = await parseErrorResponse(res);
@@ -486,6 +494,7 @@ const App = () => {
           {pickerOpen && (
             <ProjectPicker
               projects={projects}
+              existingTabs={tabs.map((tab) => ({ tabId: tab.tabId, projectId: tab.projectId }))}
               onClose={() => setPickerOpen(false)}
               onSelect={handleCreateTab}
             />

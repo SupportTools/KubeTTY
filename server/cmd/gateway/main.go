@@ -26,6 +26,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
+	"k8s.io/client-go/rest"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -192,10 +193,27 @@ func main() {
 	// Initialize settings store (reuses tab pool)
 	settingsStore := settings.NewStoreFromPool(tabPool)
 
+	var restCfg *rest.Config
+	effectiveExecMode := cfg.ExecMode
+	if cfg.ExecMode == config.ExecModeExec {
+		kcfg, err := rest.InClusterConfig()
+		if err != nil {
+			log.WithFields(log.Fields{
+				"error": err.Error(),
+				"mode":  cfg.ExecMode,
+			}).Warn("gateway/main: failed to initialize in-cluster config for exec mode, falling back to websocket mode")
+			effectiveExecMode = config.ExecModeWebSocket
+		} else {
+			restCfg = kcfg
+		}
+	}
+
 	tabManager := manager.NewWithConfig(cfg.ProjectCatalog, tabStore, manager.ManagerConfig{
 		IdleTimeout:     cfg.TabIdleTimeout,
 		MetricsEnabled:  cfg.MetricsEnabled,
 		MetricsInterval: cfg.MetricsInterval,
+		ExecMode:        effectiveExecMode,
+		RestConfig:      restCfg,
 	})
 	defer tabManager.Stop()
 
@@ -297,8 +315,9 @@ func main() {
 							CPUMillicores:    cpuMillicores,
 							MemoryBytes:      memoryBytes,
 						},
-						GUIEnabled: p.GUIEnabled,
-						GUIVNCPort: p.GUIVNCPort,
+						GUIEnabled:  p.GUIEnabled,
+						GUIVNCPort:  p.GUIVNCPort,
+						SessionMode: string(p.SessionMode),
 					})
 				} else if status == projects.StatusDeleting || status == projects.StatusDeleted {
 					log.WithFields(log.Fields{
@@ -429,8 +448,9 @@ func main() {
 						CPUMillicores:    cpuMillicores,
 						MemoryBytes:      memoryBytes,
 					},
-					GUIEnabled: p.GUIEnabled,
-					GUIVNCPort: p.GUIVNCPort,
+					GUIEnabled:  p.GUIEnabled,
+					GUIVNCPort:  p.GUIVNCPort,
+					SessionMode: string(p.SessionMode),
 				})
 			}
 			log.WithFields(log.Fields{
@@ -723,7 +743,7 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	forceTakeover := r.URL.Query().Get("force") == "true"
-	clientID := s.ensureClientID(w, r)
+	clientID := s.tabOwnerID(w, r)
 	remoteAddr := r.RemoteAddr
 
 	log.WithFields(log.Fields{
@@ -783,7 +803,7 @@ func (s *server) handleVNCWebsocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	forceTakeover := r.URL.Query().Get("force") == "true"
-	clientID := s.ensureClientID(w, r)
+	clientID := s.tabOwnerID(w, r)
 	remoteAddr := r.RemoteAddr
 
 	log.WithFields(log.Fields{
@@ -843,7 +863,7 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 		apierrors.WriteError(w, apierrors.NotFound("gateway disabled", ""))
 		return
 	}
-	clientID := s.ensureClientID(w, r)
+	clientID := s.tabOwnerID(w, r)
 	switch r.Method {
 	case http.MethodGet:
 		items, err := s.tabStore.ListByClient(r.Context(), clientID, 50)
@@ -858,8 +878,10 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 		_ = util.WriteJSON(w, http.StatusOK, map[string]any{"tabs": items})
 	case http.MethodPost:
 		var req struct {
-			ProjectID string `json:"projectId"`
-			GUIMode   bool   `json:"guiMode"` // If true, create a VNC/GUI tab instead of terminal
+			ProjectID     string `json:"projectId"`
+			GUIMode       bool   `json:"guiMode"` // If true, create a VNC/GUI tab instead of terminal
+			OpenAction    string `json:"openAction,omitempty"`
+			ExistingTabID string `json:"existingTabId,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			apierrors.WriteError(w, apierrors.BadRequest("invalid request body", ""))
@@ -868,6 +890,63 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 		if req.ProjectID == "" {
 			apierrors.WriteError(w, apierrors.BadRequest("projectId is required", ""))
 			return
+		}
+
+		switch req.OpenAction {
+		case "", "create_new", "attach_recent", "attach_specific":
+		default:
+			apierrors.WriteError(w, apierrors.BadRequest("openAction must be one of: create_new, attach_recent, attach_specific", ""))
+			return
+		}
+
+		if req.OpenAction == "attach_specific" {
+			if req.ExistingTabID == "" {
+				apierrors.WriteError(w, apierrors.BadRequest("existingTabId is required for attach_specific", ""))
+				return
+			}
+			existing, err := s.tabStore.Get(r.Context(), req.ExistingTabID)
+			if err != nil {
+				if errors.Is(err, tabs.ErrNotFound) {
+					apierrors.WriteError(w, apierrors.NotFound("tab not found", ""))
+					return
+				}
+				apierrors.WriteError(w, apierrors.InternalServerError("internal error", ""))
+				return
+			}
+			if existing.ClientID != clientID || existing.ProjectID != req.ProjectID {
+				apierrors.WriteError(w, apierrors.Forbidden("forbidden", ""))
+				return
+			}
+			wsPath := "/ws"
+			if req.GUIMode {
+				wsPath = "/vnc"
+			}
+			_ = util.WriteJSON(w, http.StatusOK, map[string]any{
+				"tab":     existing,
+				"wsUrl":   fmt.Sprintf("%s://%s%s?tab=%s", util.WebSocketScheme(r), r.Host, wsPath, existing.TabID),
+				"guiMode": req.GUIMode,
+			})
+			return
+		}
+
+		if req.OpenAction == "attach_recent" {
+			items, err := s.tabStore.ListByClient(r.Context(), clientID, 200)
+			if err == nil {
+				for i := len(items) - 1; i >= 0; i-- {
+					if items[i].ProjectID == req.ProjectID {
+						wsPath := "/ws"
+						if req.GUIMode {
+							wsPath = "/vnc"
+						}
+						_ = util.WriteJSON(w, http.StatusOK, map[string]any{
+							"tab":     items[i],
+							"wsUrl":   fmt.Sprintf("%s://%s%s?tab=%s", util.WebSocketScheme(r), r.Host, wsPath, items[i].TabID),
+							"guiMode": req.GUIMode,
+						})
+						return
+					}
+				}
+			}
 		}
 
 		var tab tabs.Tab
@@ -891,6 +970,14 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 				apierrors.WriteError(w, apierrors.RateLimitExceeded(
 					"maximum tabs per client exceeded",
 					fmt.Sprintf("limit: %d tabs per client for project %s", limitErr.Limit, limitErr.ProjectID),
+				))
+				return
+			}
+			var totalLimitErr *manager.TabTotalLimitExceededError
+			if errors.As(err, &totalLimitErr) {
+				apierrors.WriteError(w, apierrors.RateLimitExceeded(
+					"maximum tabs total exceeded",
+					fmt.Sprintf("limit: %d tabs total for project %s", totalLimitErr.Limit, totalLimitErr.ProjectID),
 				))
 				return
 			}
@@ -939,7 +1026,7 @@ func (s *server) handleTabsReorder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientID := s.ensureClientID(w, r)
+	clientID := s.tabOwnerID(w, r)
 
 	var req struct {
 		TabIDs []string `json:"tabIds"`
@@ -1006,7 +1093,7 @@ func (s *server) handleTabByID(w http.ResponseWriter, r *http.Request) {
 		apierrors.WriteError(w, apierrors.BadRequest("missing tab id", ""))
 		return
 	}
-	clientID := s.ensureClientID(w, r)
+	clientID := s.tabOwnerID(w, r)
 	tab, err := s.tabStore.Get(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, tabs.ErrNotFound) {
@@ -1062,7 +1149,7 @@ func (s *server) handleTabHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientID := s.ensureClientID(w, r)
+	clientID := s.tabOwnerID(w, r)
 	tab, err := s.tabStore.Get(r.Context(), tabID)
 	if err != nil {
 		if errors.Is(err, tabs.ErrNotFound) {
@@ -1157,7 +1244,7 @@ func (s *server) handleTabEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleTabEventsWS(w http.ResponseWriter, r *http.Request) {
-	clientID := s.ensureClientID(w, r)
+	clientID := s.tabOwnerID(w, r)
 	remoteAddr := r.RemoteAddr
 
 	log.WithFields(log.Fields{
@@ -1226,7 +1313,7 @@ func (s *server) handleTabEventsWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleTabEventsSSE(w http.ResponseWriter, r *http.Request) {
-	clientID := s.ensureClientID(w, r)
+	clientID := s.tabOwnerID(w, r)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		apierrors.WriteError(w, apierrors.InternalServerError("streaming unsupported", ""))
@@ -1284,6 +1371,18 @@ func (s *server) ensureClientID(w http.ResponseWriter, r *http.Request) string {
 		MaxAge:   int((365 * 24 * time.Hour) / time.Second),
 	})
 	return id
+}
+
+// tabOwnerID returns a stable tab owner identifier.
+// In auth mode it is user-scoped (shared across devices).
+// In no-auth mode it remains browser-cookie scoped.
+func (s *server) tabOwnerID(w http.ResponseWriter, r *http.Request) string {
+	if s.authEnabled() {
+		if user := handlers_auth.UserFromContext(r.Context()); user != nil {
+			return "user:" + user.ID.String()
+		}
+	}
+	return "client:" + s.ensureClientID(w, r)
 }
 
 func (s *server) subscribeTabEvents(clientID string) chan []byte {
@@ -1392,8 +1491,9 @@ type ProjectResponse struct {
 	LastCheckedAt   *time.Time                  `json:"lastCheckedAt,omitempty"`
 
 	// GUI/VNC desktop support
-	GUIEnabled bool `json:"guiEnabled"`           // Whether GUI mode is enabled for this project
-	GUIVNCPort int  `json:"guiVNCPort,omitempty"` // VNC port (default: 5901)
+	GUIEnabled  bool   `json:"guiEnabled"`           // Whether GUI mode is enabled for this project
+	GUIVNCPort  int    `json:"guiVNCPort,omitempty"` // VNC port (default: 5901)
+	SessionMode string `json:"sessionMode,omitempty"`
 }
 
 // handleListProjects returns all projects from the database with their lifecycle status.
@@ -1517,6 +1617,7 @@ func (s *server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		// Add GUI fields
 		resp.GUIEnabled = p.GUIEnabled
 		resp.GUIVNCPort = p.GUIVNCPort
+		resp.SessionMode = string(p.SessionMode)
 
 		// Add health status if project is running and registered with tabManager
 		if hs, ok := healthStatuses[p.Name]; ok {

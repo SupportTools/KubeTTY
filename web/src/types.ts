@@ -74,6 +74,7 @@ export function getMetricStatus(percent: number): MetricStatus {
 
 // Project lifecycle status (from database)
 export type ProjectLifecycleStatus = 'pending' | 'syncing' | 'creating' | 'running' | 'updating' | 'failed' | 'deleting' | 'deleted';
+export type SessionMode = 'exclusive_takeover' | 'shared_concurrent' | 'independent_shells';
 
 export type ProjectInfo = {
   id: string;
@@ -92,6 +93,7 @@ export type ProjectInfo = {
   guiEnabled?: boolean;
   guiResolution?: string;
   guiVNCPort?: number;
+  sessionMode?: SessionMode;
 };
 
 export type ProjectsResponse = {
@@ -158,6 +160,7 @@ export interface AdminProject {
   readNamespaces: string[];
   maxTabsPerClient: number;
   maxTabsTotal: number;
+  sessionMode: SessionMode;
   dindEnabled: boolean;
   // GUI desktop support
   guiEnabled: boolean;
@@ -200,6 +203,7 @@ export interface CreateProjectRequest {
   readNamespaces?: string[];
   maxTabsPerClient?: number;
   maxTabsTotal?: number;
+  sessionMode?: SessionMode;
   dindEnabled?: boolean;
   // GUI desktop support
   guiEnabled?: boolean;
@@ -227,6 +231,7 @@ export interface UpdateProjectRequest {
   memoryLimit?: string;
   maxTabsPerClient?: number;
   maxTabsTotal?: number;
+  sessionMode?: SessionMode;
   dindEnabled?: boolean;
   // GUI desktop support
   guiEnabled?: boolean;

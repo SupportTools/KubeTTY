@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,6 +78,11 @@ type tabEntry struct {
 	// This prevents the concurrent-connect storm that produces 409 rejections
 	// on the project pod's single-client enforcement (discovered in beacon outage).
 	proxyMu sync.Mutex
+
+	// active proxy tracking to support forced preemption/takeover.
+	proxyStateMu sync.Mutex
+	activeCancel context.CancelFunc
+	activeConn   *websocket.Conn
 }
 
 // ManagerConfig holds configuration for the Manager.
@@ -211,6 +217,16 @@ func (m *Manager) CreateTab(ctx context.Context, projectID, clientID string) (ta
 			}
 		}
 	}
+	if project.Limits.MaxTabsTotal > 0 {
+		total := m.countTabsForProjectLocked(projectID)
+		if total >= project.Limits.MaxTabsTotal {
+			m.mu.Unlock()
+			return tabs.Tab{}, &TabTotalLimitExceededError{
+				ProjectID: projectID,
+				Limit:     project.Limits.MaxTabsTotal,
+			}
+		}
+	}
 
 	id := uuid.NewString()
 	e := m.newEntry(project, clientID, time.Now())
@@ -276,6 +292,16 @@ func (m *Manager) CreateVNCTab(ctx context.Context, projectID, clientID string) 
 			return tabs.Tab{}, &TabLimitExceededError{
 				ProjectID: projectID,
 				Limit:     project.Limits.MaxTabsPerClient,
+			}
+		}
+	}
+	if project.Limits.MaxTabsTotal > 0 {
+		total := m.countTabsForProjectLocked(projectID)
+		if total >= project.Limits.MaxTabsTotal {
+			m.mu.Unlock()
+			return tabs.Tab{}, &TabTotalLimitExceededError{
+				ProjectID: projectID,
+				Limit:     project.Limits.MaxTabsTotal,
 			}
 		}
 	}
@@ -361,6 +387,18 @@ func (m *Manager) countTabsForClientProjectLocked(clientID, projectID string) in
 	return count
 }
 
+// countTabsForProjectLocked counts in-memory tabs for a project.
+// MUST be called with mutex held.
+func (m *Manager) countTabsForProjectLocked(projectID string) int {
+	count := 0
+	for _, entry := range m.tabs {
+		if entry.project.ID == projectID {
+			count++
+		}
+	}
+	return count
+}
+
 // Attach proxies between the caller WebSocket and the downstream relay.
 func (m *Manager) Attach(ctx context.Context, tabID, clientID string, upstream *websocket.Conn) error {
 	return m.AttachWithOptions(ctx, tabID, clientID, upstream, false)
@@ -412,21 +450,44 @@ func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string,
 
 	m.mu.Unlock()
 
+	if forceTakeover {
+		e.preemptActiveProxy("session taken over by another client")
+	}
+
 	// Prevent concurrent Proxy() calls on the same tabEntry.
 	// The project pod enforces single-client access; a second concurrent
 	// Proxy() would race to connect and one would receive a 409, then loop
 	// into a reconnection storm that keeps the slot occupied indefinitely.
 	// TryLock fails fast so the browser's reconnection logic retries after
 	// a short back-off, by which time the prior Proxy() will have exited.
-	if !e.proxyMu.TryLock() {
-		log.WithFields(log.Fields{
-			"tab_id":     tabID,
-			"project_id": e.project.ID,
-			"client_id":  clientID,
-		}).Warn("gateway/manager: concurrent Proxy() attempt rejected — another session is already active")
-		return fmt.Errorf("tab %s: another proxy session is already active", tabID)
+	if forceTakeover {
+		if !lockProxyMuWithRetry(ctx, &e.proxyMu, 5*time.Second) {
+			return fmt.Errorf("tab %s: takeover timed out waiting for active session to exit", tabID)
+		}
+	} else {
+		if !e.proxyMu.TryLock() {
+			log.WithFields(log.Fields{
+				"tab_id":     tabID,
+				"project_id": e.project.ID,
+				"client_id":  clientID,
+			}).Warn("gateway/manager: concurrent Proxy() attempt rejected — another session is already active")
+			return fmt.Errorf("tab %s: another proxy session is already active", tabID)
+		}
 	}
 	defer e.proxyMu.Unlock()
+
+	// For websocket relay mode, force reconnect must propagate to downstream
+	// project /ws endpoint where single-client enforcement happens.
+	if forceTakeover {
+		if wsRelay, ok := e.proxier.(*relay.Relay); ok {
+			wsRelay.RequestForceNextConnect()
+		}
+	}
+	if strings.EqualFold(e.project.SessionMode, "independent_shells") {
+		if wsRelay, ok := e.proxier.(*relay.Relay); ok {
+			wsRelay.RequestShellNextConnect(tabID)
+		}
+	}
 
 	proxyStart := time.Now()
 	log.WithFields(log.Fields{
@@ -437,9 +498,10 @@ func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string,
 		"force_takeover": forceTakeover,
 	}).Debug("gateway/manager: proxy session starting")
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	err := e.proxier.Proxy(ctx, upstream)
+	proxyCtx, cancel := context.WithCancel(ctx)
+	e.setActiveProxy(cancel, upstream)
+	defer e.clearActiveProxy()
+	err := e.proxier.Proxy(proxyCtx, upstream)
 
 	log.WithFields(log.Fields{
 		"tab_id":     tabID,
@@ -450,6 +512,59 @@ func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string,
 	}).Debug("gateway/manager: proxy session ended")
 
 	return err
+}
+
+func lockProxyMuWithRetry(ctx context.Context, mu *sync.Mutex, timeout time.Duration) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if mu.TryLock() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+func (e *tabEntry) setActiveProxy(cancel context.CancelFunc, conn *websocket.Conn) {
+	e.proxyStateMu.Lock()
+	e.activeCancel = cancel
+	e.activeConn = conn
+	e.proxyStateMu.Unlock()
+}
+
+func (e *tabEntry) clearActiveProxy() {
+	e.proxyStateMu.Lock()
+	e.activeCancel = nil
+	e.activeConn = nil
+	e.proxyStateMu.Unlock()
+}
+
+func (e *tabEntry) preemptActiveProxy(reason string) {
+	e.proxyStateMu.Lock()
+	cancel := e.activeCancel
+	conn := e.activeConn
+	e.proxyStateMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if conn != nil {
+		_ = conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(4000, reason),
+			time.Now().Add(time.Second),
+		)
+		_ = conn.Close()
+	}
 }
 
 // ensureHealthyConnection checks if the relay is in a state that can accept new connections.

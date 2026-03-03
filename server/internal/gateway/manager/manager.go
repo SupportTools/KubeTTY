@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -483,10 +482,12 @@ func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string,
 			wsRelay.RequestForceNextConnect()
 		}
 	}
-	if strings.EqualFold(e.project.SessionMode, "independent_shells") {
-		if wsRelay, ok := e.proxier.(*relay.Relay); ok {
-			wsRelay.RequestShellNextConnect(tabID)
-		}
+	// Always pass tab-scoped shell hint for the next downstream connect.
+	// Project service only honors ?shell=... in independent_shells mode and
+	// ignores it in other modes, so this is a safe no-op fallback that avoids
+	// relying on potentially stale in-memory sessionMode metadata in gateway.
+	if wsRelay, ok := e.proxier.(*relay.Relay); ok {
+		wsRelay.RequestShellNextConnect(tabID)
 	}
 
 	proxyStart := time.Now()

@@ -30,6 +30,19 @@ const defaultOpenActionForMode = (mode?: SessionMode): 'create_new' | 'attach_re
   }
 };
 
+const createActionLabelForMode = (mode?: SessionMode): string => {
+  switch (mode) {
+    case 'independent_shells':
+      return 'New Shell';
+    case 'exclusive_takeover':
+      return 'New Session';
+    case 'shared_concurrent':
+      return 'New Session';
+    default:
+      return 'New Session';
+  }
+};
+
 const getStatusClass = (status?: ProjectHealthStatus): string => {
   switch (status) {
     case 'online':
@@ -222,6 +235,17 @@ const ProjectPicker = ({ projects, existingTabs, onSelect, onClose }: Props) => 
                 </button>
                 {((tabsByProject.get(project.id)?.length || 0) > 0) && (
                   <div className="picker-existing-tabs">
+                    <button
+                      className="page-btn"
+                      onClick={() =>
+                        onSelect({
+                          projectId: project.id,
+                          openAction: 'create_new',
+                        })
+                      }
+                    >
+                      {createActionLabelForMode(project.sessionMode)}
+                    </button>
                     <button
                       className="page-btn"
                       onClick={() =>

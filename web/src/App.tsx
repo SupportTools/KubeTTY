@@ -472,23 +472,24 @@ const App = () => {
                 </button>
               </div>
             ) : (
-              tabs.map((tab) => (
-                <div
-                  key={tab.tabId}
-                  className={`terminal-pane${tab.tabId !== activeTabId ? ' hidden' : ''}`}
-                >
-                  <TabPane
-                    tabId={tab.tabId}
-                    wsUrl={tab.wsUrl}
-                    healthUrl={healthForTab(tab.tabId)}
-                    isFocused={tab.tabId === activeTabId}
-                    project={getProjectForTab(tab.projectId)}
-                    externalStatus={tab.status as 'connecting' | 'connected' | 'reconnecting' | 'closed'}
-                    onReconnect={handleReconnect}
-                    onBell={() => handleBellAlert(tab.tabId)}
-                  />
-                </div>
-              ))
+              (() => {
+                const activeTab = activeTabId ? tabs.find((tab) => tab.tabId === activeTabId) : null;
+                if (!activeTab) return null;
+                return (
+                  <div key={activeTab.tabId} className="terminal-pane">
+                    <TabPane
+                      tabId={activeTab.tabId}
+                      wsUrl={activeTab.wsUrl}
+                      healthUrl={healthForTab(activeTab.tabId)}
+                      isFocused={true}
+                      project={getProjectForTab(activeTab.projectId)}
+                      externalStatus={activeTab.status as 'connecting' | 'connected' | 'reconnecting' | 'closed'}
+                      onReconnect={handleReconnect}
+                      onBell={() => handleBellAlert(activeTab.tabId)}
+                    />
+                  </div>
+                );
+              })()
             )}
           </section>
           {pickerOpen && (

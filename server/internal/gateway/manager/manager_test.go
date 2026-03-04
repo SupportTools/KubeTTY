@@ -478,7 +478,7 @@ func TestToTabStatus(t *testing.T) {
 		expected tabs.Status
 	}{
 		{relay.StatusConnecting, tabs.StatusConnecting},
-		{relay.StatusIdle, tabs.StatusConnecting},
+		{relay.StatusIdle, tabs.StatusConnected},
 		{relay.StatusConnected, tabs.StatusConnected},
 		{relay.StatusReconnecting, tabs.StatusReconnecting},
 		{relay.StatusClosed, tabs.StatusClosed},
@@ -666,8 +666,8 @@ func (b *blockingProxier) Close() error                        { return nil }
 func (b *blockingProxier) Subscribe() <-chan relay.StatusEvent { return make(chan relay.StatusEvent) }
 func (b *blockingProxier) ActivityChan() <-chan struct{}       { return make(chan struct{}) }
 
-// TestAttach_ConcurrentProxyRejected verifies that a second concurrent Attach() on the
-// same tab is rejected immediately while the first Proxy() is still running.
+// TestAttach_ConcurrentProxyRejected verifies that a concurrent Attach() from a
+// different client on the same tab is rejected while the first Proxy() is running.
 //
 // Regression test for the zombie-connection bug: without the proxyMu TryLock guard,
 // multiple concurrent Attach() calls each called Proxy() independently, each
@@ -704,10 +704,11 @@ func TestAttach_ConcurrentProxyRejected(t *testing.T) {
 		t.Fatal("first Proxy() did not start in time")
 	}
 
-	// Second Attach — must be rejected immediately (not block, not enter Proxy()).
+	// Second Attach from different client — must be rejected immediately
+	// (not block, not enter Proxy()).
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	err = mgr.Attach(ctx, tab.TabID, "client1", nil)
+	err = mgr.Attach(ctx, tab.TabID, "client2", nil)
 	if err == nil {
 		t.Fatal("expected second Attach to be rejected, got nil error")
 	}
@@ -728,6 +729,69 @@ func TestAttach_ConcurrentProxyRejected(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("first Attach did not exit after startCh was closed")
+	}
+}
+
+// TestAttach_SameClientReconnectPreempts verifies that a second Attach() from the same
+// client preempts the currently active proxy session instead of being hard-rejected.
+func TestAttach_SameClientReconnectPreempts(t *testing.T) {
+	cat := gatewayconfig.Catalog{
+		Projects: []gatewayconfig.Project{{ID: "proj", Namespace: "ns", Service: "svc", Port: 8080}},
+	}
+	store := &fakeStore{}
+	mgr := New(cat, store, 2*time.Hour)
+
+	tab, err := mgr.CreateTab(context.Background(), "proj", "client1")
+	if err != nil {
+		t.Fatalf("CreateTab: %v", err)
+	}
+	fake := newBlockingProxier()
+	mgr.mu.Lock()
+	mgr.tabs[tab.TabID].proxier = fake
+	mgr.mu.Unlock()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- mgr.Attach(context.Background(), tab.TabID, "client1", nil)
+	}()
+
+	// First attach entered Proxy.
+	select {
+	case <-fake.enterCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Proxy() did not start in time")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- mgr.Attach(context.Background(), tab.TabID, "client1", nil)
+	}()
+
+	// Second attach should eventually enter Proxy after preempting first.
+	select {
+	case <-fake.enterCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Proxy() did not start in time")
+	}
+
+	// Unblock active proxy session.
+	close(fake.startCh)
+
+	// First attach should have been preempted/canceled (or already exited cleanly).
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Attach did not exit after preemption")
+	}
+
+	// Second attach should exit once unblocked.
+	select {
+	case secondErr := <-secondDone:
+		if secondErr != nil {
+			t.Fatalf("second Attach returned unexpected error: %v", secondErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Attach did not exit after startCh was closed")
 	}
 }
 

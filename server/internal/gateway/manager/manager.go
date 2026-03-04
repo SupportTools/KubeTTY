@@ -465,12 +465,26 @@ func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string,
 		}
 	} else {
 		if !e.proxyMu.TryLock() {
-			log.WithFields(log.Fields{
-				"tab_id":     tabID,
-				"project_id": e.project.ID,
-				"client_id":  clientID,
-			}).Warn("gateway/manager: concurrent Proxy() attempt rejected — another session is already active")
-			return fmt.Errorf("tab %s: another proxy session is already active", tabID)
+			// Same-client reconnect path: preempt stale/previous proxy session and wait briefly
+			// for it to unwind instead of hard-rejecting into reconnect loop.
+			if e.clientID == clientID && e.hasActiveProxy() {
+				log.WithFields(log.Fields{
+					"tab_id":     tabID,
+					"project_id": e.project.ID,
+					"client_id":  clientID,
+				}).Info("gateway/manager: preempting stale active proxy for same-client reconnect")
+				e.preemptActiveProxy("replaced by newer client connection")
+				if !lockProxyMuWithRetry(ctx, &e.proxyMu, 2*time.Second) {
+					return fmt.Errorf("tab %s: timed out waiting for prior session to close", tabID)
+				}
+			} else {
+				log.WithFields(log.Fields{
+					"tab_id":     tabID,
+					"project_id": e.project.ID,
+					"client_id":  clientID,
+				}).Warn("gateway/manager: concurrent Proxy() attempt rejected — another session is already active")
+				return fmt.Errorf("tab %s: another proxy session is already active", tabID)
+			}
 		}
 	}
 	defer e.proxyMu.Unlock()
@@ -566,6 +580,12 @@ func (e *tabEntry) preemptActiveProxy(reason string) {
 		)
 		_ = conn.Close()
 	}
+}
+
+func (e *tabEntry) hasActiveProxy() bool {
+	e.proxyStateMu.Lock()
+	defer e.proxyStateMu.Unlock()
+	return e.activeCancel != nil || e.activeConn != nil
 }
 
 // ensureHealthyConnection checks if the relay is in a state that can accept new connections.
@@ -1322,8 +1342,13 @@ func (m *Manager) sendIdleWarning(tabID string, entry *tabEntry, remaining time.
 
 func toTabStatus(s relay.Status) tabs.Status {
 	switch s {
-	case relay.StatusConnecting, relay.StatusIdle:
+	case relay.StatusConnecting:
 		return tabs.StatusConnecting
+	case relay.StatusIdle:
+		// Relay idle means no active upstream browser stream, not a broken downstream.
+		// Reporting this as "connecting" causes stale reconnect overlays when a tab is
+		// detached/re-attached during focus switches; keep it as connected semantics.
+		return tabs.StatusConnected
 	case relay.StatusConnected:
 		return tabs.StatusConnected
 	case relay.StatusReconnecting:

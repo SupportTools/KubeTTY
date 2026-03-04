@@ -185,6 +185,17 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
       return;
     }
 
+    // Ensure no stale reconnect/countdown timers survive into a new connect cycle.
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
+    if (countdownTimer.current) {
+      clearInterval(countdownTimer.current);
+      countdownTimer.current = null;
+    }
+    setReconnectCountdown(null);
+
     let targetUrl = wsUrl || (() => {
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
       return `${protocol}://${window.location.host}/ws`;
@@ -207,6 +218,16 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
     connectTimeRef.current = Date.now();
 
     socket.onopen = () => {
+      // Clear any previously scheduled reconnect attempts once connected.
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = null;
+      }
+      if (countdownTimer.current) {
+        clearInterval(countdownTimer.current);
+        countdownTimer.current = null;
+      }
+      setReconnectCountdown(null);
       const wasReconnecting = connectedOnceRef.current;
       connectedOnceRef.current = true;
       reconnectAttempts.current = 0; // Reset on successful connection
@@ -422,6 +443,26 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
       socket.close();
     };
   }, [retrySignal, onReconnect, wsUrl]);
+
+  // Keep UI status in sync with authoritative tab state from gateway.
+  useEffect(() => {
+    if (externalStatus !== 'connected') {
+      return;
+    }
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
+    if (countdownTimer.current) {
+      clearInterval(countdownTimer.current);
+      countdownTimer.current = null;
+    }
+    setReconnectCountdown(null);
+    setShowForceButton(false);
+    setCircuitBreakerTripped(false);
+    setTakenOverMessage(null);
+    setStatus((prev) => (prev === 'Connected' || prev === 'Reconnected' ? prev : 'Connected'));
+  }, [externalStatus]);
 
   useEffect(() => {
     if (isFocused && termRef.current && fitAddonRef.current) {

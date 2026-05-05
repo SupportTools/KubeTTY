@@ -335,3 +335,13 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 - Check `QA_REVIEW.md` for known issues
 - Follow `docs/development/task-execution-workflow.md` for task workflow
 - Use TaskForge to track work progress
+
+## Commands Config
+
+| Setting | Value |
+|---------|-------|
+| TaskForge Project ID | 79 |
+| Build command | `make build-server-local` |
+| Test command | `make test-all-local` |
+| Lint command | `make vet` |
+| Tech stack | Go + React/TypeScript |

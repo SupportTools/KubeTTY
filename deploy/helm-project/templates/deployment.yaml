@@ -71,7 +71,10 @@ spec:
               {{- if hasPrefix "/home" $mount.path }}
               mkdir -p /data/{{ $subPathName }}/mmattox
               {{- end }}
-              chown -R mmattox:mmattox /data/{{ $subPathName }}
+              # Idempotent + bounded chown: skip already-correct files (fast warm
+              # restarts) and time-box so a transient CSI/iSCSI hang fails init fast
+              # instead of D-stating. Ref: cluster-services-alert-remediation-111.
+              timeout 300 find /data/{{ $subPathName }} \! -user mmattox -exec chown mmattox:mmattox {} +
               {{- end }}
           securityContext:
             runAsUser: 0

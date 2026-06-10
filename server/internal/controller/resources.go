@@ -614,7 +614,11 @@ if ! id -u mmattox >/dev/null 2>&1; then
 fi
 mkdir -p /data/opt /data/home /data/usr-local-go /data/var-lib-docker
 mkdir -p /data/home/mmattox
-chown -R mmattox:mmattox /data/opt /data/home /data/usr-local-go
+# Idempotent + bounded chown: only touch files not already owned by mmattox
+# (warm restarts become near-instant), and cap runtime so a transient CSI/iSCSI
+# session hang fails the init fast for kubelet to recreate the pod with a fresh
+# session, instead of D-stating indefinitely. Ref: cluster-services-alert-remediation-111.
+timeout 300 find /data/opt /data/home /data/usr-local-go \! -user mmattox -exec chown mmattox:mmattox {} +
 `},
 		SecurityContext: &corev1.SecurityContext{RunAsUser: &rootID},
 		VolumeMounts:    []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},

@@ -27,12 +27,12 @@
     "@types/node": "^24.10.1",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.3.0",
-    "@vitest/coverage-v8": "^4.0.12",
-    "@vitest/ui": "^4.0.12",
+    "@vitejs/plugin-react": "^6.0.2",
+    "@vitest/coverage-v8": "^4.1.8",
+    "@vitest/ui": "^4.1.8",
     "happy-dom": "^12.10.3",
     "typescript": "^5.5.3",
-    "vite": "^5.3.1",
-    "vitest": "^4.0.12"
+    "vite": "^8.0.16",
+    "vitest": "^4.1.8"
   }
 }

@@ -208,99 +208,30 @@ jobs:
             NODE_MAJOR=20
 
   # Stage 4: Security Scanning (disabled - image too large for CI timeout)
-  security-scan:
-    name: Security Scan
+  # Migrated from a per-repo Trivy job to Grype for consistency across repos, but kept
+  # opt-in/disabled: `if: false` mirrors the previous Trivy job's disabled state (KubeTTY's
+  # image is too large for Grype to scan in CI). Uses anchore/scan-action (grype engine)
+  # IN-LINE rather than the org reusable grype-scan.yml: pipeline.yml is pull_request-
+  # triggered, and a private-repo reusable `uses:` fails to resolve at workflow-LOAD time
+  # on pull_request, failing the ENTIRE run at startup (0 jobs) even with `if: false`, since
+  # resolution happens before `if` is evaluated. An in-line action has no such problem.
+  grype-scan:
+    name: Security Scan (Grype)
     runs-on: ubuntu-latest
-    needs: build
-    if: false  # Disabled - KubeTTY image too large for Trivy to scan in CI
+    needs: [build]
+    if: false  # Disabled - KubeTTY image too large for Grype to scan in CI (same reasoning as the prior Trivy job)
     permissions:
-      actions: read
       contents: read
       security-events: write
-      id-token: write          # GitHub OIDC -> Vault (keyless Harbor login)
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # Keyless: exchange the GitHub OIDC token at Vault for the repo-scoped
-      # Harbor robot (replaces org admin HARBOR_USERNAME/PASSWORD).
-      - name: Vault login (GitHub OIDC) + Harbor robot
-        uses: hashicorp/vault-action@v3
+      # NOTE: if ever enabled, this needs a Harbor login step (image is a private
+      # harbor.support.tools ref); left out while the job is disabled.
+      - name: Grype scan (anchore/scan-action, informational)
+        uses: anchore/scan-action@v6
         with:
-          url: https://vault.support.tools
-          method: jwt
-          path: github-actions
-          role: gha-kubetty
-          jwtGithubAudience: https://github.com/SupportTools
-          exportEnv: true
-          secrets: |
-            secret/data/harbor/kubetty-ci-robot username | HARBOR_ROBOT_USER ;
-            secret/data/harbor/kubetty-ci-robot password | HARBOR_ROBOT_TOKEN
-
-      - name: Log in to Harbor
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ env.HARBOR_ROBOT_USER }}
-          password: ${{ env.HARBOR_ROBOT_TOKEN }}
-
-      - name: Extract image tag
-        id: extract-tag
-        run: |
-          # Use proper quoting to prevent shell injection
-          # For semver tags (v0.6.0), docker/metadata-action creates tag without 'v' prefix (0.6.0)
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            TAG="${{ github.ref_name }}"
-            # Strip 'v' prefix to match docker/metadata-action semver pattern
-            TAG="${TAG#v}"
-          elif [[ "${{ github.ref_name }}" == "main" ]]; then
-            TAG="latest"
-          else
-            TAG="${{ github.ref_name }}-${{ github.sha }}"
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Image tag: ${TAG}"
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.extract-tag.outputs.tag }}
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH'
-          scanners: 'vuln'
-          timeout: '30m'
-
-      - name: Upload Trivy results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        continue-on-error: true  # Optional - requires Code Security to be enabled on repo
-        with:
-          sarif_file: 'trivy-results.sarif'
-
-      - name: Run Trivy for blocking on CRITICAL
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.extract-tag.outputs.tag }}
-          format: 'table'
-          exit-code: '1'
-          severity: 'CRITICAL'
-          scanners: 'vuln'
-          timeout: '30m'
-
-      - name: Generate SBOM
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.extract-tag.outputs.tag }}
-          format: 'cyclonedx'
-          output: 'sbom.json'
-          scanners: 'vuln'
-          timeout: '30m'
-
-      - name: Upload SBOM as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom
-          path: sbom.json
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image-digest }}
+          fail-build: false
+          severity-cutoff: high
 
   # Stage 5: Helm Chart Validation
   helm-validate:
@@ -378,11 +309,11 @@ jobs:
           echo "✓ Valid semantic version: $TAG"
 
       - name: Verify security scan passed
-        if: false  # Disabled - security scan is skipped (image too large for CI)
+        if: false  # Disabled - Grype scan is opt-in/skipped (image too large for CI)
         run: |
-          if [ "${{ needs.security-scan.result }}" != "success" ]; then
+          if [ "${{ needs.grype-scan.result }}" != "success" ]; then
             echo "ERROR: Security scan did not pass"
-            echo "Security scan result: ${{ needs.security-scan.result }}"
+            echo "Security scan result: ${{ needs.grype-scan.result }}"
             echo "Cannot deploy to production with security issues"
             exit 1
           fi

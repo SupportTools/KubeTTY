@@ -314,20 +314,22 @@ if [ "$FULL_MODE" = true ]; then
         exit 1
     fi
 
-    # Security scan with Trivy (if available)
-    if command -v trivy &> /dev/null; then
-        print_stage "Running Trivy security scan"
+    # Security scan with Grype (if available)
+    # NOTE: CI's grype-scan job is opt-in/disabled (if: false) - this local scan
+    # is best-effort and informational only; it does not block CI either way.
+    if command -v grype &> /dev/null; then
+        print_stage "Running Grype security scan"
 
-        echo "Scanning for HIGH and CRITICAL vulnerabilities..."
-        if trivy image --severity HIGH,CRITICAL --exit-code 0 "$IMAGE_TAG"; then
-            print_success "Trivy scan completed (informational)"
+        echo "Scanning for vulnerabilities (informational)..."
+        if grype "$IMAGE_TAG"; then
+            print_success "Grype scan completed (informational)"
         else
-            print_warning "Trivy scan found vulnerabilities (non-blocking in local mode)"
+            print_warning "Grype scan found vulnerabilities (non-blocking in local mode)"
         fi
 
         echo ""
         echo "Checking for CRITICAL vulnerabilities (blocking)..."
-        if trivy image --severity CRITICAL --exit-code 1 "$IMAGE_TAG"; then
+        if grype "$IMAGE_TAG" --fail-on critical; then
             print_success "No CRITICAL vulnerabilities found"
         else
             print_error "CRITICAL vulnerabilities found - this will block CI/CD pipeline"
@@ -337,8 +339,8 @@ if [ "$FULL_MODE" = true ]; then
             exit 1
         fi
     else
-        print_warning "Trivy not installed, skipping security scan"
-        echo "Install with: brew install trivy  # or appropriate package manager"
+        print_warning "Grype not installed, skipping security scan"
+        echo "Install with: brew install grype  # or appropriate package manager"
     fi
 
     # Clean up Docker image
@@ -378,8 +380,8 @@ fi
 
 if [ "$FULL_MODE" = true ]; then
     echo "  ✓ Docker image build"
-    if command -v trivy &> /dev/null; then
-        echo "  ✓ Trivy security scan"
+    if command -v grype &> /dev/null; then
+        echo "  ✓ Grype security scan"
     fi
 fi
 

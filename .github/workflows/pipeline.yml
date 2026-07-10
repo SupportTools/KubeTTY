@@ -208,23 +208,30 @@ jobs:
             NODE_MAJOR=20
 
   # Stage 4: Security Scanning (disabled - image too large for CI timeout)
-  # Migrated from a per-repo Trivy job to the org-wide reusable Grype workflow
-  # for consistency across repos. Still opt-in/non-blocking: `if: false` mirrors
-  # the previous Trivy job's disabled state, and `blocking: false` ensures the
-  # scan (if ever enabled) never gates the pipeline.
+  # Migrated from a per-repo Trivy job to Grype for consistency across repos, but kept
+  # opt-in/disabled: `if: false` mirrors the previous Trivy job's disabled state (KubeTTY's
+  # image is too large for Grype to scan in CI). Uses anchore/scan-action (grype engine)
+  # IN-LINE rather than the org reusable grype-scan.yml: pipeline.yml is pull_request-
+  # triggered, and a private-repo reusable `uses:` fails to resolve at workflow-LOAD time
+  # on pull_request, failing the ENTIRE run at startup (0 jobs) even with `if: false`, since
+  # resolution happens before `if` is evaluated. An in-line action has no such problem.
   grype-scan:
     name: Security Scan (Grype)
+    runs-on: ubuntu-latest
     needs: [build]
     if: false  # Disabled - KubeTTY image too large for Grype to scan in CI (same reasoning as the prior Trivy job)
-    uses: SupportTools/ci-runners/.github/workflows/grype-scan.yml@main
-    with:
-      image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image-digest }}
-      fail-on: high
-      blocking: false
     permissions:
       contents: read
-      id-token: write
       security-events: write
+    steps:
+      # NOTE: if ever enabled, this needs a Harbor login step (image is a private
+      # harbor.support.tools ref); left out while the job is disabled.
+      - name: Grype scan (anchore/scan-action, informational)
+        uses: anchore/scan-action@v6
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image-digest }}
+          fail-build: false
+          severity-cutoff: high
 
   # Stage 5: Helm Chart Validation
   helm-validate:

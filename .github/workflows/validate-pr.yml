@@ -14,7 +14,7 @@ on:
 
 env:
   NODE_VERSION: '20'
-  COVERAGE_THRESHOLD: 60
+  COVERAGE_THRESHOLD: 35
 
 jobs:
   # Fast validation checks

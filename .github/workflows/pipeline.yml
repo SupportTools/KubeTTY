@@ -331,39 +331,12 @@ jobs:
         with:
           version: 'v3.15.2'
 
-      # Keyless: exchange the GitHub OIDC token at Vault; exportToken makes
-      # VAULT_TOKEN available so the next step can mint a short-lived,
-      # namespace-scoped Kubernetes token (replaces org admin KUBECONFIG_PROD).
-      - name: Vault login (GitHub OIDC)
-        uses: hashicorp/vault-action@v3
+      # DFW runners live in stackeye-ci-dfw01, so their in-cluster API endpoint
+      # and projected CA cannot be used for the a1-ops-prd deployment.
+      - name: Set up production kubeconfig
+        uses: ./.github/actions/setup-kubeconfig-onprem
         with:
-          url: https://vault.support.tools
-          method: jwt
-          path: github-actions
-          role: gha-kubetty
-          jwtGithubAudience: https://github.com/SupportTools
-          exportToken: true
-
-      - name: Mint short-lived Kubernetes deploy token
-        env:
-          VAULT_ADDR: https://vault.support.tools
-        run: |
-          KUBE_TOKEN=$(curl -sf -H "X-Vault-Token: ${VAULT_TOKEN}" \
-            -X PUT -d '{"kubernetes_namespace":"arc-runners-supporttools"}' \
-            "${VAULT_ADDR}/v1/kubernetes-onprem/creds/kubetty" \
-            | jq -r '.data.service_account_token')
-          test -n "$KUBE_TOKEN" && test "$KUBE_TOKEN" != null || { echo "::error::failed to mint K8s token"; exit 1; }
-          echo "::add-mask::$KUBE_TOKEN"
-          # Build the kubeconfig at the same path the deploy steps already use.
-          # In-cluster runner => talk to a1-ops-prd's own apiserver + in-cluster CA.
-          mkdir -p "$HOME/.kube"
-          kubectl config set-cluster onprem \
-            --server=https://kubernetes.default.svc:443 \
-            --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
-            --embed-certs=true
-          kubectl config set-credentials kubetty-ci --token="${KUBE_TOKEN}"
-          kubectl config set-context ci --cluster=onprem --user=kubetty-ci --namespace=kubetty-gateway-prd
-          kubectl config use-context ci
+          namespace: kubetty-gateway-prd
 
       - name: Extract image tag
         id: extract-tag

@@ -1,0 +1,292 @@
+name: 'Setup kubeconfig (on-prem a1-ops-prd)'
+description: >
+  Build a kubeconfig for the on-prem cluster a1-ops-prd from a Vault-minted ServiceAccount
+  token with a maximum one-hour lease, and assert it authenticated to the right cluster as
+  the right identity. Replaces the in-cluster-ServiceAccount kubeconfig that only worked
+  while the runners themselves lived in a1-ops-prd.
+
+# WHY THIS EXISTS
+#
+# Until the DFW relocation, every deploy job built its kubeconfig like this:
+#
+#   kubectl config set-cluster onprem \
+#     --server=https://kubernetes.default.svc:443 \
+#     --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+#
+# Both of those resolve to whatever cluster the RUNNER lives in. That was correct while
+# runners ran inside a1-ops-prd and is silently wrong now that they run in
+# stackeye-ci-dfw01: the same two paths exist on a DFW runner and describe the DFW
+# cluster. There is no cluster name to change — the credential model itself has to.
+#
+# Left as-is this does not fail loudly. It authenticates, and then edits the wrong
+# cluster, or 404s in a way that reads like a missing manifest.
+#
+# WHY THE DIRECT APISERVER, NOT THE RANCHER PROXY
+#
+# Measured from inside stackeye-ci-dfw01 on 2026-08-15 with a real minted token:
+#
+#   https://a1-ops-prd.support.tools:6443            HTTP 200, real DeploymentList
+#   https://rancher.support.tools/k8s/clusters/...   HTTP 403, "system:unauthenticated"
+#
+# Rancher's cluster proxy authenticates with RANCHER tokens; it does not recognise a
+# downstream ServiceAccount JWT at all, so the caller lands as anonymous. Rancher's
+# Authorized Cluster Endpoint — the native way to publish the downstream apiserver — is
+# disabled on this cluster (localClusterAuthEndpoint.enabled=false). Do NOT "simplify"
+# this back to the Rancher kubeconfig: it would swap a 1-hour keyless SA token for a
+# long-lived Rancher API token on production deploy paths.
+#
+# WHY THE RAW IP, DESPITE a1-ops-prd.support.tools EXISTING
+#
+# The DNS name looks like the obviously better choice — 96.90.99.201 is a RESIDENTIAL
+# address that can change, and the name is in the apiserver certificate's SANs. It does
+# not work, and it fails in the worst way: it hangs.
+#
+#   from the house    a1-ops-prd.support.tools -> 96.90.99.201        (origin)
+#   from DFW/public   a1-ops-prd.support.tools -> 104.26.10.107, ...  (Cloudflare edge)
+#
+# The record is Cloudflare-PROXIED (orange cloud). Cloudflare only proxies HTTP(S) on its
+# standard ports, so a connection to :6443 through the edge is black-holed:
+#
+#   measured from inside stackeye-ci-dfw01, 2026-08-15
+#     https://a1-ops-prd.support.tools:6443   HTTP 000 after 20.0s
+#     https://96.90.99.201:6443               HTTP 401 in 0.15s
+#
+# harbor.support.tools works from DFW for exactly the opposite reason — it is DNS-only
+# (grey cloud) and resolves to the origin everywhere.
+#
+# DO NOT "FIX" THIS BY GREY-CLOUDING a1-ops-prd.support.tools.
+#
+# It is a PROXIED CNAME to a1-ops-prd-origin.support.tools and it is the shared ingress
+# for the whole cluster: 56 records CNAME through it, including vault, argocd, grafana,
+# longhorn and alertmanager (checked against the Cloudflare API, 2026-08-15). Turning it
+# grey would strip Cloudflare's WAF and DDoS protection from every one of them — Vault
+# included — to save one line of config here. That trade is not close.
+#
+# The clean fix is a NEW grey-clouded A record (harbor.support.tools is the existing
+# precedent: DNS-only, 96.90.99.201, reachable from DFW) PLUS that name added to the
+# apiserver's tls-san so the certificate covers it. The cert's SANs today are
+# kubernetes[.default[.svc]], a1-ops-prd.support.tools, localhost, a1ubmgmtp02 and a
+# fixed IP list, so a new name without a cert re-issue fails TLS instead of hanging.
+# That is a coordinated RKE2 change with an apiserver restart — worth doing, not worth
+# doing in the middle of a CI migration.
+#
+# Until then this is an IP. The IP is in the cert's SANs, so TLS is valid. If the
+# residential address changes, this default is the one line to edit per repo.
+#
+# Verify from DFW, never from a workstation: the house sees a different answer than CI
+# does, which is what made this look fine right up until it did not.
+#
+# WHY THE CA IS COMMITTED, NOT IN VAULT
+#
+# It is a public certificate, not a secret, and it is the trust anchor for production
+# deploys — so changing what CI trusts should require a reviewed diff rather than a Vault
+# write. It expires 2035-05-27. It is deliberately NOT read from the projected
+# serviceaccount path, which exists on a DFW runner too and holds the DFW cluster's CA.
+#
+# PORTING TO THE OTHER REPOS
+#
+# Eight more SupportTools repos build the same in-cluster kubeconfig
+# (beacon-support, kubetty, mattoxengineering-website, memory-bank,
+# rancher-upgrade-tool, support-decoder, supportlogs-io, website). This directory is
+# self-contained so it can be copied wholesale; change `vault-role`, `vault-path` and
+# `expected-identity` and nothing else. GitHub Actions cannot reference a composite
+# action in another PRIVATE repo without checking that repo out first, so copies must be
+# kept in sync by hand — which is why the logic that must not drift lives in
+# security-validation.sh with its own unit tests beside it.
+
+inputs:
+  vault-role:
+    description: >
+      Vault jwt role on the shared auth/github-actions mount. bound_claims are per-repo,
+      so this must be the role bound to THIS repository.
+    required: false
+    default: gha-kubetty
+  vault-url:
+    description: >
+      Vault address. The public ingress by default, which is reachable from any runner —
+      on-prem, GitHub-hosted, or the Rackspace CI cloudspace. The in-cluster Service URL
+      only resolves from inside a1-ops-prd and must never be the default here.
+    required: false
+    default: https://vault.support.tools
+  vault-path:
+    description: 'Kubernetes secrets-engine path that mints the deploy token.'
+    required: false
+    default: kubernetes-onprem/creds/kubetty
+  vault-mint-namespace:
+    description: >
+      The namespace the ServiceAccount being minted lives in — NOT the deploy target.
+      kubetty-ci-deployer lives in arc-runners-supporttools on a1-ops-prd.
+    required: false
+    default: arc-runners-supporttools
+  expected-identity:
+    description: 'Full username the kubeconfig must authenticate as.'
+    required: false
+    default: 'system:serviceaccount:arc-runners-supporttools:kubetty-ci-deployer'
+  server:
+    description: 'API server URL. An IP on purpose — see WHY THE RAW IP in the header.'
+    required: false
+    default: 'https://96.90.99.201:6443'
+  namespace:
+    description: 'Default namespace for the kubeconfig context (the deploy target).'
+    required: true
+  kubeconfig-path:
+    description: 'Where to write the kubeconfig. Defaults to ./kubeconfig in the workspace.'
+    required: false
+    default: ''
+
+outputs:
+  kubeconfig:
+    description: 'Absolute path to the kubeconfig that was written.'
+    value: ${{ steps.build.outputs.kubeconfig }}
+  server:
+    description: 'API server URL the kubeconfig points at.'
+    value: ${{ steps.build.outputs.server }}
+
+runs:
+  using: 'composite'
+  steps:
+    # exportToken: true is required — the mint below is an authenticated WRITE that
+    # vault-action cannot perform itself. The next step removes that capability from both
+    # its own process and GITHUB_ENV immediately after the single mint request.
+    #
+    # Pinned by SHA. An unpinned action here would be a silent upgrade path in the step
+    # that holds a Vault token capable of minting cluster credentials.
+    - name: Vault login (keyless GitHub OIDC)
+      id: vault
+      uses: hashicorp/vault-action@4c06c5ccf5c0761b6029f56cfb1dcf5565918a3b # v3.4.0
+      with:
+        url: ${{ inputs.vault-url }}
+        method: jwt
+        path: github-actions
+        role: ${{ inputs.vault-role }}
+        jwtGithubAudience: https://github.com/SupportTools
+        exportEnv: false
+        exportToken: true
+
+    - name: Mint deploy token and build kubeconfig
+      id: build
+      shell: bash
+      env:
+        VAULT_URL: ${{ inputs.vault-url }}
+        VAULT_PATH: ${{ inputs.vault-path }}
+        MINT_NAMESPACE: ${{ inputs.vault-mint-namespace }}
+        EXPECTED_USER: ${{ inputs.expected-identity }}
+        ONPREM_SERVER: ${{ inputs.server }}
+        TARGET_NAMESPACE: ${{ inputs.namespace }}
+        KUBECONFIG_PATH_INPUT: ${{ inputs.kubeconfig-path }}
+        INPUT_VAULT_ROLE: ${{ inputs.vault-role }}
+      run: |
+        set -euo pipefail
+
+        # shellcheck disable=SC1091
+        source "${GITHUB_ACTION_PATH}/security-validation.sh"
+
+        CA_SRC="${GITHUB_ACTION_PATH}/onprem-ca.crt"
+        test -s "$CA_SRC" || { echo "Error: CA missing at $CA_SRC"; exit 1; }
+
+        KUBECONFIG_PATH="${KUBECONFIG_PATH_INPUT:-$GITHUB_WORKSPACE/kubeconfig}"
+        mkdir -p "$(dirname "$KUBECONFIG_PATH")"
+
+        if [ -z "${VAULT_TOKEN:-}" ]; then
+          echo "Error: VAULT_TOKEN is empty — the OIDC login failed."
+          echo "This job must NOT fall back to the runner's in-cluster ServiceAccount:"
+          echo "on a DFW runner that token authenticates to the DFW cluster, not a1-ops-prd."
+          exit 1
+        fi
+
+        # The Kubernetes secrets engine mints on WRITE (PUT + kubernetes_namespace), so
+        # this cannot be expressed as a vault-action `secrets:` entry.
+        # `|| true` so a non-2xx does not abort under `set -e` before the diagnostic below
+        # can explain it — a bare `curl: (22)` in a deploy log is useless.
+        MINT_RESPONSE="$(curl -sS --fail-with-body \
+          -H "X-Vault-Token: ${VAULT_TOKEN}" \
+          -X PUT -d "{\"kubernetes_namespace\":\"${MINT_NAMESPACE}\",\"ttl\":\"1h\"}" \
+          "${VAULT_URL}/v1/${VAULT_PATH}" 2>&1 || true)"
+
+        # vault-action exported a mint-capable Vault token via GITHUB_ENV. Drop it from
+        # this shell and blank it for every later step, now that the one mint is done.
+        # Never print it, and never print a successful response — it contains the token.
+        unset VAULT_TOKEN
+        printf '%s\n' 'VAULT_TOKEN=' >> "$GITHUB_ENV"
+
+        if ! validate_mint_response "$MINT_RESPONSE"; then
+          echo "Error: could not mint a deploy token from ${VAULT_PATH}."
+          echo "Validation: ${MINT_VALIDATION_ERROR}."
+          echo "Check that ${INPUT_VAULT_ROLE} grants [read, update] on that path and that"
+          echo "the mount can still reach the a1-ops-prd API server."
+          # Errors only. The success path is never echoed.
+          printf '%s' "$MINT_RESPONSE" | jq -r '.errors[]? // empty' 2>/dev/null || true
+          exit 1
+        fi
+        echo "::add-mask::$ONPREM_SA_TOKEN"
+
+        rm -f "$KUBECONFIG_PATH"
+        kubectl --kubeconfig "$KUBECONFIG_PATH" config set-cluster a1-ops-prd \
+          --server="$ONPREM_SERVER" \
+          --certificate-authority="$CA_SRC" --embed-certs=true >/dev/null
+        kubectl --kubeconfig "$KUBECONFIG_PATH" config set-credentials kubetty-ci-deployer \
+          --token="$ONPREM_SA_TOKEN" >/dev/null
+        kubectl --kubeconfig "$KUBECONFIG_PATH" config set-context a1-ops-prd \
+          --cluster=a1-ops-prd --user=kubetty-ci-deployer \
+          --namespace="$TARGET_NAMESPACE" >/dev/null
+        kubectl --kubeconfig "$KUBECONFIG_PATH" config use-context a1-ops-prd >/dev/null
+        chmod 600 "$KUBECONFIG_PATH"
+        MINT_RESPONSE=""
+        unset ONPREM_SA_TOKEN
+
+        echo "KUBECONFIG=$KUBECONFIG_PATH" >> "$GITHUB_ENV"
+        echo "kubeconfig=$KUBECONFIG_PATH" >> "$GITHUB_OUTPUT"
+        echo "server=$ONPREM_SERVER" >> "$GITHUB_OUTPUT"
+
+        # LIVENESS AND IDENTITY IN ONE CALL.
+        #
+        # `auth whoami` is a SelfSubjectReview: every authenticated principal may call it,
+        # so it works no matter how narrow the deploy RBAC is, and a successful response
+        # simultaneously proves the endpoint is reachable, the TLS chain validated, and
+        # the credential was accepted.
+        #
+        # `kubectl cluster-info` is the reflexive liveness probe and is WRONG here — it
+        # lists services in kube-system, which this SA is explicitly denied (that denial
+        # is a negative control below). It therefore fails against a perfectly healthy
+        # cluster and reports it as "unreachable", which is a lie that costs an hour.
+        # Same class of mistake as using `get ns` for the identity check.
+        ACTUAL_USER="$(kubectl --kubeconfig "$KUBECONFIG_PATH" auth whoami \
+          --request-timeout=20s -o jsonpath='{.status.userInfo.username}' 2>/dev/null || true)"
+
+        # A wrong-cluster kubeconfig authenticates fine and then edits the wrong things,
+        # which is the exact failure this action exists to prevent, so assert the
+        # username rather than trusting an exit code.
+        if ! require_expected_identity "$ACTUAL_USER" "$EXPECTED_USER"; then
+          echo "Error: authenticated as '${ACTUAL_USER:-<none>}', expected '$EXPECTED_USER'."
+          echo "An EMPTY value means the call did not complete: unreachable endpoint,"
+          echo "TLS failure, or a rejected credential — check $ONPREM_SERVER first."
+          echo "A DIFFERENT value means the kubeconfig reached the wrong cluster."
+          exit 1
+        fi
+
+        # STANDING NEGATIVE CONTROLS, re-proved every run rather than trusting the
+        # RoleBindings to have stayed narrow. Two axes:
+        #   privilege escalation  — the cluster credential store
+        #   cross-tenant          — another team's production namespace on the same cluster
+        # Both must return kubectl's literal "no" AND status 1. Status alone is not proof:
+        # timeouts, TLS failures and killed processes are all non-zero too, so an
+        # unreachable cluster would otherwise be reported as verified isolation.
+        for probe in "get secrets:kube-system" "get deployments:beacon-prod"; do
+          VERB="${probe%%:*}"; NS="${probe##*:}"
+          STATUS=0
+          OUTPUT="$(kubectl --kubeconfig "$KUBECONFIG_PATH" auth can-i $VERB \
+            -n "$NS" --request-timeout=15s 2>&1)" || STATUS=$?
+          if ! require_literal_denial "$OUTPUT" "$STATUS"; then
+            echo "Error: isolation was not verified for '$VERB' in '$NS'."
+            echo "kubectl auth can-i exited $STATUS and did not return literal 'no' (got: ${OUTPUT})."
+            echo "Refusing to deploy."
+            exit 1
+          fi
+        done
+
+        echo "Cluster:   a1-ops-prd ($ONPREM_SERVER)"
+        echo "Namespace: $TARGET_NAMESPACE"
+        echo "Identity:  $ACTUAL_USER (Vault-minted)"
+        echo "Lease:     ${ONPREM_SA_TOKEN_TTL}s (validated maximum: 3600s)"
+        echo "Isolation: kube-system secrets no, beacon-prod deployments no (verified)"
+

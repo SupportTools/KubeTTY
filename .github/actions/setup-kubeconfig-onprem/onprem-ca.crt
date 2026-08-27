@@ -1,0 +1,34 @@
+# RKE2 server CA for the on-prem cluster a1-ops-prd (Rancher cluster id c-jdfbj).
+#
+# This is the TRUST ANCHOR for every deploy job that reaches the on-prem cluster
+# from a runner outside it. It is a PUBLIC certificate, not a secret — it is
+# committed rather than held in a repo variable so that changing what CI trusts
+# requires a reviewed diff instead of a silent settings edit.
+#
+# Runners inside a1-ops-prd used the projected ServiceAccount CA at
+# /var/run/secrets/kubernetes.io/serviceaccount/ca.crt. That path exists on a DFW
+# runner too and contains the DFW cluster's CA, so relying on it after the
+# relocation silently trusts the wrong cluster. Hence this explicit file.
+#
+#   subject/issuer : CN=rke2-server-ca@1748493655
+#   notBefore      : 2025-05-29
+#   notAfter       : 2035-05-27
+#   server         : https://a1-ops-prd.support.tools:6443
+#                    (the DNS name, NOT the raw IP — 96.90.99.201 is a
+#                     residential address that can change. The name is in
+#                     this certificate's SANs, so TLS validates either way,
+#                     and DNS absorbs an IP change instead of 9 repos.)
+#
+# Regenerate with:
+#   kubectl config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d
+-----BEGIN CERTIFICATE-----
+MIIBeDCCAR+gAwIBAgIBADAKBggqhkjOPQQDAjAkMSIwIAYDVQQDDBlya2UyLXNl
+cnZlci1jYUAxNzQ4NDkzNjU1MB4XDTI1MDUyOTA0NDA1NVoXDTM1MDUyNzA0NDA1
+NVowJDEiMCAGA1UEAwwZcmtlMi1zZXJ2ZXItY2FAMTc0ODQ5MzY1NTBZMBMGByqG
+SM49AgEGCCqGSM49AwEHA0IABGScFfUGQCpJ0iA0TK2mMxQHvPpQu99q+pROlR2M
+SNiIXvTh5Y7i9EW3P64Xp18kU4lt6drS+1zaWK7FG0iHjOOjQjBAMA4GA1UdDwEB
+/wQEAwICpDAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBSA2wbUi+ogSLaHV/sj
+KKQFhC4N1zAKBggqhkjOPQQDAgNHADBEAiBeQrNJjMPYjVkvWwG7ycziyphL7bCN
+u23a/b/2LdsJNwIgEAFVdzqzCsCNGgdPsTkbzaFJzKdLeX8lkitEl32EAIQ=
+-----END CERTIFICATE-----
+

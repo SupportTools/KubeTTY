@@ -158,6 +158,13 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # The ephemeral DFW runner can be starved when BuildKit executes the
+          # UI, Go, and runtime stages concurrently. Keep the full image build,
+          # but serialize BuildKit work so the runner remains responsive.
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
 
       # Keyless: mint a GitHub OIDC token and exchange it at Vault for the
       # repo-scoped Harbor robot (replaces org admin HARBOR_USERNAME/PASSWORD).

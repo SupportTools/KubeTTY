@@ -209,7 +209,8 @@ RUN curl -fsSL https://github.com/docker/buildx/releases/download/v0.16.2/buildx
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
 
 # Install Go toolchain for on-cluster development.
-RUN curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -o /tmp/go.tgz \
+RUN curl --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 30 \
+      -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -o /tmp/go.tgz \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm /tmp/go.tgz
 

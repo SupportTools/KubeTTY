@@ -26,6 +26,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Test cross-cluster kubeconfig validation
+        run: bash .github/actions/setup-kubeconfig-onprem/security-validation.test.sh
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

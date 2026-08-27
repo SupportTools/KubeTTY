@@ -50,6 +50,26 @@ docker push harbor.support.tools/kubetty/kubetty:latest
 docker push harbor.support.tools/kubetty/kubetty:v1.0.0
 ```
 
+### Automated Gateway Image Identity
+
+The main and semantic-version tag workflows build and push the gateway image,
+capture the `sha256:` digest returned by Buildx, and deploy that exact artifact.
+The production gateway therefore renders as:
+
+```text
+harbor.support.tools/kubetty/kubetty@sha256:<64 lowercase hex characters>
+```
+
+CI rejects missing or malformed digests. Buildx publishes an OCI index so CI
+also resolves and records its `linux/amd64` child-manifest digest. After Helm
+completes, it verifies the Deployment references the OCI index digest, the active
+ReplicaSet changed when the reference changed, and the Ready pod's runtime
+`imageID` matches that recorded child manifest. A readable tag is still stored
+in the Helm values, but it is not used while a digest is set.
+
+This digest pin applies to the gateway Helm release. Dynamically managed project
+pods retain their separately persisted image tags and upgrade workflow.
+
 ## Helm Chart
 
 The Helm chart is located in `deploy/helm/`.
@@ -109,12 +129,19 @@ helm upgrade --install kubetty ./deploy/helm \
 ### Production
 
 ```bash
-# Deploy to production
-helm upgrade --install kubetty ./deploy/helm \
-  -n kubetty \
-  -f deploy/helm/values.yaml \
-  --set image.tag=v1.0.0
+# CI production deployment: pin the digest produced by the build job
+IMAGE_DIGEST=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+helm upgrade --install kubetty-gateway ./deploy/helm-gateway \
+  -n kubetty-gateway-prd \
+  -f deploy/helm-gateway/values.prd.yaml \
+  --set-string image.repository=harbor.support.tools/kubetty/kubetty \
+  --set-string image.tag=v1.0.0 \
+  --set-string image.digest="$IMAGE_DIGEST"
 ```
+
+For a manual install without a known digest, leave `image.digest` empty and the
+chart falls back to `image.repository:image.tag`. Helm stores the digest in each
+release revision, so `helm rollback` restores the prior immutable image.
 
 ## Configuration
 

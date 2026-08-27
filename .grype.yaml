@@ -1,0 +1,5 @@
+# Grype configuration for KubeTTY.
+# No .trivyignore existed prior to this migration, so this starts empty.
+# Add CVE IDs here to suppress specific findings once the grype-scan job
+# (currently opt-in/disabled in .github/workflows/pipeline.yml) is enabled.
+ignore: []

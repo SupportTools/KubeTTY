@@ -91,6 +91,9 @@ jobs:
 
       - name: Run server tests
         working-directory: server
+        env:
+          KUBERNETES_SERVICE_HOST: ''
+          KUBERNETES_SERVICE_PORT: ''
         run: |
           go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
 
@@ -154,6 +157,8 @@ jobs:
           CNPG_PASSWORD: kubetty_test
           CNPG_DATABASE: kubetty_test
           KUBETTY_TEST_DB: "true"
+          KUBERNETES_SERVICE_HOST: ''
+          KUBERNETES_SERVICE_PORT: ''
         run: |
           go test -v -race -run Integration ./...
 
@@ -166,6 +171,8 @@ jobs:
           CNPG_PASSWORD: kubetty_test
           CNPG_DATABASE: kubetty_test
           KUBETTY_TEST_DB: "true"
+          KUBERNETES_SERVICE_HOST: ''
+          KUBERNETES_SERVICE_PORT: ''
         run: |
           go test -v -race -coverprofile=coverage-integration.out -covermode=atomic ./...
 

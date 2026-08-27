@@ -148,6 +148,7 @@ jobs:
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
+      runtime-image-digest: ${{ steps.image-identity.outputs.runtime-digest }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -157,6 +158,13 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # The ephemeral DFW runner can be starved when BuildKit executes the
+          # UI, Go, and runtime stages concurrently. Keep the full image build,
+          # but serialize BuildKit work so the runner remains responsive.
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
 
       # Keyless: mint a GitHub OIDC token and exchange it at Vault for the
       # repo-scoped Harbor robot (replaces org admin HARBOR_USERNAME/PASSWORD).
@@ -207,6 +215,51 @@ jobs:
           build-args: |
             GO_VERSION=1.24.3
             NODE_MAJOR=20
+
+      - name: Record pushed image identity
+        id: image-identity
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_REPOSITORY: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::build-push-action returned an invalid image digest: '$IMAGE_DIGEST'"
+            exit 1
+          fi
+
+          MANIFEST_JSON=$(docker buildx imagetools inspect \
+            "${IMAGE_REPOSITORY}@${IMAGE_DIGEST}" --raw)
+          MEDIA_TYPE=$(jq -er '.mediaType' <<<"$MANIFEST_JSON")
+          case "$MEDIA_TYPE" in
+            application/vnd.oci.image.index.v1+json|application/vnd.docker.distribution.manifest.list.v2+json)
+              RUNTIME_DIGEST=$(jq -er \
+                '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest] | if length == 1 then .[0] else error("expected exactly one linux/amd64 manifest") end' \
+                <<<"$MANIFEST_JSON")
+              ;;
+            application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json)
+              RUNTIME_DIGEST="$IMAGE_DIGEST"
+              ;;
+            *)
+              echo "::error::unsupported image manifest media type: '$MEDIA_TYPE'"
+              exit 1
+              ;;
+          esac
+          if [[ ! "$RUNTIME_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::could not resolve a valid linux/amd64 runtime digest: '$RUNTIME_DIGEST'"
+            exit 1
+          fi
+
+          echo "runtime-digest=${RUNTIME_DIGEST}" >> "$GITHUB_OUTPUT"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          echo "Pushed ${IMAGE_REPOSITORY}:sha-${SHORT_SHA}"
+          echo "OCI reference digest ${IMAGE_DIGEST}"
+          echo "linux/amd64 runtime digest ${RUNTIME_DIGEST}"
+          {
+            echo "- OCI reference: \`${IMAGE_REPOSITORY}:sha-${SHORT_SHA}\` -> \`${IMAGE_DIGEST}\`"
+            echo "- linux/amd64 runtime manifest: \`${RUNTIME_DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Stage 4: Security Scanning (disabled - image too large for CI timeout)
   # Migrated from a per-repo Trivy job to Grype for consistency across repos, but kept
@@ -266,6 +319,9 @@ jobs:
           helm template project deploy/helm-project/ \
             --set projectId=template-test \
             --set env.sessionID=00000000-0000-0000-0000-000000000001 > /dev/null
+
+      - name: Test gateway image references
+        run: bash .github/scripts/test-helm-image-ref.sh
 
       - name: Package Helm charts
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
@@ -358,37 +414,121 @@ jobs:
 
       - name: Deploy to production
         id: deploy
+        env:
+          IMAGE_REPOSITORY: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ steps.extract-tag.outputs.tag }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.image-digest }}
+          RUNTIME_IMAGE_DIGEST: ${{ needs.build.outputs.runtime-image-digest }}
         run: |
+          set -euo pipefail
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::refusing to deploy an invalid image digest: '$IMAGE_DIGEST'"
+            exit 1
+          fi
+          if [[ ! "$RUNTIME_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::refusing to deploy without a valid linux/amd64 runtime digest: '$RUNTIME_IMAGE_DIGEST'"
+            exit 1
+          fi
+          EXPECTED_IMAGE="${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+
           # Capture current revision for potential rollback
           CURRENT_REVISION=$(helm history kubetty-gateway -n kubetty-gateway-prd --max 1 -o json 2>/dev/null | jq -r '.[0].revision // "0"') || CURRENT_REVISION="0"
-          echo "current-revision=${CURRENT_REVISION}" >> "$GITHUB_OUTPUT"
-          echo "Deploying version: ${{ steps.extract-tag.outputs.tag }}"
+          PREVIOUS_IMAGE=$(kubectl get deployment gateway -n kubetty-gateway-prd -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+          PREVIOUS_REPLICA_SET=$(kubectl get pods -n kubetty-gateway-prd \
+            -l app.kubernetes.io/name=kubetty-gateway -o json 2>/dev/null \
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null and .status.containerStatuses[0].ready == true) | .metadata.ownerReferences[]? | select(.kind == "ReplicaSet") | .name] | first // ""') \
+            || PREVIOUS_REPLICA_SET=""
+          {
+            echo "current-revision=${CURRENT_REVISION}"
+            echo "previous-image=${PREVIOUS_IMAGE}"
+            echo "previous-replica-set=${PREVIOUS_REPLICA_SET}"
+            echo "expected-image=${EXPECTED_IMAGE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Deploying version: ${IMAGE_TAG}"
+          echo "Deploying OCI reference digest: ${IMAGE_DIGEST}"
+          echo "Expected linux/amd64 runtime digest: ${RUNTIME_IMAGE_DIGEST}"
           echo "Current revision: ${CURRENT_REVISION}"
+          echo "Previous image: ${PREVIOUS_IMAGE:-<none>}"
+          echo "Previous ReplicaSet: ${PREVIOUS_REPLICA_SET:-<none>}"
 
           helm upgrade --install kubetty-gateway deploy/helm-gateway/ \
             -n kubetty-gateway-prd \
             -f deploy/helm-gateway/values.prd.yaml \
-            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
-            --set image.tag=${{ steps.extract-tag.outputs.tag }} \
+            --set-string image.repository="${IMAGE_REPOSITORY}" \
+            --set-string image.tag="${IMAGE_TAG}" \
+            --set-string image.digest="${IMAGE_DIGEST}" \
             --wait \
             --timeout=5m \
             --history-max=20 \
             --atomic
 
       - name: Verify deployment
+        env:
+          EXPECTED_IMAGE: ${{ steps.deploy.outputs.expected-image }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.image-digest }}
+          RUNTIME_IMAGE_DIGEST: ${{ needs.build.outputs.runtime-image-digest }}
+          PREVIOUS_IMAGE: ${{ steps.deploy.outputs.previous-image }}
+          PREVIOUS_REPLICA_SET: ${{ steps.deploy.outputs.previous-replica-set }}
         run: |
+          set -euo pipefail
+          kubectl rollout status deployment/gateway \
+            -n kubetty-gateway-prd \
+            --timeout=300s
+
           kubectl wait --for=condition=ready pod \
             -l app.kubernetes.io/name=kubetty-gateway \
             -n kubetty-gateway-prd \
             --timeout=300s
 
-          # Check pod health
-          READY_PODS=$(kubectl get pods -n kubetty-gateway-prd -l app.kubernetes.io/name=kubetty-gateway -o json | jq '[.items[] | select(.status.phase == "Running")] | length')
-          if [ "$READY_PODS" -eq 0 ]; then
-            echo "ERROR: No pods are running after deployment"
+          DEPLOYED_IMAGE=$(kubectl get deployment gateway -n kubetty-gateway-prd \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          if [[ "$DEPLOYED_IMAGE" != "$EXPECTED_IMAGE" ]]; then
+            echo "ERROR: Deployment image '$DEPLOYED_IMAGE' does not match '$EXPECTED_IMAGE'"
             exit 1
           fi
-          echo "✓ ${READY_PODS} pod(s) running successfully in production"
+
+          PODS_JSON=$(kubectl get pods -n kubetty-gateway-prd \
+            -l app.kubernetes.io/name=kubetty-gateway -o json)
+          UNEXPECTED_READY=$(jq --arg expected "$EXPECTED_IMAGE" \
+            '[.items[] | select(.metadata.deletionTimestamp == null and .status.containerStatuses[0].ready == true and .spec.containers[0].image != $expected)] | length' \
+            <<<"$PODS_JSON")
+          if [[ "$UNEXPECTED_READY" -ne 0 ]]; then
+            echo "ERROR: ${UNEXPECTED_READY} Ready gateway pod(s) use an unexpected image"
+            exit 1
+          fi
+
+          mapfile -t READY_PODS < <(jq -r --arg expected "$EXPECTED_IMAGE" \
+            '.items[] | select(.metadata.deletionTimestamp == null and .status.containerStatuses[0].ready == true and .spec.containers[0].image == $expected) | [.metadata.name, ([.metadata.ownerReferences[]? | select(.kind == "ReplicaSet") | .name] | first // ""), .status.containerStatuses[0].imageID] | @tsv' \
+            <<<"$PODS_JSON")
+          if [[ "${#READY_PODS[@]}" -eq 0 ]]; then
+            echo "ERROR: No Ready gateway pod uses '$EXPECTED_IMAGE'"
+            exit 1
+          fi
+
+          ACTIVE_REPLICA_SET=""
+          for row in "${READY_PODS[@]}"; do
+            IFS=$'\t' read -r pod replica_set image_id <<<"$row"
+            if [[ "$image_id" != *@"$RUNTIME_IMAGE_DIGEST" ]]; then
+              echo "ERROR: Pod '$pod' runtime imageID '$image_id' does not match '$RUNTIME_IMAGE_DIGEST'"
+              exit 1
+            fi
+            ACTIVE_REPLICA_SET="$replica_set"
+            echo "Verified pod ${pod}: ${image_id}"
+          done
+
+          if [[ -z "$ACTIVE_REPLICA_SET" ]]; then
+            echo "ERROR: Ready gateway pod is not owned by a ReplicaSet"
+            exit 1
+          fi
+
+          if [[ -n "$PREVIOUS_IMAGE" && "$PREVIOUS_IMAGE" != "$EXPECTED_IMAGE" && "$ACTIVE_REPLICA_SET" == "$PREVIOUS_REPLICA_SET" ]]; then
+            echo "ERROR: Image changed but the active ReplicaSet did not"
+            exit 1
+          fi
+
+          echo "✓ Deployment image: ${DEPLOYED_IMAGE}"
+          echo "✓ Active ReplicaSet: ${ACTIVE_REPLICA_SET}"
+          echo "✓ ${#READY_PODS[@]} Ready gateway pod(s) run the build digest"
 
       - name: Run smoke tests
         run: |
@@ -404,12 +544,25 @@ jobs:
           kubectl rollout status deployment/gateway -n kubetty-gateway-prd --timeout=60s
 
       - name: Rollback on failure
-        if: failure() && steps.deploy.outputs.current-revision != '0'
+        if: failure() && steps.deploy.outputs.current-revision != '' && steps.deploy.outputs.current-revision != '0'
+        env:
+          PREVIOUS_IMAGE: ${{ steps.deploy.outputs.previous-image }}
         run: |
+          set -euo pipefail
           echo "❌ PRODUCTION DEPLOYMENT FAILED ❌"
           echo "Attempting automatic rollback to revision ${{ steps.deploy.outputs.current-revision }}..."
 
           helm rollback kubetty-gateway ${{ steps.deploy.outputs.current-revision }} -n kubetty-gateway-prd --wait
+
+          if [[ -n "$PREVIOUS_IMAGE" ]]; then
+            ROLLED_BACK_IMAGE=$(kubectl get deployment gateway -n kubetty-gateway-prd \
+              -o jsonpath='{.spec.template.spec.containers[0].image}')
+            if [[ "$ROLLED_BACK_IMAGE" != "$PREVIOUS_IMAGE" ]]; then
+              echo "ERROR: Rollback image '$ROLLED_BACK_IMAGE' does not match prior image '$PREVIOUS_IMAGE'"
+              exit 1
+            fi
+            echo "✓ Rollback restored image: ${ROLLED_BACK_IMAGE}"
+          fi
 
           # Verify rollback succeeded
           kubectl wait --for=condition=ready pod \

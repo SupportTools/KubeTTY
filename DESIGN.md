@@ -1093,9 +1093,11 @@ Include `scripts/claude_with_log.sh` in the image build to install the logging a
 
 ## 9. Kubernetes Integration
 
-* **Image build:** everything (Go binary, React build, CLI tools) is baked into a single image that engineers build locally and push to `harbor.support.tools/kubetty/<repo>:<tag>`.
-* **Helm release:** deployments are managed solely through a private Helm chart kept in this repo; no GitHub Actions or external registry integrations.
-* **Namespaces/contexts:** engineers create/update namespaces manually via `~/.kube/config` before installing the chart.
+* **Image build:** everything (Go binary, React build, CLI tools) is baked into a single image. GitHub Actions publishes the gateway image to `harbor.support.tools/kubetty/kubetty`; engineers may also build and push tagged images locally.
+* **Gateway Helm release:** the production workflow deploys `deploy/helm-gateway` with the immutable `sha256:` digest produced by the same build job. The chart renders `repository@digest`, rejects malformed digests, and retains `repository:tag` fallback for manual installs and historical rollback revisions.
+* **Gateway verification:** CI requires the Deployment image to reference the OCI index digest, the active ReplicaSet to change when that reference changes, and the Ready pod runtime `imageID` to match the `linux/amd64` child-manifest digest resolved from that index before the release is considered successful.
+* **Project images:** controller-managed project pods retain independently persisted repository/tag values and their existing upgrade workflow; gateway digest pinning does not rewrite those project records.
+* **Namespaces/contexts:** CI uses a short-lived, scoped production kubeconfig; engineers use their configured kubeconfig for manual installs and troubleshooting.
 * **CNPG:** all deployments share the same CNPG cluster; connection strings + credentials are injected through Helm values and projected into the pod as environment variables.
 * **Session UUID:** each deployment gets a fixed `SESSION_ID` Helm value; if a pod restarts it reuses that UUID to resume the same PTY automatically.
 * **Multiple deployments:** running Project A and Project B simultaneously simply means deploying separate Helm releases (with different namespaces, session IDs, and image tags) pointing at the shared CNPG instance.

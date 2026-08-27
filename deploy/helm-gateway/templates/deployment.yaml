@@ -45,7 +45,7 @@ spec:
       {{- end }}
       containers:
         - name: gateway
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "kubetty-gateway.imageRef" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: KUBETTY_MODE

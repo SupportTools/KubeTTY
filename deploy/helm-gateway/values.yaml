@@ -5,6 +5,10 @@
 image:
   repository: harbor.support.tools/kubetty/kubetty
   tag: "0.7.2"
+  # Optional immutable image digest. CI sets this to the digest produced by
+  # docker/build-push-action. When empty, the chart falls back to repository:tag
+  # for local installs and historical Helm revisions.
+  digest: ""
   pullPolicy: Always
 
 # Image pull secrets for private registries

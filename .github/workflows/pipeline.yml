@@ -21,7 +21,7 @@ jobs:
   # Stage 1: Validation
   validate:
     name: Validation
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -73,7 +73,7 @@ jobs:
   # Stage 2: Test Matrix
   test-server:
     name: Server Tests
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     needs: validate
     steps:
       - name: Checkout code
@@ -114,7 +114,7 @@ jobs:
 
   test-web:
     name: Web Tests
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     needs: validate
     steps:
       - name: Checkout code
@@ -140,7 +140,7 @@ jobs:
   # Stage 3: Build Docker Image
   build:
     name: Build Docker Image
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     needs: [test-server, test-web]
     permissions:
       contents: read
@@ -271,7 +271,7 @@ jobs:
   # resolution happens before `if` is evaluated. An in-line action has no such problem.
   grype-scan:
     name: Security Scan (Grype)
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     needs: [build]
     if: false  # Disabled - KubeTTY image too large for Grype to scan in CI (same reasoning as the prior Trivy job)
     permissions:
@@ -290,7 +290,7 @@ jobs:
   # Stage 5: Helm Chart Validation
   helm-validate:
     name: Helm Chart Validation
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     needs: validate
     steps:
       - name: Checkout code
@@ -340,7 +340,7 @@ jobs:
   # Stage 6: Deploy to Production
   deploy-production:
     name: Deploy to Production
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     needs: [build, helm-validate]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:

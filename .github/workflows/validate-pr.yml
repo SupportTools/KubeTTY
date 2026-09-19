@@ -20,7 +20,7 @@ jobs:
   # Fast validation checks
   validate:
     name: Quick Validation
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -77,7 +77,7 @@ jobs:
   # Server tests with coverage (unit tests only)
   test-server:
     name: Server Tests
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     needs: validate
     steps:
       - name: Checkout code
@@ -107,7 +107,7 @@ jobs:
   # Integration tests with PostgreSQL
   test-integration:
     name: Integration Tests
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     needs: validate
     permissions:
       contents: read
@@ -224,7 +224,7 @@ jobs:
   # Web tests
   test-web:
     name: Web Tests
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     needs: validate
     steps:
       - name: Checkout code
@@ -261,7 +261,7 @@ jobs:
   # Helm chart validation
   helm-validate:
     name: Helm Validation
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     needs: validate
     steps:
       - name: Checkout code
@@ -328,7 +328,7 @@ jobs:
   # Summary job that all others depend on
   pr-validation-summary:
     name: PR Validation Summary
-    runs-on: self-hosted-linux-dfw
+    runs-on: self-hosted-linux
     needs: [validate, test-server, test-integration, test-web, helm-validate]
     if: always()
     permissions:

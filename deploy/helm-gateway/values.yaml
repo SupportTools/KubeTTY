@@ -115,7 +115,7 @@ rbac:
 # Project controller configuration
 # Enables dynamic project lifecycle management via the API
 controller:
-  # Enable the project controller (requires cluster-wide RBAC)
+  # Enable the project controller (namespaced RBAC in projectsNamespace only)
   enabled: true
   # Target namespace for dynamically managed projects (single-namespace mode)
   projectsNamespace: "kubetty-projects"

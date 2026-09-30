@@ -3,8 +3,31 @@
 {{- $suffix := .Values.rbac.clusterResourceSuffix | default "" }}
 {{- $saName := include "kubetty-gateway.serviceAccountName" . }}
 {{- $labels := include "kubetty-gateway.labels" . }}
+{{- /*
+  SECURITY (cluster-services-746): every grant below is NAMESPACED. The ClusterRoles are only
+  permission templates; they are bound exclusively through RoleBindings in the project
+  namespace(s), never through a ClusterRoleBinding.
 
-{{/* ClusterRole for gateway to access project pods across namespaces */}}
+  Previously both roles were bound cluster-wide. The gateway pod (which also serves the web
+  terminal) could then create Deployments, ServiceAccounts and Secrets in ANY namespace and
+  pods/exec into ANY pod — i.e. it was cluster-admin in all but name.
+
+  The controller only ever calls the API in .Values.controller.projectsNamespace plus a
+  leader-election Lease in its own namespace (server/internal/controller/*.go,
+  server/internal/leaderelection). It must NOT be granted namespaces, roles/rolebindings or
+  clusterroles/clusterrolebindings: controller.go still tries to create per-project
+  ClusterRoles with `*` on core/apps/batch/networking bound cluster-wide
+  (resources.go BuildAdminClusterRole). Today RBAC escalation prevention blocks that, and
+  with this template the gateway cannot even attempt it. Never grant the gateway SA
+  `escalate`/`bind`.
+*/}}
+{{- $gatewayNamespaces := .Values.rbac.projectNamespaces | default list }}
+{{- if .Values.controller.enabled }}
+{{- $gatewayNamespaces = append $gatewayNamespaces .Values.controller.projectsNamespace }}
+{{- end }}
+{{- $gatewayNamespaces = uniq $gatewayNamespaces }}
+
+{{/* Permission template for the gateway: proxy/exec into project pods, read their metrics. */}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -26,7 +49,7 @@ rules:
     verbs: ["get", "list"]
 {{- if .Values.controller.enabled }}
 ---
-{{/* ClusterRole for project controller to manage namespaces and resources */}}
+{{/* Permission template for the project controller. Bound ONLY in controller.projectsNamespace. */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -34,72 +57,75 @@ metadata:
   labels:
     {{- $labels | nindent 4 }}
 rules:
-  # Controller: manage namespaces
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["create", "get", "list", "watch", "update", "delete"]
-  # Controller: manage core resources in any namespace
+  # Controller: per-project Service, PVC, ServiceAccount and env Secret
   - apiGroups: [""]
     resources: ["services", "persistentvolumeclaims", "serviceaccounts", "secrets"]
     verbs: ["create", "get", "list", "watch", "update", "delete"]
-  # Controller: manage deployments
+  # Controller: per-project Deployment
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["create", "get", "list", "watch", "update", "delete"]
-  # Controller: manage Jobs for template sync
+  # Controller: Jobs for template sync
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "update", "delete"]
-  # Controller: manage namespace-scoped RBAC
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles", "rolebindings"]
+  # Controller: per-project ingress NetworkPolicy
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
     verbs: ["create", "get", "list", "watch", "update", "delete"]
-  # Controller: manage cluster-scoped RBAC for project service accounts
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["clusterroles", "clusterrolebindings"]
-    verbs: ["create", "get", "list", "update", "delete"]
   # Controller: read pods for health checks
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
-  # Controller: leader election via coordination leases
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullName }}-controller{{ $suffix }}
+  namespace: {{ .Values.controller.projectsNamespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullName }}-controller{{ $suffix }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ .Release.Namespace }}
+---
+{{/* Leader election: a Lease in the gateway's own namespace only. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullName }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["create", "get", "list", "watch", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: {{ $fullName }}-controller{{ $suffix }}
+  name: {{ $fullName }}-leader-election
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- $labels | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ $fullName }}-controller{{ $suffix }}
+  kind: Role
+  name: {{ $fullName }}-leader-election
 subjects:
   - kind: ServiceAccount
     name: {{ $saName }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: {{ $fullName }}{{ $suffix }}
-  labels:
-    {{- $labels | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ $fullName }}{{ $suffix }}
-subjects:
-  - kind: ServiceAccount
-    name: {{ $saName }}
-    namespace: {{ .Release.Namespace }}
 
-{{/* Per-namespace RoleBindings for project namespaces */}}
-{{- range .Values.rbac.projectNamespaces }}
+{{/* Per-namespace RoleBindings: the gateway can reach pods ONLY in project namespaces. */}}
+{{- range $gatewayNamespaces }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

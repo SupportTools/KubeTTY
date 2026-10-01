@@ -41,8 +41,11 @@ const REFRESH_BUFFER_MS = 2 * 60 * 1000;
 // Minimum time between visibility-triggered refreshes (30 seconds)
 const VISIBILITY_REFRESH_COOLDOWN_MS = 30 * 1000;
 
-// Debug logging helper
+// Debug logging helper (no-op in production builds)
 const authLog = (message: string, ...args: unknown[]) => {
+  if (!import.meta.env.DEV) {
+    return;
+  }
   const timestamp = new Date().toISOString();
   console.log(`[Auth ${timestamp}] ${message}`, ...args);
 };

@@ -202,7 +202,7 @@ func (m *Manager) CreateTab(ctx context.Context, projectID, clientID string) (ta
 	project, ok := m.projects[projectID]
 	if !ok {
 		m.mu.Unlock()
-		return tabs.Tab{}, fmt.Errorf("unknown project %q", projectID)
+		return tabs.Tab{}, &UnknownProjectError{ProjectID: projectID}
 	}
 
 	// Enforce per-client tab limit using in-memory count (atomic with creation)
@@ -274,7 +274,7 @@ func (m *Manager) CreateVNCTab(ctx context.Context, projectID, clientID string) 
 	project, ok := m.projects[projectID]
 	if !ok {
 		m.mu.Unlock()
-		return tabs.Tab{}, fmt.Errorf("unknown project %q", projectID)
+		return tabs.Tab{}, &UnknownProjectError{ProjectID: projectID}
 	}
 
 	// Verify GUI is enabled for this project

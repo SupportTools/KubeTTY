@@ -46,6 +46,24 @@ func (lrw *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) 
 	return hijacker.Hijack()
 }
 
+// Flush implements http.Flusher so streaming handlers (e.g. Server-Sent Events)
+// keep working behind this middleware. It is a no-op if the underlying
+// ResponseWriter does not support flushing.
+func (lrw *loggingResponseWriter) Flush() {
+	if flusher, ok := lrw.ResponseWriter.(http.Flusher); ok {
+		if !lrw.written {
+			lrw.statusCode = http.StatusOK
+			lrw.written = true
+		}
+		flusher.Flush()
+	}
+}
+
+// Unwrap returns the underlying ResponseWriter for http.ResponseController.
+func (lrw *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return lrw.ResponseWriter
+}
+
 // LoggingMiddleware wraps an HTTP handler with request logging.
 // It captures and logs the HTTP status code along with method, path, and duration.
 func LoggingMiddleware(next http.Handler) http.Handler {

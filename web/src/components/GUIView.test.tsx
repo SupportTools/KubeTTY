@@ -10,7 +10,7 @@ const mockFns = vi.hoisted(() => ({
 }));
 
 // Mock must be defined before importing the component
-vi.mock('@novnc/novnc/lib/rfb', () => {
+vi.mock('@novnc/novnc', () => {
   const MockRFB = vi.fn().mockImplementation(function (
     this: Record<string, unknown>,
     _target: HTMLElement,
@@ -163,13 +163,13 @@ describe('GUIView', () => {
     render(<GUIView {...defaultProps} />);
 
     // Wait for connection to start (after 50ms delay) - message is in overlay
+    // Assert inside waitFor: the mocked RFB fires 'connect' after 10ms, which
+    // removes the overlay, so a separate query afterwards can race with it.
     await waitFor(() => {
       const message = document.querySelector('.gui-view__message');
       expect(message).toBeInTheDocument();
+      expect(message?.textContent).toContain('Connecting');
     });
-
-    const message = document.querySelector('.gui-view__message');
-    expect(message?.textContent).toContain('Connecting');
   });
 
   it('registers event listeners on connection', async () => {

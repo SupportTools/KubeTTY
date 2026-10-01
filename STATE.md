@@ -21,7 +21,8 @@ same output into `cmd/project/ui/dist`).
   The controller passes the mode to pods as `SESSION_MODE`:
   - `exclusive_takeover` (default): one client per PTY. A second client gets HTTP 409.
     `?force=true` disconnects the current client (close code 4000) and takes over. Admission uses an
-    atomic `reserveSlot()` (TOCTOU fix `6661fa4`).
+    atomic `reserveSlot()` (TOCTOU fix `6661fa4`), and a takeover epoch makes `?force=true` also
+    displace clients still mid-upgrade (`ec2c48c`).
   - `shared_concurrent`: any number of clients share one PTY.
   - `independent_shells`: each gateway tab gets its own PTY in the pod, keyed by `?shell=<tabID>`.
 - **Gateway tabs** belong to a user (`user:<id>`), or to a client cookie when auth is disabled.

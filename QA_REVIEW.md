@@ -7,14 +7,12 @@ new findings below were observed while doing so. Line numbers refer to the files
 
 ## Summary
 
-All P0/P1 items from the original review are fixed except one partial (unconditional auth
-debug logging in the browser). The remaining risk is concentrated in authorization
+All P0/P1 items from the original review are fixed. The remaining risk is concentrated in authorization
 (no admin role, cross-user tab takeover), the per-project RBAC the controller still tries
 to create, and a few dead or inconsistent subsystems (DB session logs, storage-class defaults).
 
 | # | Finding | Severity | Status |
 |---|---------|----------|--------|
-| 1 | Auth debug logging always on in `AuthContext.tsx` | LOW | Open (partially fixed) |
 | N1 | No admin role: any authenticated user can use every `/api/admin/*` endpoint | MEDIUM | New |
 | N2 | `?force=true` lets any authenticated user take over another user's tab | MEDIUM | New |
 | N3 | Controller still creates per-project cluster-wide `*` ClusterRoles/Bindings | MEDIUM | New |
@@ -22,7 +20,6 @@ to create, and a few dead or inconsistent subsystems (DB session logs, storage-c
 | N5 | DB session logs are never written; `/session/logs` and retention settings do nothing | MEDIUM | New |
 | N6 | Default storage class is still `longhorn` in DB/UI defaults | MEDIUM | New |
 | N7 | `independent_shells` PTYs are never reaped on tab close and are uncapped | LOW | New |
-| N8 | Single-client reservation edge cases in project `/ws` | LOW | New |
 | N9 | Gateway WebSocket upgrader accepts any Origin | LOW | New |
 | N10 | No login rate limiting / lockout | LOW | New |
 | N11 | Expired refresh tokens are never pruned | LOW | New |
@@ -33,16 +30,6 @@ to create, and a few dead or inconsistent subsystems (DB session logs, storage-c
 ---
 
 ## Open Findings
-
-### 1. Auth debug logging is unconditional (partially fixed)
-
-`TerminalView.tsx`, `TabPane.tsx` and `GUIView.tsx` now gate `console.debug` behind
-`import.meta.env.DEV` (e.g. `web/src/components/TerminalView.tsx:8-17`), and `App.tsx` has no
-console output. However `authLog` in `web/src/contexts/AuthContext.tsx:45-48` calls
-`console.log` unconditionally and is used 27 times, logging usernames and token refresh timing in
-production builds (e.g. lines 165, 180, 244).
-
-**Fix:** gate `authLog` on `import.meta.env.DEV` like the other components.
 
 ### N1. No authorization tier for admin endpoints
 
@@ -112,15 +99,6 @@ In `independent_shells` mode, each gateway tab gets its own PTY, keyed by `?shel
 is removed only when its process exits (`server/cmd/project/main.go:974-981`). Closing a tab does
 not tear down its shell, and the number of shells per pod has no cap.
 
-### N8. Single-client enforcement edge cases (`server/cmd/project/main.go`)
-
-- The non-force path defers `ps.releaseSlot()` (lines 504-507). The comment says it is for
-  upgrade failure, but it runs on every handler exit, after `removeClient` (line 562). It can
-  therefore decrement a reservation made by a newer connection, which reopens a narrow
-  double-admit window.
-- The force path (lines 478-489) disconnects existing clients without reserving a slot, so two
-  simultaneous `force=true` connects, or a force connect racing a normal one, can both be admitted.
-
 ### N9. WebSocket Origin is not checked
 
 Both upgraders use `CheckOrigin: func(r *http.Request) bool { return true }`
@@ -174,7 +152,9 @@ There are now 62 Go test files and 9 web test files (see Resolved). Remaining ga
 | Original finding | Resolution | Evidence |
 |------------------|------------|----------|
 | Single-client enforcement missing (CRITICAL) | 409 on second client added in `ba7a23b` (2025-11-20). TOCTOU race fixed with `reserveSlot()` in `6661fa4` (2026-02-08). Superseded by per-project session modes in `e2d489d` (2026-03-03): `exclusive_takeover` (default, 409 plus `?force=true` takeover), `shared_concurrent`, `independent_shells` | `server/cmd/project/main.go:429-520`, `server/migrations/0016_project_session_mode.up.sql`, gateway tab ownership at `server/internal/gateway/manager/manager.go:408-505` |
-| Debug `console.log` in `TerminalView`/`App` | Dev-gated `devLog` helpers (`d515859`, `39ac98c`); `App.tsx` clean | `web/src/components/TerminalView.tsx:8-17`. `AuthContext` still open (#1) |
+| Debug `console.log` in `TerminalView`/`App` | Dev-gated `devLog` helpers (`d515859`, `39ac98c`); `App.tsx` clean | `web/src/components/TerminalView.tsx:8-17` |
+| Auth debug logging always on in `AuthContext.tsx` (found 2026-10-01) | `authLog` returns early unless `import.meta.env.DEV` (`c71468c`) | `web/src/contexts/AuthContext.tsx:44-48` |
+| Single-client reservation edge cases: stale `releaseSlot()` and unreserved force path (found 2026-10-01) | Takeover epoch: `takeover()` atomically disconnects, invalidates mid-upgrade admissions and reserves the slot; `releaseSlot` only releases an unconsumed reservation of the current epoch (`ec2c48c`). Also fixed the flaky `TestWebSocket_ForceReconnect*` tests | `server/cmd/project/main.go` (`takeover`, `addClient`, `releaseSlot`) |
 | Auth not enforced / no warning | Startup warning (`cbdb234`), `X-Auth-Warning` header middleware; Helm `helm-gateway` defaults `auth.mode: local` | `server/cmd/gateway/main.go:95-100,651`, `server/internal/shared/server/auth_warning.go`, `deploy/helm-gateway/values.yaml:30` |
 | Placeholder session UUID in Helm | Default is empty; chart `fail`s on missing/placeholder UUID (`29ff6bf`) | `deploy/helm/templates/deployment.yaml:14-19`, `deploy/helm-project/templates/deployment.yaml:4-9` |
 | Hard-coded `anthropicBaseURL` IP | Now empty by default, documented (`29ff6bf`) | `deploy/helm/values.project-template.yaml:61-65` |

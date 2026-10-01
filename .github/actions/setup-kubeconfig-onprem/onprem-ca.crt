@@ -13,11 +13,11 @@
 #   subject/issuer : CN=rke2-server-ca@1748493655
 #   notBefore      : 2025-05-29
 #   notAfter       : 2035-05-27
-#   server         : https://a1-ops-prd.support.tools:6443
-#                    (the DNS name, NOT the raw IP — 96.90.99.201 is a
-#                     residential address that can change. The name is in
-#                     this certificate's SANs, so TLS validates either way,
-#                     and DNS absorbs an IP change instead of 9 repos.)
+#   server         : https://kubernetes.default.svc:443 (TaskForge
+#                    taskforge-2665; the runners are pods in a1-ops-prd, and
+#                    the Comcast /28 that 96.90.99.201 belonged to was retired
+#                    on 2026-10-01). This CA, not the projected one, is what
+#                    makes that name fail TLS on any other cluster.
 #
 # Regenerate with:
 #   kubectl config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d

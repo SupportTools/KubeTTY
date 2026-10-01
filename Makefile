@@ -108,9 +108,7 @@ server: build-web-local
 	cd server && go fmt ./...
 	@echo -e "$(BLUE)==> Running Go tests$(NC)"
 	cd server && go test ./...
-	@echo -e "$(BLUE)==> Building kubetty binary$(NC)"
-	mkdir -p bin
-	cd server && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../bin/kubetty .
+	$(MAKE) build-server-local
 
 # =============================================================================
 # Docker Build Targets

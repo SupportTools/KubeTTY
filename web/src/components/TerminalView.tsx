@@ -319,6 +319,8 @@ const TerminalView = ({ onReconnect, wsUrl, healthUrl, isFocused = true, externa
           }
         }, 1000);
 
+        // Clear any pending reconnect so repeated close events don't leak timers
+        reconnectTimer.current && clearTimeout(reconnectTimer.current);
         reconnectTimer.current = setTimeout(() => {
           countdownTimer.current && clearInterval(countdownTimer.current);
           setReconnectCountdown(null);

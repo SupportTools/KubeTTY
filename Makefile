@@ -8,7 +8,7 @@ IMAGE ?= harbor.support.tools/kubetty/kubetty
 TAG ?= dev
 REGISTRY_IMAGE := $(IMAGE):$(TAG)
 GO_VERSION ?= 1.24.3
-NODE_MAJOR ?= 20
+NODE_MAJOR ?= 22
 COVERAGE_THRESHOLD ?= 60
 
 # Helm deployment defaults

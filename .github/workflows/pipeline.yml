@@ -15,7 +15,7 @@ env:
   REGISTRY: harbor.support.tools
   IMAGE_NAME: kubetty/kubetty
   GO_VERSION: '1.24'
-  NODE_VERSION: '20'
+  NODE_VERSION: '22'
 
 jobs:
   # Stage 1: Validation
@@ -214,7 +214,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             GO_VERSION=1.24.3
-            NODE_MAJOR=20
+            NODE_MAJOR=22
 
       - name: Record pushed image identity
         id: image-identity

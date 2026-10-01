@@ -31,12 +31,15 @@ KubeTTY/
 │   │   ├── sessions/            # Session persistence (pgx_store)
 │   │   └── shared/              # Shared utilities (config, errors, health, metrics)
 │   ├── migrations/   # Database migrations
-│   └── ui/dist/      # Embedded frontend (built from web/)
+│   └── cmd/{gateway,project}/ui/dist/  # Embedded frontend (built from web/)
 ├── web/              # React frontend
 │   └── src/
 │       ├── components/  # UI components
 │       └── contexts/    # React contexts
-├── deploy/helm/      # Helm chart (supports both gateway and project modes)
+├── deploy/
+│   ├── helm-gateway/ # Gateway chart (used by CI for production)
+│   ├── helm-project/ # Standalone project pod chart
+│   └── helm/         # Legacy combined chart (KUBETTY_MODE switch)
 └── docs/             # Documentation
 ```
 
@@ -74,22 +77,22 @@ The Dockerfile and Helm chart use `KUBETTY_MODE` environment variable to select 
 
 ## Key Design Decisions
 
-### Single-Client Per Session
-Each PTY session allows only one connected client at a time. Additional connection attempts receive HTTP 409 Conflict.
+### Session Modes
+Each project has a `session_mode` (passed to the pod as `SESSION_MODE`):
+- `exclusive_takeover` (default): one client per PTY. Additional connections get HTTP 409 Conflict unless they pass `?force=true`, which takes over the session.
+- `shared_concurrent`: multiple clients share one PTY.
+- `independent_shells`: each gateway tab gets its own PTY.
 
 ### Output Buffering
-PTY output is buffered and broadcast to all clients (for gateway mode where backend maintains session while frontend reconnects).
+PTY output is buffered in a ring buffer (default 8MB) and replayed and broadcast to clients (for gateway mode, where the backend maintains the session while the frontend reconnects).
 
-### Session Persistence
-Sessions are persisted to PostgreSQL with:
-- Session metadata (UUID, deployment ID, PID)
-- Attachment tracking
-- Session logs for replay
+### Persistence
+The project binary is stateless (no database). The gateway persists users, refresh tokens, projects, settings and gateway tabs to PostgreSQL. PTY transcripts are logged to stdout or a file for Loki (`PTY_LOG_*`, `PTY_FILE_LOG_*`), not to the database.
 
 ### Authentication Flow
 1. Local auth mode: username/password login
 2. JWT access token (15m TTL)
-3. Refresh token (7d TTL) with automatic refresh
+3. Refresh token (default 720h / 30d TTL) with automatic refresh
 4. HttpOnly cookies for token storage
 
 ## TaskForge Task Management
@@ -123,7 +126,7 @@ cd server && go build ./cmd/gateway && go build ./cmd/project
 # Or using Makefile
 make build-server-local
 
-# Web (outputs to server/ui/dist/)
+# Web (outputs to server/cmd/gateway/ui/dist/; Dockerfile copies it into cmd/project/ui/dist too)
 cd web && npm run build
 
 # Docker image
@@ -147,13 +150,15 @@ go test -cover ./...
 
 ```bash
 # Helm lint
-helm lint deploy/helm/
+helm lint deploy/helm-gateway/
 
-# Deploy
-helm upgrade --install kubetty ./deploy/helm \
-  -n kubetty-dev \
-  -f deploy/helm/values.yaml
+# Production (normally done by CI, pinned to the image digest)
+helm upgrade --install kubetty-gateway deploy/helm-gateway \
+  -n kubetty-gateway-prd \
+  -f deploy/helm-gateway/values.prd.yaml
 ```
+
+`scripts/dev.sh` deploys the dev gateway (`helm-gateway/values.dev.yaml`) and a dev project (`helm-project`).
 
 ## Code Conventions
 
@@ -205,8 +210,10 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 ## Key Files
 
 ### Configuration
-- `server/internal/config/config.go` - Server configuration
-- `deploy/helm/values.yaml` - Helm values
+- `server/internal/config/gateway.go` - Gateway configuration (`LoadGatewayConfig`)
+- `server/internal/config/project.go` - Project configuration (`LoadProjectConfig`)
+- `server/internal/config/config.go` - Legacy config (used by `kubetty-authuser`)
+- `deploy/helm-gateway/values.yaml`, `values.prd.yaml` - Gateway Helm values
 
 ### Core Handlers
 - `server/cmd/gateway/main.go` - Gateway mode: tabs, projects, SSE, auth middleware
@@ -298,19 +305,18 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 | Variable | Description | Required | Default |
 |----------|-------------|----------|---------|
 | `PORT` | Server port | No | 8080 |
-| `SESSION_ID` | Session UUID | Yes | - |
 | `DEPLOYMENT_ID` | Deployment identifier | No | SESSION_ID value |
+
+### Gateway-Specific
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
 | `CNPG_HOST` | PostgreSQL host | Yes | - |
 | `CNPG_PORT` | PostgreSQL port | No | 5432 |
 | `CNPG_DATABASE` | PostgreSQL database | Yes | - |
 | `CNPG_USER` | PostgreSQL user | Yes | - |
 | `CNPG_PASSWORD` | PostgreSQL password | Yes | - |
-| `SESSION_LOG_RETENTION_HOURS` | Log retention (hours) | No | 720 (30 days) |
-| `SESSION_LOG_MAX_ENTRIES` | Max log entries per session | No | 5000 |
-
-### Gateway-Specific
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
+| `SESSION_LOG_RETENTION_HOURS` | Log retention (hours); parsed but currently unused | No | 720 (30 days) |
+| `SESSION_LOG_MAX_ENTRIES` | Max log entries per session; parsed but currently unused | No | 5000 |
 | `PROJECT_CATALOG_PATH` | Path to project catalog YAML | No | - |
 | `TAB_IDLE_TIMEOUT` | Tab idle timeout | No | 2h |
 | `AUTH_MODE` | Auth mode (disabled/local) | No | disabled |
@@ -325,6 +331,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 ### Project-Specific
 | Variable | Description | Required | Default |
 |----------|-------------|----------|---------|
+| `SESSION_ID` | Session UUID | Yes | - |
+| `SESSION_MODE` | `exclusive_takeover`, `shared_concurrent` or `independent_shells` | No | exclusive_takeover |
 | `SHELL` | Shell to use | No | /bin/bash |
 | `KUBETTY_USER` | KubeTTY user | No | USER env var |
 | `KUBETTY_PROJECT` | KubeTTY project | No | DEPLOYMENT_ID value |

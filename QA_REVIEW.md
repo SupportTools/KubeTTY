@@ -1,286 +1,191 @@
-# KubeTTY QA Review: Design vs Implementation
+# KubeTTY QA Review
 
-**Review Date:** 2025-11-19
-**Status:** 75% Complete
-**Reviewer:** Devils Advocate QA
+**Review date:** 2026-10-01 (supersedes the 2025-11-19 "75% complete" review)
+**Scope:** `server/`, `web/`, `deploy/helm*`, `.github/workflows/` at commit `e4f5b99`
+**Method:** every finding from the 2025-11-19 review was re-checked against current code;
+new findings below were observed while doing so. Line numbers refer to the files as of this review.
 
-## Executive Summary
+## Summary
 
-The KubeTTY codebase is substantially complete with most core features implemented. However, there are several gaps, missing features, incomplete implementations, and potential issues found when comparing the actual code against DESIGN.md, PLAN.md, and README.md specifications.
+All P0/P1 items from the original review are fixed except one partial (unconditional auth
+debug logging in the browser). The remaining risk is concentrated in authorization
+(no admin role, cross-user tab takeover), the per-project RBAC the controller still tries
+to create, and a few dead or inconsistent subsystems (DB session logs, storage-class defaults).
 
-**Critical Finding:** Single-client enforcement is NOT implemented - multiple clients can connect to the same PTY simultaneously.
-
----
-
-## Critical Findings
-
-| Issue | Severity | Impact | Location |
-|-------|----------|--------|----------|
-| Single-client enforcement missing | CRITICAL | Multiple clients can connect to same PTY | `server/cmd/project/main.go` |
-| Debug console.log in production | MEDIUM | Exposes internal behavior | `TerminalView.tsx`, `AuthContext.tsx`, `App.tsx` |
-| Auth not enforced by default | MEDIUM | Routes unprotected unless explicitly enabled | `server/cmd/gateway/main.go` |
-| Placeholder session UUID in Helm | MEDIUM | Won't work without manual replacement | `values.yaml:11` |
-| Max tabs enforcement missing | LOW | Could exhaust server resources | `manager.go` |
-| Tab idle timeout not implemented | LOW | Idle tabs consume resources indefinitely | `manager/manager.go` |
-
----
-
-## Detailed Findings
-
-### 1. Single-Client Enforcement (CRITICAL)
-
-**DESIGN.md requirement:** "Enforces single client per session: If another client is already connected, respond with HTTP 409 or WebSocket close with reason."
-
-**Current Implementation:** The code allows multiple concurrent clients to connect to the same PTY:
-
-```go
-// server/cmd/project/main.go (ptySession struct)
-type ptySession struct {
-    clients map[*websocket.Conn]bool
-    // ...
-}
-
-func (ps *ptySession) addClient(conn *websocket.Conn) {
-    ps.mu.Lock()
-    defer ps.mu.Unlock()
-    ps.clients[conn] = true  // Simply adds to map without checking!
-}
-```
-
-**Expected:** Reject additional connections with HTTP 409 or WebSocket close message
-**Actual:** Multiple clients connect simultaneously, all receiving the same output
+| # | Finding | Severity | Status |
+|---|---------|----------|--------|
+| 1 | Auth debug logging always on in `AuthContext.tsx` | LOW | Open (partially fixed) |
+| N1 | No admin role: any authenticated user can use every `/api/admin/*` endpoint | MEDIUM | New |
+| N2 | `?force=true` lets any authenticated user take over another user's tab | MEDIUM | New |
+| N3 | Controller still creates per-project cluster-wide `*` ClusterRoles/Bindings | MEDIUM | New |
+| N4 | Legacy `deploy/helm` chart still binds the controller cluster-wide | MEDIUM | New |
+| N5 | DB session logs are never written; `/session/logs` and retention settings do nothing | MEDIUM | New |
+| N6 | Default storage class is still `longhorn` in DB/UI defaults | MEDIUM | New |
+| N7 | `independent_shells` PTYs are never reaped on tab close and are uncapped | LOW | New |
+| N8 | Single-client reservation edge cases in project `/ws` | LOW | New |
+| N9 | Gateway WebSocket upgrader accepts any Origin | LOW | New |
+| N10 | No login rate limiting / lockout | LOW | New |
+| N11 | Expired refresh tokens are never pruned | LOW | New |
+| N12 | `/debug/vars` (expvar) served unauthenticated on the gateway | LOW | New |
+| N13 | Exec-mode resize is not capped like the WebSocket path | LOW | New |
+| N14 | Test-coverage gaps; CI coverage gate is advisory | LOW | New |
 
 ---
 
-### 2. Debug Logging in Production
+## Open Findings
 
-Console.log statements throughout frontend code:
+### 1. Auth debug logging is unconditional (partially fixed)
 
-- `web/src/components/TerminalView.tsx` - Lines 73, 86, 96, 103, 112, 144
-- `web/src/contexts/AuthContext.tsx` - Lines 63, 65, 70, 78, 84, 91, 98
-- `web/src/App.tsx` - Lines 92, 104, 117, 126, 139, 147, 150
+`TerminalView.tsx`, `TabPane.tsx` and `GUIView.tsx` now gate `console.debug` behind
+`import.meta.env.DEV` (e.g. `web/src/components/TerminalView.tsx:8-17`), and `App.tsx` has no
+console output. However `authLog` in `web/src/contexts/AuthContext.tsx:45-48` calls
+`console.log` unconditionally and is used 27 times, logging usernames and token refresh timing in
+production builds (e.g. lines 165, 180, 244).
 
-**Recommendation:** Remove or wrap with debug flag controlled by environment variable.
+**Fix:** gate `authLog` on `import.meta.env.DEV` like the other components.
 
----
+### N1. No authorization tier for admin endpoints
 
-### 3. Auth Middleware Gaps
+`kubetty_users` has no role column (`server/migrations/0004_auth_tables.up.sql:3-11`). Admin routes
+are wrapped only in `requireAuth` (`server/cmd/gateway/main.go:545-558`, `580-583`, `594-602`), so
+any active user can create, delete or upgrade projects, change global settings, and read or write
+project env secrets (`GET/PUT /api/admin/projects/{id}/secrets`, `main.go:557-558`).
+With `AUTH_MODE` other than `local`, the same routes are registered with no auth at all
+(`main.go:559-573`, `585-588`, `604-612`). The gateway logs a warning in that case (see Resolved).
 
-When `AUTH_MODE != "local"`, routes are completely unprotected (`server/cmd/gateway/main.go`).
+### N2. Cross-user tab takeover
 
-**Issues:**
-- No validation that `AUTH_MODE=local` in production
-- Could lead to accidental exposure
-- No warning when auth is disabled
+`AttachWithOptions` reassigns tab ownership to the caller whenever `force=true`
+(`server/internal/gateway/manager/manager.go:415-436`). The caller is identified by user ID
+(`server/cmd/gateway/main.go:1379-1386`), but nothing checks that the old and new owners are the
+same user, so any authenticated user who knows a tab ID can take over another user's live shell.
+`AttachVNC` behaves the same way (`manager.go:633-642`).
 
----
+### N3. Controller still tries to create cluster-wide per-project RBAC
 
-### 4. Missing Endpoints
+`createProjectResources` creates an admin ClusterRole with `*` verbs on `*` resources in the
+core, apps, batch, extensions and networking groups, plus a ClusterRoleBinding
+(`server/internal/controller/controller.go:313-338`, `server/internal/controller/resources.go:697-716`).
+Since `5ff9bba` the `helm-gateway` chart no longer grants the controller `clusterroles` or
+`clusterrolebindings`, so these calls now fail. The controller only logs a warning, so project
+creation continues without the RBAC. The intent should be redesigned as namespaced Roles, or the
+code removed.
 
-| Endpoint | Spec | Status | Notes |
-|----------|------|--------|-------|
-| `GET /api/healthz` | DESIGN.md 5.2 | NOT IMPLEMENTED | Optional but recommended |
-| `POST /api/auth/password` | Not in spec | IMPLEMENTED | Enhancement beyond spec |
+### N4. Legacy `deploy/helm` chart is still cluster-wide
 
----
+`deploy/helm/templates/controller-rbac.yaml:18-48,51-66` grants namespaces, `clusterroles` and
+`clusterrolebindings` create/delete and binds them with a ClusterRoleBinding. Only `deploy/helm-gateway`
+got the namespace-scoped fix in `5ff9bba`. CI and `scripts/deploy-prod.sh` deploy `helm-gateway`.
+`README.md:55,316` still documents installing `./deploy/helm`.
+That chart also has another problem: it requires `env.sessionID` even in gateway mode
+(`deploy/helm/templates/deployment.yaml:14-19`), although `deploy/helm/values.yaml:31` says to
+leave it empty for the gateway. The legacy chart should either be retired or brought in line
+with `helm-gateway`.
 
-### 5. Gateway Mode Gaps
+### N5. DB session logging is dead code
 
-**Missing implementations:**
+The project binary has been stateless since `8924f27` (2025-11-21). No production code calls
+`AppendLog`, `UpsertSession`, `PruneLogs` or `TrimLogs`; only the interface and store define them
+(`server/internal/sessions/store.go:25-32`). The gateway still serves `/session/logs`
+(`server/cmd/gateway/main.go:624`), and the UI still offers `SessionLogsModal`, but the
+`session_logs` table is never populated. `SESSION_LOG_RETENTION_HOURS` and
+`SESSION_LOG_MAX_ENTRIES` are parsed (`server/internal/config/common.go:34-35`) but never used.
+PTY transcripts actually go to stdout or a JSONL file for Loki (`server/internal/shared/ptylogger`,
+`server/internal/shared/filelogger`, `PTY_LOG_ENABLED` / `PTY_FILE_LOG_*` in
+`server/internal/config/project.go:61-75`).
 
-1. **Project health checks** (DESIGN.md 5.4)
-   - Catalog has `healthCheckPath` field but it's not used
-   - No downstream health monitoring
+### N6. Storage-class defaults still point at Longhorn
 
-2. **Max tabs enforcement** (DESIGN.md 5.9)
-   - Spec: `max_tabs_per_user` with 429 response
-   - Not implemented in `manager.go`
+`c9069bd` (2026-02-08) changed `projects.DefaultStorageClass` to `freenas-iscsi-csi`
+(`server/internal/projects/models.go:231`), but three other defaults still say `longhorn`:
+- the column default in `server/migrations/0008_projects.up.sql:22`
+- the seeded `project_defaults.storage_class` setting in `server/migrations/0013_settings.up.sql:126`,
+  which `server/internal/handlers/admin/projects.go:68-69` prefers over the code constant
+- the create-project form default in `web/src/components/AdminProjectForm.tsx:21`
 
-3. **Idle timeout** (DESIGN.md 5.9)
-   - Spec: `TAB_IDLE_TIMEOUT` configuration
-   - Not found in implementation
+So a new project gets `longhorn` unless an operator overrides it in the form or in settings.
 
----
+### N7. `independent_shells` PTYs accumulate
 
-### 6. Input Validation Gaps
+In `independent_shells` mode, each gateway tab gets its own PTY, keyed by `?shell=<tabID>`
+(`server/cmd/project/main.go:434-443`, `server/internal/gateway/manager/manager.go:499-505`). A PTY
+is removed only when its process exits (`server/cmd/project/main.go:974-981`). Closing a tab does
+not tear down its shell, and the number of shells per pod has no cap.
 
-1. **WebSocket resize messages** (`server/cmd/project/main.go`)
-   - Cols/Rows checked for >0 but not capped
-   - Could resize to invalid sizes
+### N8. Single-client enforcement edge cases (`server/cmd/project/main.go`)
 
-2. **Username validation** (`server/internal/handlers/auth/login.go`)
-   - No length limits or character restrictions
-   - Could allow very long usernames
+- The non-force path defers `ps.releaseSlot()` (lines 504-507). The comment says it is for
+  upgrade failure, but it runs on every handler exit, after `removeClient` (line 562). It can
+  therefore decrement a reservation made by a newer connection, which reopens a narrow
+  double-admit window.
+- The force path (lines 478-489) disconnects existing clients without reserving a slot, so two
+  simultaneous `force=true` connects, or a force connect racing a normal one, can both be admitted.
 
----
+### N9. WebSocket Origin is not checked
 
-### 7. Test Coverage
+Both upgraders use `CheckOrigin: func(r *http.Request) bool { return true }`
+(`server/cmd/gateway/main.go:491`, `server/cmd/project/main.go:339`). On the gateway, auth relies
+on cookies with `SameSite=Lax` (`server/internal/handlers/auth/helpers.go:158`). That blocks
+cross-site pages, but any same-site origin, such as another `*.support.tools` host, could open an
+authenticated terminal WebSocket. The project pod `/ws` is unauthenticated by design and relies on
+the controller-created NetworkPolicy (`server/internal/controller/controller.go:352-358`).
 
-**Tests found:**
-- `server/main_test.go` - Basic structure
-- `server/internal/gateway/manager/manager_test.go`
-- `server/internal/gateway/relay/relay_test.go`
-- `server/internal/gateway/config/catalog_test.go`
+### N10. No login throttling
 
-**No tests for:**
-- Auth manager/store
-- Session store queries
-- PTY lifecycle
-- WebSocket message handling
-- Configuration loading
-- React components (zero test files)
+`/api/auth/login` (`server/internal/handlers/auth/login.go:86-113`) validates input but has no rate
+limiting, backoff or lockout.
 
----
+### N11. Refresh-token cleanup is never scheduled
 
-### 8. Helm Chart Issues
+`DeleteExpiredRefreshTokens` exists (`server/internal/auth/store.go:264`), but nothing calls it, so
+`kubetty_refresh_tokens` grows without bound.
 
-1. **Placeholder UUID** (`values.yaml:11`)
-   ```yaml
-   sessionID: "00000000-0000-0000-0000-000000000000"
-   ```
-   Must be replaced per deployment but no validation
+### N12. `/debug/vars` is public
 
-2. **Hardcoded IP** (`values.yaml:13`)
-   ```yaml
-   anthropicBaseURL: "http://172.25.1.66:8080"
-   ```
-   Should be configurable
+`server/cmd/gateway/main.go:509` registers `expvar.Handler()` outside the auth middleware. It
+exposes memstats and the process command line.
 
-3. **Missing documentation** for required CNPG secret format
+### N13. Exec-mode resize bounds
 
----
+The WebSocket path clamps resize to 500x200 (`server/cmd/project/main.go:47-48,638-655`). The
+gateway exec relay (`KUBETTY_EXEC_MODE=exec`) checks only for values > 0
+(`server/internal/gateway/exec/relay.go:659-661`). The fields are `uint16`.
 
-### 9. Database Schema
+### N14. Test coverage
 
-**Gap found:** Missing index on `session_logs.created_at` for log retention queries.
-- Current: `session_logs_session_created_idx` indexes `(session_uuid, created_at)`
-- Needed: Separate index on `created_at` for pruning old logs by timestamp
+There are now 62 Go test files and 9 web test files (see Resolved). Remaining gaps:
+- No tests for `server/internal/settings`.
+- No web tests for the admin UI (`AdminDashboard`, `AdminProject*`, `AdminSettings`),
+  `ProjectPicker` or `SessionLogsModal`.
+- The CI coverage gate (30%) is `continue-on-error: true` (`.github/workflows/pipeline.yml:96-106`).
 
----
+### Operational notes (not defects)
 
-## Working Features
-
-### Fully Implemented
-
-- [x] PTY management and WebSocket streaming
-- [x] Session persistence to CNPG
-- [x] Session logs with retention
-- [x] Terminal resize handling
-- [x] Output buffering (64KB)
-- [x] Authentication with JWT tokens
-- [x] Refresh token rotation
-- [x] Password change functionality
-- [x] Gateway mode with multi-tab support
-- [x] Project catalog loading
-- [x] Tab persistence
-- [x] Downstream relay with backoff
-- [x] Auto-reconnection with exponential backoff
-- [x] Secure cookies (HttpOnly, SameSite)
-- [x] CNPG configuration validation
-- [x] Metrics endpoint (/metrics)
-
-### Enhanced Beyond Spec
-
-- [x] Password change endpoint (`POST /api/auth/password`)
-- [x] Profile modal with user info
-- [x] Logout confirmation dialog
-- [x] Password strength validation
-- [x] Last login tracking
-- [x] Token metadata (user agent, IP)
-
----
-
-## Recommendations
-
-### High Priority (P0)
-
-1. **Implement single-client enforcement**
-   - Add check before accepting WebSocket
-   - Return HTTP 409 if client already connected
-   - Add WebSocket close reason for rejected connections
-
-2. **Remove/control debug logging**
-   - Create debug utility with environment flag
-   - Remove all console.log in production builds
-
-3. **Add input validation limits**
-   - Cap PTY resize dimensions (e.g., max 500 cols, 200 rows)
-   - Add username length limit (e.g., 64 chars)
-   - Validate username characters
-
-4. **Add health endpoint**
-   - Implement `GET /api/healthz`
-   - Check CNPG connectivity
-   - Check PTY process status
-
-### Medium Priority (P1)
-
-5. **Implement max tabs per user**
-   - Add limit checking in tab creation
-   - Return 429 when exceeded
-   - Make configurable per project
-
-6. **Implement tab idle timeout**
-   - Track last activity timestamp
-   - Clean up idle tabs after timeout
-   - Make configurable via `TAB_IDLE_TIMEOUT`
-
-7. **Fix Helm placeholders**
-   - Generate proper default UUIDs
-   - Add validation in chart
-   - Document required values
-
-8. **Add React component tests**
-   - Set up Vitest/RTL
-   - Test Login, TerminalView, AuthContext
-   - Add CI integration
-
-### Low Priority (P2)
-
-9. **Improve backend test coverage**
-   - Auth manager/store tests
-   - Session store tests
-   - PTY lifecycle tests
-
-10. **Implement project health checks**
-    - Monitor downstream pod health
-    - Update project status in catalog
-    - Surface in UI
-
-11. **Add session log search**
-    - Implement search UI
-    - Add backend search endpoint
-    - Index log content for search
-
-12. **Add missing database index**
-    - Index on `session_logs.created_at`
-    - Improves log retention queries
+- `deploy/helm-gateway/templates/deployment.yaml:17` hard-codes `replicas: 1`. Leader election
+  (`99d3721`) is enabled by default, but production runs a single gateway, and tab state lives
+  in gateway memory.
+- Grype image scanning is opt-in and the deploy gate for it is disabled (`if: false`) because the
+  image is too large (`.github/workflows/pipeline.yml`, "Verify security scan passed").
 
 ---
 
-## Files Requiring Changes
+## Resolved (from the 2025-11-19 review)
 
-### Critical
-
-- `server/cmd/project/main.go` - Single-client enforcement
-- `web/src/components/TerminalView.tsx` - Remove debug logs
-- `web/src/contexts/AuthContext.tsx` - Remove debug logs
-- `web/src/App.tsx` - Remove debug logs
-
-### High Priority
-
-- `server/internal/gateway/manager/manager.go` - Max tabs, idle timeout
-- `deploy/helm/values.yaml` - Fix placeholders, documentation
-
-### Medium Priority
-
-- `server/migrations/` - Add `created_at` index
-- `web/src/` - Add test files
-
----
-
-## Conclusion
-
-KubeTTY is **75% complete** with solid core functionality. The critical gap is **single-client enforcement** which contradicts the design specification and allows unintended multi-client access. This must be fixed before production use.
-
-Secondary concerns are debug logging exposure, missing resource limits in gateway mode, and limited test coverage. The authentication system is well-implemented and even exceeds the original specification.
+| Original finding | Resolution | Evidence |
+|------------------|------------|----------|
+| Single-client enforcement missing (CRITICAL) | 409 on second client added in `ba7a23b` (2025-11-20). TOCTOU race fixed with `reserveSlot()` in `6661fa4` (2026-02-08). Superseded by per-project session modes in `e2d489d` (2026-03-03): `exclusive_takeover` (default, 409 plus `?force=true` takeover), `shared_concurrent`, `independent_shells` | `server/cmd/project/main.go:429-520`, `server/migrations/0016_project_session_mode.up.sql`, gateway tab ownership at `server/internal/gateway/manager/manager.go:408-505` |
+| Debug `console.log` in `TerminalView`/`App` | Dev-gated `devLog` helpers (`d515859`, `39ac98c`); `App.tsx` clean | `web/src/components/TerminalView.tsx:8-17`. `AuthContext` still open (#1) |
+| Auth not enforced / no warning | Startup warning (`cbdb234`), `X-Auth-Warning` header middleware; Helm `helm-gateway` defaults `auth.mode: local` | `server/cmd/gateway/main.go:95-100,651`, `server/internal/shared/server/auth_warning.go`, `deploy/helm-gateway/values.yaml:30` |
+| Placeholder session UUID in Helm | Default is empty; chart `fail`s on missing/placeholder UUID (`29ff6bf`) | `deploy/helm/templates/deployment.yaml:14-19`, `deploy/helm-project/templates/deployment.yaml:4-9` |
+| Hard-coded `anthropicBaseURL` IP | Now empty by default, documented (`29ff6bf`) | `deploy/helm/values.project-template.yaml:61-65` |
+| Missing CNPG secret docs | Documented (`29ff6bf`) | `deploy/helm/README.md:27,40,111` |
+| Max tabs enforcement missing | Per-client and per-project limits with 429 (`b29ffa4`) | `server/internal/gateway/manager/manager.go:208-227`, `server/cmd/gateway/main.go:968-983` |
+| Tab idle timeout not implemented | `TAB_IDLE_TIMEOUT` (default 2h, min 10m) with 5-min warning (`dc7a330`) | `server/internal/config/gateway.go:112`, `server/internal/gateway/manager/manager.go:121-143,1179+` |
+| `GET /api/healthz` missing | Implemented in both binaries (gateway checks DB; project checks PTY); unified in `a569c59`; leader status at `/api/healthz/leader` | `server/cmd/gateway/main.go:524-527`, `server/cmd/project/main.go:372-375` |
+| Project health checks unused | Downstream poller (`a19e330`), surfaced via `HealthIndicator` | `server/internal/gateway/health/checker.go`, `server/internal/gateway/manager/manager.go:1171` |
+| Resize dimensions uncapped | Capped at 500 cols / 200 rows (`ba7a23b`) | `server/cmd/project/main.go:47-48,638-655` (exec mode: see N13) |
+| Username not validated | Max 64 chars, `^[a-zA-Z0-9_-]+$` (`1ec2eb1`) | `server/internal/handlers/auth/helpers.go:26-32`, `login.go:94-104` |
+| Missing `session_logs.created_at` index | Migration 0007 (`d781273`) | `server/migrations/0007_session_logs_created_idx.up.sql` (moot while N5 stands) |
+| Session log search | Backend `search`/`direction` filters plus UI (`d781273`, migration 0006) | `server/internal/handlers/session/logs.go:93-109`, `web/src/components/SessionLogsModal.tsx` (moot while N5 stands) |
+| No backend tests for auth/sessions/config | Added (`ba12a54`, `65cdb82`), now 62 `_test.go` files | `server/internal/auth/*_test.go`, `server/internal/sessions/pgx_store_test.go`, `server/internal/config/*_test.go` |
+| Zero React tests | Vitest + RTL (`b3d2d38`), 9 test files, run in CI `test-web` | `web/src/**/*.test.tsx`, `.github/workflows/pipeline.yml:115-140` |

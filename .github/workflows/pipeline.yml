@@ -296,10 +296,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-        with:
-          version: 'v3.15.2'
+      # Helm is baked into the runner image (ci-runners Dockerfile.arc2, checksum-pinned).
+      # Do not download it per job: a job-time fetch from get.helm.sh failed twice on
+      # 2026-10-01 (site IPv6 PMTU black hole) and skipped the deploy. See the TaskForge
+      # CI runner contract, "No job-time downloads" (taskforge-2670).
+      - name: Helm (baked into the runner image)
+        run: |
+          command -v helm >/dev/null || { echo "::error::helm is not on the runner image; fix ci-runners, do not download it here"; exit 1; }
+          helm version --short
 
       - name: Lint Helm charts
         run: |
@@ -385,10 +389,14 @@ jobs:
         with:
           version: 'v1.30.3'
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-        with:
-          version: 'v3.15.2'
+      # Helm is baked into the runner image (ci-runners Dockerfile.arc2, checksum-pinned).
+      # Do not download it per job: a job-time fetch from get.helm.sh failed twice on
+      # 2026-10-01 (site IPv6 PMTU black hole) and skipped the deploy. See the TaskForge
+      # CI runner contract, "No job-time downloads" (taskforge-2670).
+      - name: Helm (baked into the runner image)
+        run: |
+          command -v helm >/dev/null || { echo "::error::helm is not on the runner image; fix ci-runners, do not download it here"; exit 1; }
+          helm version --short
 
       # DFW runners live in stackeye-ci-dfw01, so their in-cluster API endpoint
       # and projected CA cannot be used for the a1-ops-prd deployment.

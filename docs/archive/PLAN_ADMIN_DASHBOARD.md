@@ -1,3 +1,5 @@
+> **Archived 2026-10-01:** Implemented. `server/internal/handlers/dashboard/` serves `/api/admin/dashboard/{summary,metrics,errors,usage}` and `web/src/components/AdminDashboard.tsx` renders it. The admin-only authorization from "Security Considerations" was not implemented (see `QA_REVIEW.md` N1).
+
 # Admin Dashboard Design Plan
 
 ## Overview

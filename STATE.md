@@ -1,29 +1,96 @@
-# Current Implementation State (2025-11-19)
+# Current Implementation State (2026-10-01)
 
-## Session Model
-- **Single session per pod**: One PTY is created on first WebSocket connection and reused for the pod lifetime.
-- **Single client enforcement**: Only one browser can connect at a time; additional connections are rejected.
-- **No multi-session features**: Fork/resume/continue commands were designed but never implemented; documentation has been updated to reflect actual behavior.
-- **Output buffering**: 64KB buffer replays initial output (MOTD) to new clients on connect.
+Snapshot of what is in the code at `e4f5b99`. For open defects see `QA_REVIEW.md`. For the
+original architecture spec see `DESIGN.md`.
 
-## Repository context
-- Backend now requires `AUTH_MODE=local` to enable the new JWT auth stack; migrations (`0004_auth_tables`) and `internal/auth/{store,manager}` implement users, refresh tokens, token issuance, and validation.
-- New CLI helper `server/cmd/kubetty-authuser` lets operators seed users, rotate passwords, and toggle activation without touching SQL. README documents the auth env vars, Helm `auth` block, and helper usage.
-- React UI probes `/api/auth/me`, shows a login form when needed, and sends `credentials: "include"` with every request; session log fetches also send cookies so auditing works once auth is turned on.
-- Helm charts expose the `auth` block, inject all `AUTH_*` env vars, and default to `AUTH_MODE=disabled` unless overridden by `values.gateway`/`values.beacon-support`.
+## Binaries (`server/cmd/`)
 
-## Local deployment state
-- Built frontend (`npm --prefix web run build`) and Go server (`go test ./...`); generated assets live under `server/ui/dist`.
-- No running cluster state tracked locally; the current work is purely code/config updates for the auth flow.
+| Binary | Role |
+|--------|------|
+| `kubetty-gateway` (`cmd/gateway`) | Browser-facing service: React UI, JWT auth, project catalog, tabs (REST + SSE), WebSocket/VNC relay to project pods, admin API (projects, settings, dashboard), and the in-process project controller. Requires CNPG/PostgreSQL. |
+| `kubetty-project` (`cmd/project`) | Runs inside each project pod. **Stateless** (no DB since `8924f27`). Owns the PTY(s) and serves `/ws`, `/api/healthz`, `/api/metrics`, `/api/gui/status`. Output goes to an 8MB ring buffer (`OUTPUT_BUFFER_SIZE`) that is replayed on connect. Optional PTY transcript logging to stdout or a JSONL file for Loki (`PTY_LOG_*`, `PTY_FILE_LOG_*`). |
+| `kubetty-authuser` (`cmd/kubetty-authuser`) | CLI to create, update and list users and to toggle activation. |
 
-## Outstanding issues / remediation
-1. **Migration rollout** – ensure the new `0004_auth_tables` migration is applied before enabling auth, and document how to seed the first user (`kubetty-authuser`).
-2. **Secret rotation** – `AUTH_JWT_SECRET` should live in a Kubernetes Secret (referenced via `auth.jwtSecretSecret`) and rotating it will log everyone out; note this in ops runbooks.
-3. **Login verification** – after restart confirm the SPA login form appears, successful login yields cookies, and `/session/logs` works under auth. Also test `curl -u` (Bearer header) flows once tokens are available.
-4. **Metrics & cleanup** – consider scheduling `auth.DeleteExpiredRefreshTokens` and exporting login metrics once more ideas land; currently only the infrastructure is in place.
+One image runs both server binaries; `KUBETTY_MODE` selects which one. Frontend assets are built
+by Vite into `server/cmd/gateway/ui/dist` and embedded in both binaries (the Dockerfile copies the
+same output into `cmd/project/ui/dist`).
 
-## Next steps after restart
-1. Recreate any temporary experiment branches/notes (e.g., `server/kubetty` binary) if needed.
-2. Seed initial user via `go run ./server/cmd/kubetty-authuser create ...` and store the hash per instructions.
-3. Validate Helm values (`values.yaml`, `values.gateway`, `values.beacon-support`) against secrets and adjust tokens before redeploying.
-4. Rebuild the Docker image once secrets/configs are stable, restart the pod, and manually verify the auth workflow end-to-end before handing back control.
+## Session model
+
+- **Session modes** (per project, `kubetty_projects.session_mode`, migration 0016, `e2d489d`).
+  The controller passes the mode to pods as `SESSION_MODE`:
+  - `exclusive_takeover` (default): one client per PTY. A second client gets HTTP 409.
+    `?force=true` disconnects the current client (close code 4000) and takes over. Admission uses an
+    atomic `reserveSlot()` (TOCTOU fix `6661fa4`).
+  - `shared_concurrent`: any number of clients share one PTY.
+  - `independent_shells`: each gateway tab gets its own PTY in the pod, keyed by `?shell=<tabID>`.
+- **Gateway tabs** belong to a user (`user:<id>`), or to a client cookie when auth is disabled.
+  Re-attaching preempts the tab's stale proxy, and `force=true` transfers ownership. Concurrent
+  `Proxy()` calls on a tab are serialized (`48e1f0d`). Tab limits per client and per project
+  (429) and an idle timeout (`TAB_IDLE_TIMEOUT`, default 2h) are enforced. Tab metadata and
+  position persist in `gateway_tabs`.
+- **Downstream connection**: a WebSocket relay to the project `/ws` with backoff (default), or a
+  Kubernetes exec stream (`KUBETTY_EXEC_MODE=exec`). Optional noVNC GUI desktop per project
+  (`/vnc`, `GUI_ENABLED`).
+- The `sessions`/`session_logs` tables and `/session/logs` still exist, but nothing writes to them
+  any more (QA_REVIEW N5).
+
+## Authentication
+
+- `AUTH_MODE=local` enables JWT auth: a short-lived access token (default 15m) and a rotating
+  hashed refresh token (default 30 days), stored as HttpOnly, SameSite=Lax cookies (Secure by
+  default). There is also a password-change endpoint.
+- If `AUTH_MODE` is anything else, routes are open. The gateway then logs a security warning and
+  adds an `X-Auth-Warning` header. The `helm-gateway` chart defaults to `auth.mode: local`.
+- There are no roles: every authenticated user can use the admin API (QA_REVIEW N1).
+
+## Project controller and HA
+
+- The controller runs inside the gateway when `CONTROLLER_ENABLED=true`. It reconciles
+  `kubetty_projects` rows into Deployment, Service, PVC, ServiceAccount, env Secret and
+  NetworkPolicy objects in a single projects namespace (`PROJECTS_NAMESPACE`, prefix
+  `kubetty-project-`). It also handles template-PVC sync Jobs, pause/unpause, image upgrades and
+  restart/resync.
+- A storage monitor expands PVCs automatically above 70% usage (`STORAGE_EXPAND_*`).
+- Lease-based leader election (`99d3721`, `LEADER_ELECTION_*`, enabled by default) ensures only
+  one replica runs the controller. The lease lives in the release namespace. The production chart
+  runs `replicas: 1`.
+- Admin UI and API cover project CRUD, global settings with an audit history, and an admin
+  dashboard (`/api/admin/dashboard/{summary,metrics,errors,usage}`, `AdminDashboard.tsx`).
+
+## Storage
+
+- The default project storage class is TrueNAS `freenas-iscsi-csi` (`c9069bd`, migrated from
+  Longhorn). `PVC_SUFFIX` (default `-data`, `-data-truenas` for migrated environments, `8b09fe5`)
+  selects PVC names.
+- The init-permissions chown is hardened against transient CSI hangs (`4bb1845`).
+- Some DB and UI defaults still say `longhorn` (QA_REVIEW N6).
+- Gateway state is in CNPG (`kubetty-db-rw.kubetty-gateway-prd.svc` in production).
+
+## Helm (`deploy/`)
+
+- `helm-gateway/`: production and dev gateway chart. Since `5ff9bba`, RBAC is
+  **namespace-scoped**. The gateway and controller ClusterRoles are only permission templates,
+  bound through RoleBindings in the project namespace(s). The leader-election Lease uses a
+  Role/RoleBinding in the release namespace. There are no ClusterRoleBindings, and no
+  namespace or RBAC-management verbs.
+- `helm-project/`: standalone project pod chart (used by `scripts/dev.sh`).
+- `helm/`: original combined chart (`KUBETTY_MODE` switch). It is not used by CI, and it still
+  binds the controller cluster-wide (QA_REVIEW N4).
+
+## CI/CD (`.github/workflows/pipeline.yml`, `validate-pr.yml`)
+
+- **Runners:** all jobs run on `self-hosted-linux`, the on-prem ARC scale set
+  `arc-runners-supporttools` in `a1-ops-prd` (moved back from the DFW pool in `d2d80c9`).
+- **Credentials:** keyless GitHub OIDC to Vault (`ae3b2b1`). Vault issues the repo-scoped Harbor
+  robot for push and a namespace-scoped Kubernetes token with a lease of at most 1h for deploy.
+  The old `HARBOR_*` and `KUBECONFIG_PROD` secrets are retired.
+- **Cluster access:** `.github/actions/setup-kubeconfig-onprem` builds the kubeconfig against the
+  in-cluster apiserver `https://kubernetes.default.svc:443` with a committed CA, and checks the
+  identity with `whoami` (`e4f5b99`; replaced the retired Comcast IP).
+- **Deploy:** `helm upgrade --install kubetty-gateway deploy/helm-gateway -n kubetty-gateway-prd`
+  with `image.digest` pinned to the pushed digest (`999cb01`, `c620e1a`). After the rollout, the job
+  checks that every Ready pod runs the linux/amd64 runtime digest, and it rolls back on failure.
+  Production deploys run on `main` or on clean `vX.Y.Z` tags.
+- **Gates:** gofmt, vet, `go mod tidy`, npm audit, Go tests with `-race`, Vitest, and Helm lint
+  and template. The coverage threshold (30%) is advisory. Grype image scanning is opt-in.

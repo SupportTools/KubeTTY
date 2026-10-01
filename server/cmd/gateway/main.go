@@ -504,44 +504,77 @@ func main() {
 		srv.tabManager.StartMetricsCollector()
 	}
 
+	handler := srv.routes(settingsStore)
+
+	httpSrv := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: handler,
+	}
+
+	// Start graceful shutdown handler in background
+	go sharedserver.GracefulShutdown(httpSrv)
+
+	log.WithFields(log.Fields{
+		"port": cfg.Port,
+	}).Info("gateway/main: KubeTTY Gateway listening")
+	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.WithFields(log.Fields{
+			"error": err.Error(),
+			"port":  cfg.Port,
+		}).Fatal("gateway/main: server exited unexpectedly")
+	}
+}
+
+// routes builds the gateway HTTP handler: it registers every route on a new
+// ServeMux (wrapping protected routes with the auth middleware when local auth
+// is enabled) and applies the auth-warning and logging middlewares.
+// Extracted from main() so route registration can be exercised in tests.
+func (s *server) routes(settingsStore settings.Store) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.Handle("/debug/vars", expvar.Handler())
 
 	// Health check with gateway component status
 	gatewayChecker := health.NewComponentChecker("gateway", func() string {
-		if srv.tabManager != nil {
+		if s.tabManager != nil {
 			return "enabled"
 		}
 		return "disabled"
 	})
 	var dbPinger health.Pinger
-	if srv.store != nil {
-		if pgxStore, ok := srv.store.(*sessions.PGXStore); ok {
+	if s.store != nil {
+		if pgxStore, ok := s.store.(*sessions.PGXStore); ok {
 			dbPinger = pgxStore
 		}
 	}
 	mux.Handle("/api/healthz", health.NewCompatHandler(dbPinger, gatewayChecker))
 
 	// Leader status endpoint for monitoring leader election
-	mux.Handle("/api/healthz/leader", health.NewLeaderStatusHandler(srv.leaderElector))
+	// Only pass a non-nil interface when leader election is configured: a nil
+	// *LeaderElector wrapped in the LeaderInfo interface is non-nil, which made
+	// the handler call methods on a nil pointer and panic.
+	var leaderInfo health.LeaderInfo
+	if s.leaderElector != nil {
+		leaderInfo = s.leaderElector
+	}
+	mux.Handle("/api/healthz/leader", health.NewLeaderStatusHandler(leaderInfo))
 
 	// Version endpoint - returns the application version
 	mux.HandleFunc("/api/version", handleVersion)
 
 	// Auth middleware
-	requireAuth := handlers_auth.RequireAuth(srv.cfg, srv.authMgr)
+	requireAuth := handlers_auth.RequireAuth(s.cfg, s.authMgr)
 
 	// Admin API handlers for project management (requires auth when enabled)
-	if srv.projectStore != nil && srv.projCtrl != nil {
-		adminHandlers := handlers_admin.NewProjectHandlers(srv.projectStore, srv.projCtrl, srv.cfg.RecommendedImageTag)
+	if s.projectStore != nil && s.projCtrl != nil {
+		adminHandlers := handlers_admin.NewProjectHandlers(s.projectStore, s.projCtrl, s.cfg.RecommendedImageTag)
 		// Set callback to unregister project from tabManager when deleted
 		adminHandlers.SetDeleteCallback(func(projectName string) {
-			tabManager.UnregisterProject(projectName)
+			s.tabManager.UnregisterProject(projectName)
 		})
 		// Wire settings store for applying defaults to new projects
 		adminHandlers.SetSettingsStore(settingsStore)
-		if srv.authEnabled() {
+		if s.authEnabled() {
 			mux.Handle("GET /api/admin/projects", requireAuth(http.HandlerFunc(adminHandlers.ListProjects)))
 			mux.Handle("POST /api/admin/projects", requireAuth(http.HandlerFunc(adminHandlers.CreateProject)))
 			mux.Handle("GET /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.GetProject)))
@@ -575,8 +608,8 @@ func main() {
 	}
 
 	// Dashboard API handlers
-	dashboardHandlers := handlers_dashboard.New(srv.projectStore, srv.tabStore, handlers_dashboard.NewNullMetricsCollector())
-	if srv.authEnabled() {
+	dashboardHandlers := handlers_dashboard.New(s.projectStore, s.tabStore, handlers_dashboard.NewNullMetricsCollector())
+	if s.authEnabled() {
 		mux.Handle("GET /api/admin/dashboard/summary", requireAuth(http.HandlerFunc(dashboardHandlers.GetSummary)))
 		mux.Handle("GET /api/admin/dashboard/metrics", requireAuth(http.HandlerFunc(dashboardHandlers.GetMetrics)))
 		mux.Handle("GET /api/admin/dashboard/errors", requireAuth(http.HandlerFunc(dashboardHandlers.GetErrors)))
@@ -590,7 +623,7 @@ func main() {
 
 	// Settings API handlers
 	settingsHandlers := handlers_admin.NewSettingsHandlers(settingsStore)
-	if srv.authEnabled() {
+	if s.authEnabled() {
 		mux.Handle("GET /api/admin/settings", requireAuth(http.HandlerFunc(settingsHandlers.ListSettings)))
 		mux.Handle("GET /api/admin/settings/categories", requireAuth(http.HandlerFunc(settingsHandlers.GetCategories)))
 		mux.Handle("GET /api/admin/settings/history", requireAuth(http.HandlerFunc(settingsHandlers.GetAllHistory)))
@@ -612,62 +645,45 @@ func main() {
 		mux.HandleFunc("GET /api/admin/settings/{category}/{key}/history", settingsHandlers.GetSettingHistory)
 	}
 
-	if srv.authEnabled() {
+	if s.authEnabled() {
 		// Auth handlers (extracted)
-		mux.Handle("/api/auth/login", handlers_auth.NewAuthLoginHandler(srv.cfg, srv.authMgr, srv.authStore))
-		mux.Handle("/api/auth/refresh", handlers_auth.NewAuthRefreshHandler(srv.cfg, srv.authMgr))
-		mux.Handle("/api/auth/logout", requireAuth(handlers_auth.NewAuthLogoutHandler(srv.cfg, srv.authMgr, srv.authStore)))
+		mux.Handle("/api/auth/login", handlers_auth.NewAuthLoginHandler(s.cfg, s.authMgr, s.authStore))
+		mux.Handle("/api/auth/refresh", handlers_auth.NewAuthRefreshHandler(s.cfg, s.authMgr))
+		mux.Handle("/api/auth/logout", requireAuth(handlers_auth.NewAuthLogoutHandler(s.cfg, s.authMgr, s.authStore)))
 		mux.Handle("/api/auth/me", requireAuth(handlers_auth.NewAuthMeHandler()))
-		mux.Handle("/api/auth/password", requireAuth(handlers_auth.NewAuthPasswordChangeHandler(srv.cfg, srv.authMgr)))
+		mux.Handle("/api/auth/password", requireAuth(handlers_auth.NewAuthPasswordChangeHandler(s.cfg, s.authMgr)))
 
 		// Session handlers (extracted)
-		mux.Handle("/session/logs", requireAuth(handlers_session.NewSessionLogsHandler(srv.store, srv)))
+		mux.Handle("/session/logs", requireAuth(handlers_session.NewSessionLogsHandler(s.store, s)))
 
 		// Gateway WebSocket endpoints (terminal and VNC)
-		mux.Handle("/ws", requireAuth(http.HandlerFunc(srv.handleGatewayWebsocket)))
-		mux.Handle("/vnc", requireAuth(http.HandlerFunc(srv.handleVNCWebsocket)))
-		mux.Handle("/api/projects", requireAuth(http.HandlerFunc(srv.handleListProjects)))
-		mux.Handle("/api/tabs", requireAuth(http.HandlerFunc(srv.handleTabs)))
-		mux.Handle("/api/tabs/reorder", requireAuth(http.HandlerFunc(srv.handleTabsReorder)))
-		mux.Handle("/api/tabs/events", requireAuth(http.HandlerFunc(srv.handleTabEvents)))
-		mux.Handle("/api/tabs/", requireAuth(http.HandlerFunc(srv.routeTabByID)))
+		mux.Handle("/ws", requireAuth(http.HandlerFunc(s.handleGatewayWebsocket)))
+		mux.Handle("/vnc", requireAuth(http.HandlerFunc(s.handleVNCWebsocket)))
+		mux.Handle("/api/projects", requireAuth(http.HandlerFunc(s.handleListProjects)))
+		mux.Handle("/api/tabs", requireAuth(http.HandlerFunc(s.handleTabs)))
+		mux.Handle("/api/tabs/reorder", requireAuth(http.HandlerFunc(s.handleTabsReorder)))
+		mux.Handle("/api/tabs/events", requireAuth(http.HandlerFunc(s.handleTabEvents)))
+		mux.Handle("/api/tabs/", requireAuth(http.HandlerFunc(s.routeTabByID)))
 	} else {
 		// Session handlers (extracted) - no auth
-		mux.Handle("/session/logs", srv.appMetrics.InstrumentHandler("session_logs", handlers_session.NewSessionLogsHandler(srv.store, srv)))
+		mux.Handle("/session/logs", s.appMetrics.InstrumentHandler("session_logs", handlers_session.NewSessionLogsHandler(s.store, s)))
 
 		// Gateway WebSocket endpoints (terminal and VNC)
-		mux.Handle("/ws", srv.appMetrics.InstrumentHandler("ws", http.HandlerFunc(srv.handleGatewayWebsocket)))
-		mux.Handle("/vnc", srv.appMetrics.InstrumentHandler("vnc", http.HandlerFunc(srv.handleVNCWebsocket)))
-		mux.Handle("/api/projects", http.HandlerFunc(srv.handleListProjects))
-		mux.Handle("/api/tabs", http.HandlerFunc(srv.handleTabs))
-		mux.Handle("/api/tabs/reorder", http.HandlerFunc(srv.handleTabsReorder))
-		mux.Handle("/api/tabs/events", http.HandlerFunc(srv.handleTabEvents))
-		mux.Handle("/api/tabs/", http.HandlerFunc(srv.routeTabByID))
+		mux.Handle("/ws", s.appMetrics.InstrumentHandler("ws", http.HandlerFunc(s.handleGatewayWebsocket)))
+		mux.Handle("/vnc", s.appMetrics.InstrumentHandler("vnc", http.HandlerFunc(s.handleVNCWebsocket)))
+		mux.Handle("/api/projects", http.HandlerFunc(s.handleListProjects))
+		mux.Handle("/api/tabs", http.HandlerFunc(s.handleTabs))
+		mux.Handle("/api/tabs/reorder", http.HandlerFunc(s.handleTabsReorder))
+		mux.Handle("/api/tabs/events", http.HandlerFunc(s.handleTabEvents))
+		mux.Handle("/api/tabs/", http.HandlerFunc(s.routeTabByID))
 	}
 	// Static files are always public (React handles auth state)
-	mux.Handle("/", srv.appMetrics.InstrumentHandler("static", srv.staticHandler()))
+	mux.Handle("/", s.appMetrics.InstrumentHandler("static", s.staticHandler()))
 
 	// Apply middlewares: auth warning (adds X-Auth-Warning header when auth disabled), then logging
-	handler := sharedserver.AuthWarningMiddleware(cfg.AuthMode)(mux)
+	handler := sharedserver.AuthWarningMiddleware(s.cfg.AuthMode)(mux)
 	handler = sharedserver.LoggingMiddleware(handler)
-
-	httpSrv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: handler,
-	}
-
-	// Start graceful shutdown handler in background
-	go sharedserver.GracefulShutdown(httpSrv)
-
-	log.WithFields(log.Fields{
-		"port": cfg.Port,
-	}).Info("gateway/main: KubeTTY Gateway listening")
-	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.WithFields(log.Fields{
-			"error": err.Error(),
-			"port":  cfg.Port,
-		}).Fatal("gateway/main: server exited unexpectedly")
-	}
+	return handler
 }
 
 type server struct {
@@ -964,6 +980,12 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err != nil {
+			// Unknown/unregistered project is a client error, not a server fault
+			var unknownErr *manager.UnknownProjectError
+			if errors.As(err, &unknownErr) {
+				apierrors.WriteError(w, apierrors.NotFound("project not found", ""))
+				return
+			}
 			// Check if error is due to tab limit exceeded
 			var limitErr *manager.TabLimitExceededError
 			if errors.As(err, &limitErr) {
@@ -1212,15 +1234,16 @@ func (s *server) handleTabHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Copy status code
-	w.WriteHeader(resp.StatusCode)
-
-	// Copy response headers
+	// Copy response headers. This must happen before WriteHeader: headers
+	// added after the status line is written are silently dropped.
 	for k, v := range resp.Header {
 		for _, vv := range v {
 			w.Header().Add(k, vv)
 		}
 	}
+
+	// Copy status code
+	w.WriteHeader(resp.StatusCode)
 
 	// Copy response body
 	if _, err := io.Copy(w, resp.Body); err != nil {
@@ -1455,10 +1478,13 @@ func (s *server) sendTabEvent(clientID string, payload any) {
 	if err != nil {
 		return
 	}
+	// Hold the lock while iterating and sending: the inner map is mutated by
+	// subscribe/unsubscribe, and unsubscribe closes the channel, so iterating
+	// or sending without the lock races (concurrent map access / send on closed
+	// channel). Sends are non-blocking, so holding the lock is cheap.
 	s.tabSubsMu.Lock()
-	subs := s.tabSubs[clientID]
-	s.tabSubsMu.Unlock()
-	for ch := range subs {
+	defer s.tabSubsMu.Unlock()
+	for ch := range s.tabSubs[clientID] {
 		select {
 		case ch <- data:
 		default:

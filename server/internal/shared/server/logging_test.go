@@ -637,3 +637,39 @@ func TestLoggingMiddleware_SpecialCharactersInPath(t *testing.T) {
 		})
 	}
 }
+
+// TestLoggingMiddleware_SupportsFlush verifies streaming handlers (SSE) can
+// flush through the middleware's ResponseWriter wrapper.
+func TestLoggingMiddleware_SupportsFlush(t *testing.T) {
+	var flushOK bool
+	handler := LoggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var f http.Flusher
+		f, flushOK = w.(http.Flusher)
+		if flushOK {
+			_, _ = w.Write([]byte("data: x\n\n"))
+			f.Flush()
+		}
+	}))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/events", nil))
+
+	if !flushOK {
+		t.Fatal("ResponseWriter passed to handler does not implement http.Flusher")
+	}
+	if !rec.Flushed {
+		t.Fatal("Flush was not delegated to the underlying writer")
+	}
+}
+
+// TestLoggingMiddleware_Unwrap verifies http.ResponseController can reach the
+// underlying writer.
+func TestLoggingMiddleware_Unwrap(t *testing.T) {
+	inner := httptest.NewRecorder()
+	lrw := &loggingResponseWriter{ResponseWriter: inner}
+	if lrw.Unwrap() != inner {
+		t.Fatal("Unwrap must return the underlying writer")
+	}
+	// Flush on a writer without Flusher support must not panic.
+	(&loggingResponseWriter{ResponseWriter: struct{ http.ResponseWriter }{inner}}).Flush()
+}

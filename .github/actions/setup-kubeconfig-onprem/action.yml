@@ -35,47 +35,37 @@ description: >
 # this back to the Rancher kubeconfig: it would swap a 1-hour keyless SA token for a
 # long-lived Rancher API token on production deploy paths.
 #
-# WHY THE RAW IP, DESPITE a1-ops-prd.support.tools EXISTING
+# WHY kubernetes.default.svc (TaskForge taskforge-2664 / taskforge-2665, 2026-10-01)
 #
-# The DNS name looks like the obviously better choice — 96.90.99.201 is a RESIDENTIAL
-# address that can change, and the name is in the apiserver certificate's SANs. It does
-# not work, and it fails in the worst way: it hangs.
+# This used to be https://96.90.99.201:6443, a Comcast business static. Comcast stopped
+# routing the whole 96.90.99.192/28 on 2026-10-01 (cluster-services
+# docs/wan-comcast-28-cutover-2026-09-30.md), and inbound traffic to it had already
+# broken at ~20:50 CDT on 09-30 when Surf became the colo default route. From then on
+# every Deploy-to-Dev failed here with "authenticated as '<none>'" — a hang on the
+# whoami probe, not a credential problem.
 #
-#   from the house    a1-ops-prd.support.tools -> 96.90.99.201        (origin)
-#   from DFW/public   a1-ops-prd.support.tools -> 104.26.10.107, ...  (Cloudflare edge)
+# The runners are INSIDE a1-ops-prd again: every registered SupportTools runner is a pod
+# of the `self-hosted-linux` AutoscalingRunnerSet in arc-runners-supporttools on
+# a1-ops-prd. Going out through a public IP to reach the cluster the job is already in
+# was a detour, and it is the detour that broke. The in-cluster Service is the direct
+# path, it is HA across the three control-plane nodes, and it is in the apiserver
+# certificate's SANs (kubernetes.default.svc, kubernetes.default.svc.a1-ops-prd.local).
 #
-# The record is Cloudflare-PROXIED (orange cloud). Cloudflare only proxies HTTP(S) on its
-# standard ports, so a connection to :6443 through the edge is black-holed:
+#   measured from a pod in arc-runners-supporttools, 2026-10-01, committed CA:
+#     https://kubernetes.default.svc:443/version   401 (anonymous), ssl_verify=0, 18ms
+#     https://96.90.99.201:6443/version            connect failed after 5s
 #
-#   measured from inside stackeye-ci-dfw01, 2026-08-15
-#     https://a1-ops-prd.support.tools:6443   HTTP 000 after 20.0s
-#     https://96.90.99.201:6443               HTTP 401 in 0.15s
+# The old objection to kubernetes.default.svc was that it resolves to whatever cluster
+# the RUNNER is in (see WHY THIS EXISTS). That no longer fails silently: the CA is the
+# committed a1-ops-prd CA, never the projected one, so the same name on any other
+# cluster fails TLS verification, and the whoami check below then refuses to continue.
+# If runners move out of a1-ops-prd again, this default must change with them — the
+# failure will be loud, at this step.
 #
-# harbor.support.tools works from DFW for exactly the opposite reason — it is DNS-only
-# (grey cloud) and resolves to the origin everywhere.
-#
-# DO NOT "FIX" THIS BY GREY-CLOUDING a1-ops-prd.support.tools.
-#
-# It is a PROXIED CNAME to a1-ops-prd-origin.support.tools and it is the shared ingress
-# for the whole cluster: 56 records CNAME through it, including vault, argocd, grafana,
-# longhorn and alertmanager (checked against the Cloudflare API, 2026-08-15). Turning it
-# grey would strip Cloudflare's WAF and DDoS protection from every one of them — Vault
-# included — to save one line of config here. That trade is not close.
-#
-# The clean fix is a NEW grey-clouded A record (harbor.support.tools is the existing
-# precedent: DNS-only, 96.90.99.201, reachable from DFW) PLUS that name added to the
-# apiserver's tls-san so the certificate covers it. The cert's SANs today are
-# kubernetes[.default[.svc]], a1-ops-prd.support.tools, localhost, a1ubmgmtp02 and a
-# fixed IP list, so a new name without a cert re-issue fails TLS instead of hanging.
-# That is a coordinated RKE2 change with an apiserver restart — worth doing, not worth
-# doing in the middle of a CI migration.
-#
-# Until then this is an IP. The IP is in the cert's SANs, so TLS is valid. If the
-# residential address changes, this default is the one line to edit per repo.
-#
-# Verify from DFW, never from a workstation: the house sees a different answer than CI
-# does, which is what made this look fine right up until it did not.
-#
+# Do NOT point this at a1-ops-prd.support.tools. That name is in the SANs, but inside the
+# site PowerDNS now answers 172.28.58.8 (the ingress-nginx MetalLB VIP, which does not
+# serve 6443), and publicly it is a proxied Cloudflare record, which black-holes :6443.
+
 # WHY THE CA IS COMMITTED, NOT IN VAULT
 #
 # It is a public certificate, not a secret, and it is the trust anchor for production
@@ -123,9 +113,9 @@ inputs:
     required: false
     default: 'system:serviceaccount:arc-runners-supporttools:kubetty-ci-deployer'
   server:
-    description: 'API server URL. An IP on purpose — see WHY THE RAW IP in the header.'
+    description: 'API server URL. The in-cluster Service on purpose — see WHY kubernetes.default.svc in the header.'
     required: false
-    default: 'https://96.90.99.201:6443'
+    default: 'https://kubernetes.default.svc:443'
   namespace:
     description: 'Default namespace for the kubeconfig context (the deploy target).'
     required: true

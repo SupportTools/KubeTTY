@@ -524,8 +524,12 @@ jobs:
           ACTIVE_REPLICA_SET=""
           for row in "${READY_PODS[@]}"; do
             IFS=$'\t' read -r pod replica_set image_id <<<"$row"
-            if [[ "$image_id" != *@"$RUNTIME_IMAGE_DIGEST" ]]; then
-              echo "ERROR: Pod '$pod' runtime imageID '$image_id' does not match '$RUNTIME_IMAGE_DIGEST'"
+            # containerd reports imageID as the digest the image was pulled by.
+            # The chart pins the multi-arch index digest, so a correct pod reports
+            # IMAGE_DIGEST; a node that resolved the platform manifest reports
+            # RUNTIME_IMAGE_DIGEST. Both identify this build; anything else does not.
+            if [[ "$image_id" != *@"$IMAGE_DIGEST" && "$image_id" != *@"$RUNTIME_IMAGE_DIGEST" ]]; then
+              echo "ERROR: Pod '$pod' runtime imageID '$image_id' matches neither index digest '$IMAGE_DIGEST' nor linux/amd64 digest '$RUNTIME_IMAGE_DIGEST'"
               exit 1
             fi
             ACTIVE_REPLICA_SET="$replica_set"

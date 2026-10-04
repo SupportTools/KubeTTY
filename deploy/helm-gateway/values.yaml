@@ -11,6 +11,10 @@ image:
   digest: ""
   pullPolicy: Always
 
+# Optional Deployment progressDeadlineSeconds. Unset keeps the Kubernetes
+# default (600s). Production raises it because the image pull is slow.
+progressDeadlineSeconds: null
+
 # Image pull secrets for private registries
 imagePullSecrets:
   - harbor-supporttools

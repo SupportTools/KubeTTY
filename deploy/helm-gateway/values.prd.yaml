@@ -11,7 +11,15 @@
 image:
   repository: harbor.support.tools/kubetty/kubetty
   tag: "v1.1.6"
-  pullPolicy: Always
+  # CI deploys by digest (repo@sha256:...), so the reference is immutable and
+  # a node that already holds those layers never needs to re-pull the ~2.7 GB
+  # image (taskforge-2682).
+  pullPolicy: IfNotPresent
+
+# The cold pull of the runtime image takes ~8 min; Kubernetes' default 600s
+# progress deadline leaves almost no headroom. Keep >= the pipeline's
+# DEPLOY_TIMEOUT (15m) so `kubectl rollout status` does not fail first.
+progressDeadlineSeconds: 1200
 
 imagePullSecrets:
   - harbor-supporttools

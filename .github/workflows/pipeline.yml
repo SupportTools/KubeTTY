@@ -350,6 +350,14 @@ jobs:
     permissions:
       contents: read
       id-token: write          # GitHub OIDC -> Vault (keyless, namespace-scoped K8s token)
+    # The runtime image is ~2.7 GB and a cold pull on an a1-ops-prd node takes
+    # ~8 minutes (taskforge-2682). Every wait in this job that can span an image
+    # pull uses DEPLOY_TIMEOUT, sized well above the measured cold pull, so a
+    # slow-but-healthy rollout is not reported as a failure and rolled back.
+    # Keep the chart's progressDeadlineSeconds (values.prd.yaml) >= this.
+    timeout-minutes: 60
+    env:
+      DEPLOY_TIMEOUT: 15m
     concurrency:
       group: deploy-production
       cancel-in-progress: false
@@ -466,7 +474,7 @@ jobs:
             --set-string image.tag="${IMAGE_TAG}" \
             --set-string image.digest="${IMAGE_DIGEST}" \
             --wait \
-            --timeout=5m \
+            --timeout="${DEPLOY_TIMEOUT}" \
             --history-max=20 \
             --atomic
 
@@ -481,7 +489,7 @@ jobs:
           set -euo pipefail
           kubectl rollout status deployment/gateway \
             -n kubetty-gateway-prd \
-            --timeout=300s
+            --timeout="${DEPLOY_TIMEOUT}"
 
           kubectl wait --for=condition=ready pod \
             -l app.kubernetes.io/name=kubetty-gateway \
@@ -558,9 +566,26 @@ jobs:
         run: |
           set -euo pipefail
           echo "❌ PRODUCTION DEPLOYMENT FAILED ❌"
+
+          # A rollback while the new pod is still pulling the image cannot help:
+          # it replaces a healthy-but-slow rollout with another one that also
+          # times out (taskforge-2682). If any gateway pod is still in
+          # ContainerCreating/PodInitializing (no pull error), leave the rollout
+          # alone; the job stays red so a human looks at it.
+          PULLING=$(kubectl get pods -n kubetty-gateway-prd \
+            -l app.kubernetes.io/name=kubetty-gateway -o json \
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null) | .status.containerStatuses[]?.state.waiting.reason // empty | select(. == "ContainerCreating" or . == "PodInitializing")] | length') \
+            || PULLING=0
+          if [[ "${PULLING:-0}" -gt 0 ]]; then
+            echo "::warning::${PULLING} gateway pod(s) still ContainerCreating (image pull in progress); skipping automatic rollback"
+            kubectl get pods -n kubetty-gateway-prd -l app.kubernetes.io/name=kubetty-gateway -o wide || true
+            exit 0
+          fi
+
           echo "Attempting automatic rollback to revision ${{ steps.deploy.outputs.current-revision }}..."
 
-          helm rollback kubetty-gateway ${{ steps.deploy.outputs.current-revision }} -n kubetty-gateway-prd --wait
+          helm rollback kubetty-gateway ${{ steps.deploy.outputs.current-revision }} -n kubetty-gateway-prd \
+            --wait --timeout="${DEPLOY_TIMEOUT}"
 
           if [[ -n "$PREVIOUS_IMAGE" ]]; then
             ROLLED_BACK_IMAGE=$(kubectl get deployment gateway -n kubetty-gateway-prd \

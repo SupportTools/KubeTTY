@@ -15,6 +15,9 @@ metadata:
     {{- include "kubetty-gateway.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  {{- with .Values.progressDeadlineSeconds }}
+  progressDeadlineSeconds: {{ . }}
+  {{- end }}
   strategy:
     type: RollingUpdate
   selector:

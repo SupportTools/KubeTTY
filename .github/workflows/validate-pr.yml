@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 env:
-  NODE_VERSION: '20'
+  NODE_VERSION: '22' # runner image bakes Node 22; setup-node resolves it from the toolcache (no job-time download)
   COVERAGE_THRESHOLD: 35
 
 jobs:

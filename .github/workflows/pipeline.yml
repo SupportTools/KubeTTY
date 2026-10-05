@@ -14,7 +14,7 @@ on:
 env:
   REGISTRY: harbor.support.tools
   IMAGE_NAME: kubetty/kubetty
-  NODE_VERSION: '20'
+  NODE_VERSION: '22' # runner image bakes Node 22; setup-node resolves it from the toolcache (no job-time download)
 
 jobs:
   # Stage 1: Validation

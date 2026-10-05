@@ -25,11 +25,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: server/go.mod
-          cache: false
+      # No actions/setup-go: the self-hosted runner image (runner:v21.1-arc2+)
+      # bakes Go at /usr/local/go (1.26.x, GOTOOLCHAIN=local), which satisfies
+      # server/go.mod's `go 1.24.0` floor. setup-go with any version spec missed
+      # the runner tool cache and downloaded a Go tarball at job time
+      # (taskforge-2849). No download fallback: fail loudly on a runner defect.
+      - name: Verify baked Go
+        run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner. It must be pre-baked into the runner image - there is deliberately no download fallback. Fix the runner image."; exit 1; }
+          go version
+          go env GOROOT GOTOOLCHAIN GOCACHE GOMODCACHE
 
       - name: Check Go formatting
         working-directory: server
@@ -83,11 +89,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: server/go.mod
-          cache: false
+      # No actions/setup-go: the self-hosted runner image (runner:v21.1-arc2+)
+      # bakes Go at /usr/local/go (1.26.x, GOTOOLCHAIN=local), which satisfies
+      # server/go.mod's `go 1.24.0` floor. setup-go with any version spec missed
+      # the runner tool cache and downloaded a Go tarball at job time
+      # (taskforge-2849). No download fallback: fail loudly on a runner defect.
+      - name: Verify baked Go
+        run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner. It must be pre-baked into the runner image - there is deliberately no download fallback. Fix the runner image."; exit 1; }
+          go version
+          go env GOROOT GOTOOLCHAIN GOCACHE GOMODCACHE
 
       - name: Run server tests
         working-directory: server
@@ -130,11 +142,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: server/go.mod
-          cache: false
+      # No actions/setup-go: the self-hosted runner image (runner:v21.1-arc2+)
+      # bakes Go at /usr/local/go (1.26.x, GOTOOLCHAIN=local), which satisfies
+      # server/go.mod's `go 1.24.0` floor. setup-go with any version spec missed
+      # the runner tool cache and downloaded a Go tarball at job time
+      # (taskforge-2849). No download fallback: fail loudly on a runner defect.
+      - name: Verify baked Go
+        run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner. It must be pre-baked into the runner image - there is deliberately no download fallback. Fix the runner image."; exit 1; }
+          go version
+          go env GOROOT GOTOOLCHAIN GOCACHE GOMODCACHE
 
       - name: Initialize test database
         run: |

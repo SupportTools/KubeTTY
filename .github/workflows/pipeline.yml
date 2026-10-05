@@ -14,7 +14,6 @@ on:
 env:
   REGISTRY: harbor.support.tools
   IMAGE_NAME: kubetty/kubetty
-  GO_VERSION: '1.24'
   NODE_VERSION: '20'
 
 jobs:
@@ -29,16 +28,17 @@ jobs:
       - name: Test cross-cluster kubeconfig validation
         run: bash .github/actions/setup-kubeconfig-onprem/security-validation.test.sh
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
-
-      - name: Verify Go version
+      # No actions/setup-go: the self-hosted runner image (runner:v21.1-arc2+)
+      # bakes Go at /usr/local/go (1.26.x, GOTOOLCHAIN=local), which satisfies
+      # server/go.mod's `go 1.24.0` floor. setup-go with any version spec missed
+      # the runner tool cache and downloaded a Go tarball at job time
+      # (taskforge-2849). No download fallback: fail loudly on a runner defect.
+      - name: Verify baked Go
         run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner. It must be pre-baked into the runner image - there is deliberately no download fallback. Fix the runner image."; exit 1; }
           go version
-          go version | grep -q "go1.24" || (echo "ERROR: Must use Go 1.24.x" && exit 1)
+          go env GOROOT GOTOOLCHAIN GOCACHE GOMODCACHE
 
       - name: Check Go formatting
         working-directory: server
@@ -79,11 +79,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
+      # No actions/setup-go: the self-hosted runner image (runner:v21.1-arc2+)
+      # bakes Go at /usr/local/go (1.26.x, GOTOOLCHAIN=local), which satisfies
+      # server/go.mod's `go 1.24.0` floor. setup-go with any version spec missed
+      # the runner tool cache and downloaded a Go tarball at job time
+      # (taskforge-2849). No download fallback: fail loudly on a runner defect.
+      - name: Verify baked Go
+        run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner. It must be pre-baked into the runner image - there is deliberately no download fallback. Fix the runner image."; exit 1; }
+          go version
+          go env GOROOT GOTOOLCHAIN GOCACHE GOMODCACHE
 
       - name: Run server tests
         working-directory: server
@@ -286,6 +292,10 @@ jobs:
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image-digest }}
           fail-build: false
           severity-cutoff: high
+          # Pin to the grype release baked into runner:v21.1-arc2+ so the action
+          # hits the baked copy instead of downloading grype at job time
+          # (taskforge-2849). Bump together with the runner image.
+          grype-version: v0.117.0
 
   # Stage 5: Helm Chart Validation
   helm-validate:

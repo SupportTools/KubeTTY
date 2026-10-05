@@ -41,7 +41,7 @@ func TestWriteJSON_Success(t *testing.T) {
 			name:           "nil payload",
 			payload:        nil,
 			status:         http.StatusNoContent,
-			expectedBody:   "null\n",
+			expectedBody:   "", // 204 carries no body
 			expectedStatus: http.StatusNoContent,
 		},
 	}

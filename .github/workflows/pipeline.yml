@@ -501,8 +501,19 @@ jobs:
             -n kubetty-gateway-prd \
             --timeout="${DEPLOY_TIMEOUT}"
 
-          kubectl wait --for=condition=ready pod \
-            -l app.kubernetes.io/name=kubetty-gateway \
+          # Wait only on pods that are not being deleted. Right after the
+          # rollout the old ReplicaSet's pod is still Terminating; a label-
+          # selector wait picks it up, blocks on it until it is gone, and then
+          # times out the whole step (2026-10-05 run 37257107122 rolled back a
+          # healthy deploy this way). cluster-services-1008.
+          mapfile -t LIVE_PODS < <(kubectl get pods -n kubetty-gateway-prd \
+            -l app.kubernetes.io/name=kubetty-gateway -o json \
+            | jq -r '.items[] | select(.metadata.deletionTimestamp == null) | "pod/" + .metadata.name')
+          if [[ "${#LIVE_PODS[@]}" -eq 0 ]]; then
+            echo "ERROR: no non-terminating gateway pods after rollout"
+            exit 1
+          fi
+          kubectl wait --for=condition=ready "${LIVE_PODS[@]}" \
             -n kubetty-gateway-prd \
             --timeout=300s
 

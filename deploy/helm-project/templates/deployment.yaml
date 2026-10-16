@@ -107,7 +107,7 @@ spec:
       containers:
         {{- if .Values.pipelines.dind.enabled }}
         - name: docker
-          image: docker:24.0.5-dind
+          image: docker:29.9.1-dind
           securityContext:
             privileged: true
           env:
@@ -115,7 +115,6 @@ spec:
               value: ""
           args:
             - --host=unix:///var/run/docker/docker.sock
-            - --host=tcp://0.0.0.0:2375
           volumeMounts:
             - name: data
               mountPath: /var/lib/docker

@@ -877,13 +877,41 @@ func (c *Controller) ResyncProject(ctx context.Context, p *projects.Project) err
 	return nil
 }
 
-// RestartProject triggers a restart of the project deployment.
+// RestartProject restarts the project's pod with a Deployment rebuilt from the
+// project's current database record.
+//
+// The Deployment spec is regenerated with BuildDeployment, so any change saved
+// to the DB since the last rollout (cpu_limit, memory, image tag, DinD sidecar
+// settings, ...) takes effect on this restart. Before cluster-services-1008 a
+// restart only bumped the restartedAt annotation and reused the stale pod
+// template, so DB-side resource changes never reached a running workspace.
+//
+// The restartedAt annotation is still set, so the rollout happens even when the
+// rebuilt spec is identical to the live one. Replicas follow the project's
+// paused flag (0 when paused, 1 otherwise), matching BuildDeployment and
+// ScaleProject.
 func (c *Controller) RestartProject(ctx context.Context, p *projects.Project) error {
 	logger := log.WithField("project", p.Name)
-	logger.Info("Restarting project")
+	logger.Info("Restarting project (rebuilding deployment from database)")
+
+	// BuildDeployment uses resource.MustParse; reject a malformed DB value with
+	// an error instead of panicking the gateway.
+	if err := validateProjectResources(p); err != nil {
+		return fmt.Errorf("cannot rebuild deployment: %w", err)
+	}
 
 	cfg := c.cfg.ResourceConfig
 	resourceName := cfg.ResourceName(p.Name)
+	desired := BuildDeployment(p, cfg, cfg.EnvSecretName(p.Name))
+	replicas := int32(1)
+	if p.Paused {
+		replicas = 0
+	}
+	desired.Spec.Replicas = &replicas
+	if desired.Spec.Template.Annotations == nil {
+		desired.Spec.Template.Annotations = map[string]string{}
+	}
+	desired.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
 
 	// Retry loop for handling optimistic concurrency conflicts
 	const maxRetries = 5
@@ -895,15 +923,20 @@ func (c *Controller) RestartProject(ctx context.Context, p *projects.Project) er
 			return fmt.Errorf("failed to get deployment: %w", err)
 		}
 
-		// Add/update restart annotation
-		if deploy.Spec.Template.Annotations == nil {
-			deploy.Spec.Template.Annotations = map[string]string{}
-		}
-		deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
+		// Replace the spec with the one rebuilt from the DB. Selector is
+		// immutable and derived from the project name, so it is unchanged.
+		deploy.Spec = *desired.Spec.DeepCopy()
 
 		// Update deployment
 		_, err = c.clientset.AppsV1().Deployments(cfg.Namespace).Update(ctx, deploy, metav1.UpdateOptions{})
 		if err == nil {
+			logger.WithFields(logrus.Fields{
+				"cpu_request":    p.CPURequest,
+				"cpu_limit":      p.CPULimit,
+				"memory_request": p.MemoryRequest,
+				"memory_limit":   p.MemoryLimit,
+				"image_tag":      p.ImageTag,
+			}).Info("Deployment rebuilt from database for restart")
 			// Set status to creating to wait for rollout
 			return c.store.SetStatus(ctx, p.ID, projects.StatusCreating, "Restarting deployment")
 		}
@@ -921,6 +954,22 @@ func (c *Controller) RestartProject(ctx context.Context, p *projects.Project) er
 
 	// Exhausted retries
 	return fmt.Errorf("failed to restart deployment after %d retries: %w", maxRetries, lastErr)
+}
+
+// validateProjectResources checks that the project's resource quantities parse,
+// so BuildDeployment (which uses resource.MustParse) cannot panic on them.
+func validateProjectResources(p *projects.Project) error {
+	for field, value := range map[string]string{
+		"cpu_request":    p.CPURequest,
+		"cpu_limit":      p.CPULimit,
+		"memory_request": p.MemoryRequest,
+		"memory_limit":   p.MemoryLimit,
+	} {
+		if _, err := resource.ParseQuantity(value); err != nil {
+			return fmt.Errorf("invalid %s %q: %w", field, value, err)
+		}
+	}
+	return nil
 }
 
 // ScaleProject scales a project's deployment to the specified number of replicas.

@@ -419,6 +419,10 @@ func BuildNetworkPolicy(p *projects.Project, cfg ResourceConfig, gatewayNamespac
 	}
 }
 
+// DinDImage is the Docker-in-Docker sidecar image for projects with DinD
+// enabled. Bumped from docker:24.0.5-dind (EOL) in cluster-services-1008.
+const DinDImage = "docker:29.9.1-dind"
+
 // BuildDeployment creates a Deployment for the project pod.
 // Name format: {prefix}{project-name}
 func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName string) *appsv1.Deployment {
@@ -463,16 +467,19 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 		privileged := true
 		containers = append(containers, corev1.Container{
 			Name:  "docker",
-			Image: "docker:24.0.5-dind",
+			Image: DinDImage,
 			SecurityContext: &corev1.SecurityContext{
 				Privileged: &privileged,
 			},
 			Env: []corev1.EnvVar{
 				{Name: "DOCKER_TLS_CERTDIR", Value: ""},
 			},
+			// Unix socket only. The former --host=tcp://0.0.0.0:2375 listener
+			// had no TLS and no auth, and nothing used it: the kubetty container
+			// talks to dockerd through the shared dind-sock socket
+			// (DOCKER_HOST=unix:///var/run/docker/docker.sock). cluster-services-1008.
 			Args: []string{
 				"--host=unix:///var/run/docker/docker.sock",
-				"--host=tcp://0.0.0.0:2375",
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: "data", MountPath: "/var/lib/docker", SubPath: "var-lib-docker"},

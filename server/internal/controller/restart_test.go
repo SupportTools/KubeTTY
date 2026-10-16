@@ -180,8 +180,30 @@ func TestBuildDeployment_DinDSidecarHardening(t *testing.T) {
 			t.Errorf("docker sidecar still has a TCP listener: %q", a)
 		}
 	}
-	if len(docker.Args) != 1 || docker.Args[0] != "--host=unix:///var/run/docker/docker.sock" {
-		t.Errorf("args = %v, want only the unix socket", docker.Args)
+	// "dockerd" first, or the image entrypoint prepends its own default
+	// --host=tcp://0.0.0.0:2375 when DOCKER_TLS_CERTDIR is empty.
+	if len(docker.Args) == 0 || docker.Args[0] != "dockerd" {
+		t.Errorf("args = %v, want \"dockerd\" first so the entrypoint adds no default TCP host", docker.Args)
+	}
+	hosts := 0
+	group := ""
+	for _, a := range docker.Args {
+		if strings.HasPrefix(a, "--host=") {
+			hosts++
+			if a != "--host=unix:///var/run/docker/docker.sock" {
+				t.Errorf("unexpected host arg %q", a)
+			}
+		}
+		if strings.HasPrefix(a, "--group=") {
+			group = strings.TrimPrefix(a, "--group=")
+		}
+	}
+	if hosts != 1 {
+		t.Errorf("args = %v, want exactly the unix socket host", docker.Args)
+	}
+	// The kubetty user reaches the socket via supplemental group 0.
+	if group != "root" {
+		t.Errorf("socket group = %q, want root (docker group gid 2375 locks the kubetty user out)", group)
 	}
 	for _, port := range docker.Ports {
 		if port.ContainerPort == 2375 {

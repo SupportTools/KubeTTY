@@ -114,7 +114,9 @@ spec:
             - name: DOCKER_TLS_CERTDIR
               value: ""
           args:
+            - dockerd
             - --host=unix:///var/run/docker/docker.sock
+            - --group=root
           volumeMounts:
             - name: data
               mountPath: /var/lib/docker

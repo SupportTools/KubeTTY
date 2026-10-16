@@ -474,12 +474,24 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 			Env: []corev1.EnvVar{
 				{Name: "DOCKER_TLS_CERTDIR", Value: ""},
 			},
-			// Unix socket only. The former --host=tcp://0.0.0.0:2375 listener
-			// had no TLS and no auth, and nothing used it: the kubetty container
+			// Unix socket only (cluster-services-1008). The kubetty container
 			// talks to dockerd through the shared dind-sock socket
-			// (DOCKER_HOST=unix:///var/run/docker/docker.sock). cluster-services-1008.
+			// (DOCKER_HOST=unix:///var/run/docker/docker.sock); nothing used TCP.
+			//
+			// The first arg must be "dockerd": when the args start with "--",
+			// the image's dockerd-entrypoint.sh prepends its defaults, which
+			// with DOCKER_TLS_CERTDIR="" include an unauthenticated
+			// --host=tcp://0.0.0.0:2375 listener.
+			//
+			// --group=root: docker:25+ images ship a "docker" group (gid 2375)
+			// and dockerd gives the socket to it by default (0660), which locks
+			// out the kubetty user. That user reaches the socket through
+			// supplemental group 0, as it did with docker:24 (no docker group,
+			// so the socket fell back to root).
 			Args: []string{
+				"dockerd",
 				"--host=unix:///var/run/docker/docker.sock",
+				"--group=root",
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: "data", MountPath: "/var/lib/docker", SubPath: "var-lib-docker"},

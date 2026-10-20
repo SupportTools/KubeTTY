@@ -687,7 +687,7 @@ fi
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: projectSelectorLabels(p, cfg),
+					Labels: projectPodLabels(p, cfg),
 					Annotations: map[string]string{
 						"prometheus.io/scrape": "true",
 						"prometheus.io/path":   "/metrics",
@@ -700,10 +700,11 @@ fi
 					SecurityContext: &corev1.PodSecurityContext{
 						SupplementalGroups: []int64{0},
 					},
-					ImagePullSecrets: buildImagePullSecrets(cfg.ImagePullSecrets),
-					InitContainers:   initContainers,
-					Containers:       containers,
-					Volumes:          volumes,
+					ImagePullSecrets:          buildImagePullSecrets(cfg.ImagePullSecrets),
+					InitContainers:            initContainers,
+					Containers:                containers,
+					Volumes:                   volumes,
+					TopologySpreadConstraints: projectTopologySpreadConstraints(cfg),
 				},
 			},
 		},
@@ -865,6 +866,37 @@ func projectLabels(p *projects.Project, cfg ResourceConfig) map[string]string {
 		labelComponent:   "project",
 		labelEnvironment: cfg.Env,
 		labelProject:     p.Name,
+	}
+}
+
+// projectPodLabels returns the labels set on project pods: the selector labels
+// plus the component and environment labels that projectTopologySpreadConstraints
+// selects on. The extra labels stay out of the Deployment selector, which is
+// immutable on existing Deployments.
+func projectPodLabels(p *projects.Project, cfg ResourceConfig) map[string]string {
+	labels := projectSelectorLabels(p, cfg)
+	labels[labelComponent] = "project"
+	labels[labelEnvironment] = cfg.Env
+	return labels
+}
+
+// projectTopologySpreadConstraints spreads the project pods of one environment
+// across nodes, so the scheduler stops stacking sandboxes (and their CPU limits)
+// on a single node. ScheduleAnyway makes it a soft preference: it only scores
+// nodes and can never leave a sandbox Pending.
+func projectTopologySpreadConstraints(cfg ResourceConfig) []corev1.TopologySpreadConstraint {
+	return []corev1.TopologySpreadConstraint{
+		{
+			MaxSkew:           1,
+			TopologyKey:       "kubernetes.io/hostname",
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					labelComponent:   "project",
+					labelEnvironment: cfg.Env,
+				},
+			},
+		},
 	}
 }
 

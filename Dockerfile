@@ -131,6 +131,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
+# USN-8944-1: ca-certificates 20260816ubuntu0.22.04.1 drops the compromised eMudhra emSign
+# roots. Upgrade explicitly so a cached layer from an older build cannot keep the old bundle.
+RUN apt-get update && apt-get install -y --only-upgrade --no-install-recommends ca-certificates \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20260816 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install GUI stack components (conditional - only used when GUI_ENABLED=true)
 # - supervisor: Process manager for orchestrating GUI components
 # - xvfb: X Virtual Framebuffer (headless X server)
@@ -294,7 +300,8 @@ RUN curl -fsSL https://github.com/loft-sh/vcluster/releases/latest/download/vclu
     && chmod +x /usr/local/bin/vcluster
 
 # Install python-based helpers for LLM tooling (placeholders for Claude/Codex/Gemini CLIs).
-RUN pip3 install --no-cache-dir anthropic google-generativeai openai
+# certifi >= 2026.10.19 drops the eMudhra emSign roots (USN-8944-1).
+RUN pip3 install --no-cache-dir anthropic google-generativeai openai 'certifi>=2026.10.19'
 
 # Create directory for optional proprietary CLI binaries (installed at runtime).
 RUN mkdir -p /opt/ai/bin && chmod 755 /opt/ai/bin

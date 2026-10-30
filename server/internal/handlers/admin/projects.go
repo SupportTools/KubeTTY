@@ -234,6 +234,11 @@ func (h *ProjectHandlers) GetProject(w http.ResponseWriter, r *http.Request) {
 }
 
 // UpdateProject handles PUT /api/admin/projects/{id}
+//
+// The body may set "applyMode": "now" (default) saves and rolls the pod when
+// the image or a cpu/memory limit or storage size changed; "next_restart" saves
+// to the DB only, leaves the pod running and records the difference as pending
+// changes that the next restart applies (cluster-services-1024).
 func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -266,6 +271,35 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if !req.ApplyMode.IsValid() {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(
+			"applyMode must be one of: now, next_restart", ""))
+		return
+	}
+	deferred := req.ApplyMode == projects.ApplyModeNextRestart
+
+	// "Apply on next restart" (cluster-services-1024) saves to the DB only. A
+	// storage resize cannot wait for a restart: PVC expansion happens only in
+	// the controller's updating pass, which this mode skips, so a restart
+	// would never grow the volume. Refuse it rather than silently drop it.
+	if deferred && req.StorageSize != nil {
+		current, err := h.store.Get(ctx, projectID)
+		if err != nil {
+			if errors.Is(err, projects.ErrProjectNotFound) {
+				_ = apierrors.WriteError(w, apierrors.NotFound("project not found", ""))
+				return
+			}
+			log.WithError(err).Error("admin/projects: failed to get project for update")
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to update project", ""))
+			return
+		}
+		if *req.StorageSize != current.StorageSize {
+			_ = apierrors.WriteError(w, apierrors.BadRequest(
+				"storageSize cannot be changed with applyMode next_restart; save it with applyMode now", ""))
+			return
+		}
+	}
+
 	project, err := h.store.Update(ctx, projectID, req)
 	if err != nil {
 		if errors.Is(err, projects.ErrProjectNotFound) {
@@ -277,8 +311,23 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// If image tag or resources changed, trigger an update
-	if req.ImageTag != nil || req.CPULimit != nil || req.MemoryLimit != nil || req.StorageSize != nil {
+	switch {
+	case deferred:
+		// Do not set status=updating: the running pod is left alone. Refresh
+		// the drift record now so the admin UI shows the pending changes
+		// without waiting for the periodic check. CheckProjectDrift only reads
+		// the Deployment; it never rolls the pod.
+		if h.controller != nil && project.Status == projects.StatusRunning {
+			changes, err := h.controller.CheckProjectDrift(ctx, project)
+			if err != nil {
+				log.WithError(err).WithField("project", project.Name).
+					Warn("admin/projects: drift check after deferred update failed; the periodic check will retry")
+			} else {
+				project.PendingChanges = changes
+			}
+		}
+	case req.ImageTag != nil || req.CPULimit != nil || req.MemoryLimit != nil || req.StorageSize != nil:
+		// If image tag or resources changed, trigger an update (rolls the pod)
 		if err := h.store.SetStatus(ctx, projectID, projects.StatusUpdating, "Applying configuration changes"); err != nil {
 			log.WithError(err).Warn("admin/projects: failed to set updating status")
 		}
@@ -287,9 +336,18 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 	log.WithFields(log.Fields{
 		"project_id":   project.ID.String(),
 		"project_name": project.Name,
+		"apply_mode":   applyModeLabel(req.ApplyMode),
 	}).Info("admin/projects: project updated")
 
 	_ = util.WriteJSON(w, http.StatusOK, project)
+}
+
+// applyModeLabel names the apply mode for logs; the empty mode is "now".
+func applyModeLabel(m projects.ApplyMode) string {
+	if m == "" {
+		return string(projects.ApplyModeNow)
+	}
+	return string(m)
 }
 
 // DeleteProject handles DELETE /api/admin/projects/{id}

@@ -120,6 +120,47 @@ type Project struct {
 	CreatedAt time.Time  `json:"createdAt"`
 	UpdatedAt time.Time  `json:"updatedAt"`
 	DeletedAt *time.Time `json:"deletedAt,omitempty"`
+
+	// Drift between this DB row and the running Deployment, written by the
+	// controller's periodic drift check (cluster-services-1024). Empty means
+	// the Deployment matches the DB, or the check has not run yet. These are
+	// "pending changes, apply on next restart": the drift check only reports,
+	// it never rolls the pod.
+	PendingChanges []PendingChange `json:"pendingChanges,omitempty"`
+	DriftCheckedAt *time.Time      `json:"driftCheckedAt,omitempty"`
+}
+
+// PendingChange is one field where the running Deployment differs from the
+// project's DB row. Running is what the pod has now; Desired is what the next
+// restart will apply.
+type PendingChange struct {
+	Field   string `json:"field"`
+	Running string `json:"running"`
+	Desired string `json:"desired"`
+}
+
+// ApplyMode controls when an admin update to a project reaches its pod.
+type ApplyMode string
+
+const (
+	// ApplyModeNow saves the change and rolls the pod right away (status
+	// "updating"). It is the default when no mode is given.
+	ApplyModeNow ApplyMode = "now"
+	// ApplyModeNextRestart saves the change to the DB only. The running pod is
+	// left alone; the drift check reports the change as pending and the next
+	// restart (RestartProject rebuilds the Deployment from the DB) applies it.
+	ApplyModeNextRestart ApplyMode = "next_restart"
+)
+
+// IsValid reports whether m is a known apply mode. The empty string is valid
+// and means ApplyModeNow.
+func (m ApplyMode) IsValid() bool {
+	switch m {
+	case "", ApplyModeNow, ApplyModeNextRestart:
+		return true
+	default:
+		return false
+	}
 }
 
 // CreateProjectRequest represents a request to create a new project.
@@ -210,6 +251,11 @@ type UpdateProjectRequest struct {
 
 	// Image configuration
 	ImageTag *string `json:"imageTag,omitempty"`
+
+	// ApplyMode is not stored. It tells the admin handler whether to roll the
+	// pod now ("now", the default) or leave it for the next restart
+	// ("next_restart"). See ApplyMode.
+	ApplyMode ApplyMode `json:"applyMode,omitempty"`
 }
 
 // ListFilter defines filtering options for listing projects.

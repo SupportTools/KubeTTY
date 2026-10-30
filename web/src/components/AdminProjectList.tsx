@@ -438,6 +438,16 @@ const AdminProjectList = ({ onClose }: Props) => {
                       >
                         {project.paused ? "Paused" : statusLabels[project.status]}
                       </span>
+                      {project.pendingChanges && project.pendingChanges.length > 0 && (
+                        <span
+                          className="pending-changes-badge"
+                          title={`Pending changes, apply on next restart: ${project.pendingChanges
+                            .map((c) => c.field)
+                            .join(", ")}`}
+                        >
+                          Pending changes
+                        </span>
+                      )}
                     </td>
                     <td className={gatewayVersion && project.imageTag !== gatewayVersion ? "version-outdated" : "version-current"}>
                       {project.imageTag}

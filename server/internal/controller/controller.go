@@ -38,6 +38,11 @@ type Config struct {
 
 	// StorageMonitor holds configuration for automatic PVC expansion.
 	StorageMonitor StorageMonitorConfig
+
+	// DriftCheckInterval is how often to compare running project Deployments
+	// with their DB rows and record pending changes (cluster-services-1024).
+	// The check is report-only. Zero means DefaultDriftCheckInterval.
+	DriftCheckInterval time.Duration
 }
 
 // DefaultConfig returns sensible defaults.
@@ -171,6 +176,10 @@ func (c *Controller) Start(ctx context.Context) {
 	// Health check loop
 	c.wg.Add(1)
 	go c.runHealthCheckLoop(ctx)
+
+	// Drift check loop: report-only, never rolls a pod (cluster-services-1024)
+	c.wg.Add(1)
+	go c.runDriftCheckLoop(ctx)
 
 	// Storage monitor loop (for automatic PVC expansion)
 	c.wg.Add(1)
@@ -564,6 +573,7 @@ func (c *Controller) handleUpdating(ctx context.Context, p *projects.Project) er
 		_, err = c.clientset.AppsV1().Deployments(cfg.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
 		if err == nil {
 			logger.Info("Deployment updated, transitioning to creating status")
+			c.clearPendingChanges(ctx, p)
 			return c.store.SetStatus(ctx, p.ID, projects.StatusCreating, "Waiting for deployment rollout")
 		}
 
@@ -937,6 +947,7 @@ func (c *Controller) RestartProject(ctx context.Context, p *projects.Project) er
 				"memory_limit":   p.MemoryLimit,
 				"image_tag":      p.ImageTag,
 			}).Info("Deployment rebuilt from database for restart")
+			c.clearPendingChanges(ctx, p)
 			// Set status to creating to wait for rollout
 			return c.store.SetStatus(ctx, p.ID, projects.StatusCreating, "Restarting deployment")
 		}

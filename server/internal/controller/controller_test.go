@@ -145,6 +145,22 @@ func (m *mockStore) SetStatus(ctx context.Context, id uuid.UUID, status projects
 	return projects.ErrProjectNotFound
 }
 
+func (m *mockStore) SetPendingChanges(ctx context.Context, id uuid.UUID, changes []projects.PendingChange) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p, ok := m.projects[id]; ok {
+		if len(changes) == 0 {
+			p.PendingChanges = nil
+		} else {
+			p.PendingChanges = append([]projects.PendingChange(nil), changes...)
+		}
+		now := time.Now()
+		p.DriftCheckedAt = &now
+		return nil
+	}
+	return projects.ErrProjectNotFound
+}
+
 func (m *mockStore) SetPaused(ctx context.Context, id uuid.UUID, paused bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

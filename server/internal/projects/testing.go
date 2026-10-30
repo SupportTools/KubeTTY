@@ -420,6 +420,32 @@ func (m *MockStore) UpdateLastActivity(ctx context.Context, projectName string) 
 	return nil
 }
 
+// SetPendingChanges records a drift check result.
+func (m *MockStore) SetPendingChanges(ctx context.Context, id uuid.UUID, changes []PendingChange) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.err != nil {
+		err := m.err
+		m.err = nil
+		return err
+	}
+
+	project, ok := m.projects[id]
+	if !ok || project.DeletedAt != nil {
+		return ErrProjectNotFound
+	}
+
+	if len(changes) == 0 {
+		project.PendingChanges = nil
+	} else {
+		project.PendingChanges = append([]PendingChange(nil), changes...)
+	}
+	now := time.Now()
+	project.DriftCheckedAt = &now
+	return nil
+}
+
 // GetStatusCounts returns project counts by status.
 func (m *MockStore) GetStatusCounts(ctx context.Context) (map[ProjectStatus]int, error) {
 	m.mu.RLock()

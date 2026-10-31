@@ -52,6 +52,10 @@ type Store interface {
 	UpdateHealthCheck(ctx context.Context, id uuid.UUID, podIP string) error
 	UpdateLastActivity(ctx context.Context, projectName string) error
 
+	// SetPendingChanges stores the drift check result for a project
+	// (cluster-services-1024). Nil or empty clears it.
+	SetPendingChanges(ctx context.Context, id uuid.UUID, changes []PendingChange) error
+
 	// List projects by status for controller reconciliation
 	ListByStatuses(ctx context.Context, statuses []ProjectStatus) ([]Project, error)
 
@@ -152,7 +156,8 @@ RETURNING id, name, display_name, description, icon,
     env_vars,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
-    created_at, updated_at, deleted_at`
+    created_at, updated_at, deleted_at,
+    pending_changes, drift_checked_at`
 
 	row := s.pool.QueryRow(ctx, stmt,
 		id, req.Name, req.DisplayName, nullIfEmpty(req.Description), nullIfEmpty(req.Icon),
@@ -181,7 +186,8 @@ SELECT id, name, display_name, description, icon,
     env_vars,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
-    created_at, updated_at, deleted_at
+    created_at, updated_at, deleted_at,
+    pending_changes, drift_checked_at
 FROM kubetty_projects
 WHERE id = $1 AND deleted_at IS NULL`
 
@@ -201,7 +207,8 @@ SELECT id, name, display_name, description, icon,
     env_vars,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
-    created_at, updated_at, deleted_at
+    created_at, updated_at, deleted_at,
+    pending_changes, drift_checked_at
 FROM kubetty_projects
 WHERE name = $1 AND deleted_at IS NULL`
 
@@ -221,7 +228,8 @@ SELECT id, name, display_name, description, icon,
     env_vars,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
-    created_at, updated_at, deleted_at
+    created_at, updated_at, deleted_at,
+    pending_changes, drift_checked_at
 FROM kubetty_projects
 WHERE service_name = $1 AND deleted_at IS NULL`
 
@@ -241,7 +249,8 @@ SELECT id, name, display_name, description, icon,
     env_vars,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
-    created_at, updated_at, deleted_at
+    created_at, updated_at, deleted_at,
+    pending_changes, drift_checked_at
 FROM kubetty_projects
 WHERE 1=1`
 
@@ -320,7 +329,8 @@ SELECT id, name, display_name, description, icon,
     env_vars,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
-    created_at, updated_at, deleted_at
+    created_at, updated_at, deleted_at,
+    pending_changes, drift_checked_at
 FROM kubetty_projects
 WHERE status = ANY($1)`
 
@@ -466,7 +476,8 @@ RETURNING id, name, display_name, description, icon,
     env_vars,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
-    created_at, updated_at, deleted_at`,
+    created_at, updated_at, deleted_at,
+    pending_changes, drift_checked_at`,
 		joinStrings(setClauses, ", "))
 
 	row := s.pool.QueryRow(ctx, query, args...)
@@ -566,11 +577,40 @@ WHERE id = $1 AND deleted_at IS NULL`
 	return nil
 }
 
+// SetPendingChanges records the result of a drift check: the fields where the
+// running Deployment differs from the DB row (nil or empty clears them) and the
+// time of the check. Like the health check's UpdateHealthCheck, the row's
+// updated_at trigger still fires on this write.
+func (s *PGStore) SetPendingChanges(ctx context.Context, id uuid.UUID, changes []PendingChange) error {
+	const stmt = `
+UPDATE kubetty_projects
+SET pending_changes = $2, drift_checked_at = NOW()
+WHERE id = $1 AND deleted_at IS NULL`
+
+	var payload interface{}
+	if len(changes) > 0 {
+		b, err := json.Marshal(changes)
+		if err != nil {
+			return fmt.Errorf("marshal pending changes: %w", err)
+		}
+		payload = b
+	}
+
+	tag, err := s.pool.Exec(ctx, stmt, id, payload)
+	if err != nil {
+		return fmt.Errorf("set pending changes: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProjectNotFound
+	}
+	return nil
+}
+
 func scanProject(row pgx.Row) (*Project, error) {
 	var p Project
 	var description, icon, statusMessage, podIP, serviceName, guiResolution *string
 	var guiVNCPort *int
-	var adminNS, readNS, envVars []byte
+	var adminNS, readNS, envVars, pendingChanges []byte
 
 	err := row.Scan(
 		&p.ID, &p.Name, &p.DisplayName, &description, &icon,
@@ -584,6 +624,7 @@ func scanProject(row pgx.Row) (*Project, error) {
 		&p.ImageRepository, &p.ImageTag,
 		&p.Status, &statusMessage, &p.LastHealthCheck, &p.LastActivity, &podIP, &p.Paused,
 		&p.CreatedAt, &p.UpdatedAt, &p.DeletedAt,
+		&pendingChanges, &p.DriftCheckedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -625,6 +666,11 @@ func scanProject(row pgx.Row) (*Project, error) {
 	if err := json.Unmarshal(envVars, &p.EnvVars); err != nil {
 		p.EnvVars = map[string]string{}
 	}
+	if len(pendingChanges) > 0 {
+		if err := json.Unmarshal(pendingChanges, &p.PendingChanges); err != nil {
+			p.PendingChanges = nil
+		}
+	}
 
 	return &p, nil
 }
@@ -633,7 +679,7 @@ func scanProjectRows(rows pgx.Rows) (*Project, error) {
 	var p Project
 	var description, icon, statusMessage, podIP, serviceName, guiResolution *string
 	var guiVNCPort *int
-	var adminNS, readNS, envVars []byte
+	var adminNS, readNS, envVars, pendingChanges []byte
 
 	err := rows.Scan(
 		&p.ID, &p.Name, &p.DisplayName, &description, &icon,
@@ -647,6 +693,7 @@ func scanProjectRows(rows pgx.Rows) (*Project, error) {
 		&p.ImageRepository, &p.ImageTag,
 		&p.Status, &statusMessage, &p.LastHealthCheck, &p.LastActivity, &podIP, &p.Paused,
 		&p.CreatedAt, &p.UpdatedAt, &p.DeletedAt,
+		&pendingChanges, &p.DriftCheckedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan project row: %w", err)
@@ -684,6 +731,11 @@ func scanProjectRows(rows pgx.Rows) (*Project, error) {
 	}
 	if err := json.Unmarshal(envVars, &p.EnvVars); err != nil {
 		p.EnvVars = map[string]string{}
+	}
+	if len(pendingChanges) > 0 {
+		if err := json.Unmarshal(pendingChanges, &p.PendingChanges); err != nil {
+			p.PendingChanges = nil
+		}
 	}
 
 	return &p, nil
@@ -747,7 +799,8 @@ SELECT id, name, display_name, description, icon,
     env_vars,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
-    created_at, updated_at, deleted_at
+    created_at, updated_at, deleted_at,
+    pending_changes, drift_checked_at
 FROM kubetty_projects
 WHERE status = 'failed' AND updated_at >= $1 AND deleted_at IS NULL
 ORDER BY updated_at DESC

@@ -233,12 +233,15 @@ func (h *ProjectHandlers) GetProject(w http.ResponseWriter, r *http.Request) {
 	_ = util.WriteJSON(w, http.StatusOK, project)
 }
 
-// UpdateProject handles PUT /api/admin/projects/{id}
+// UpdateProject handles PUT /api/admin/projects/{id}, and PATCH on the same
+// path as an alias: the update is already partial (only the fields present are
+// changed), so both verbs have the same semantics (cluster-services-1024).
 //
 // The body may set "applyMode": "now" (default) saves and rolls the pod when
-// the image or a cpu/memory limit or storage size changed; "next_restart" saves
-// to the DB only, leaves the pod running and records the difference as pending
-// changes that the next restart applies (cluster-services-1024).
+// the image, a cpu/memory request or limit, or the storage size is in the
+// request; "next_restart" saves to the DB only, leaves the pod running and
+// records the difference as pending changes that the next restart applies
+// (cluster-services-1024).
 func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -326,8 +329,12 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 				project.PendingChanges = changes
 			}
 		}
-	case req.ImageTag != nil || req.CPULimit != nil || req.MemoryLimit != nil || req.StorageSize != nil:
-		// If image tag or resources changed, trigger an update (rolls the pod)
+	case req.ImageTag != nil || req.CPURequest != nil || req.CPULimit != nil ||
+		req.MemoryRequest != nil || req.MemoryLimit != nil || req.StorageSize != nil:
+		// If the image tag or any resource field is in the request, trigger an
+		// update (rolls the pod). Requests count too: a requests-only edit in
+		// "now" mode used to save without a rollout, leaving the pod on the old
+		// requests until some unrelated restart (cluster-services-1024).
 		if err := h.store.SetStatus(ctx, projectID, projects.StatusUpdating, "Applying configuration changes"); err != nil {
 			log.WithError(err).Warn("admin/projects: failed to set updating status")
 		}
@@ -828,6 +835,7 @@ func (h *ProjectHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/projects", h.CreateProject)
 	mux.HandleFunc("GET /api/admin/projects/{id}", h.GetProject)
 	mux.HandleFunc("PUT /api/admin/projects/{id}", h.UpdateProject)
+	mux.HandleFunc("PATCH /api/admin/projects/{id}", h.UpdateProject) // alias of PUT (cluster-services-1024)
 	mux.HandleFunc("DELETE /api/admin/projects/{id}", h.DeleteProject)
 	mux.HandleFunc("POST /api/admin/projects/{id}/restart", h.RestartProject)
 	mux.HandleFunc("POST /api/admin/projects/{id}/resync", h.ResyncProject)

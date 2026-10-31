@@ -194,3 +194,108 @@ func TestUpdateProject_NextRestartReportsPendingChangesWithoutRollout(t *testing
 		}
 	}
 }
+
+// Operator decision 2026-10-29 (cluster-services-1024, note 22187): in "now"
+// mode a requests-only edit must roll the pod too. It used to save without a
+// rollout, so the pod kept its old requests until an unrelated restart.
+func TestUpdateProject_NowRollsPodForRequestsOnlyEdit(t *testing.T) {
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"cpuRequest default mode", map[string]any{"cpuRequest": "250m"}},
+		{"memoryRequest default mode", map[string]any{"memoryRequest": "256Mi"}},
+		{"both requests explicit now", map[string]any{"cpuRequest": "250m", "memoryRequest": "256Mi", "applyMode": "now"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMockProjectStore()
+			p := runningProject()
+			store.projects[p.ID] = p
+			h := NewProjectHandlers(store, nil, "v1.0.0")
+
+			rec := putProject(t, h, p.ID, tc.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+			}
+			if store.calledStatus != projects.StatusUpdating {
+				t.Errorf("status set = %q, want %q (a requests-only edit applies now)", store.calledStatus, projects.StatusUpdating)
+			}
+		})
+	}
+}
+
+// The widened trigger is about resources only: an edit that touches no
+// image or resource field still saves without rolling the pod.
+func TestUpdateProject_NowDoesNotRollForNonResourceEdit(t *testing.T) {
+	store := newMockProjectStore()
+	p := runningProject()
+	store.projects[p.ID] = p
+	h := NewProjectHandlers(store, nil, "v1.0.0")
+
+	rec := putProject(t, h, p.ID, map[string]any{"displayName": "Renamed", "applyMode": "now"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if store.calledStatus != "" {
+		t.Errorf("SetStatus called with %q; a display-name edit must not roll the pod", store.calledStatus)
+	}
+}
+
+func TestUpdateProject_NextRestartRequestsOnlyStillDeferred(t *testing.T) {
+	store := newMockProjectStore()
+	p := runningProject()
+	store.projects[p.ID] = p
+	h := NewProjectHandlers(store, nil, "v1.0.0")
+
+	rec := putProject(t, h, p.ID, map[string]any{"cpuRequest": "250m", "applyMode": "next_restart"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if store.calledStatus != "" {
+		t.Errorf("SetStatus called with %q; next_restart must not set a status", store.calledStatus)
+	}
+	if p.CPURequest != "250m" {
+		t.Errorf("DB row not updated: cpuRequest=%s", p.CPURequest)
+	}
+}
+
+// PATCH /api/admin/projects/{id} is an alias of PUT (note 22187). Exercised
+// through RegisterRoutes so the route itself, not just the handler, is tested.
+func TestUpdateProject_PatchAlias(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		wantStatus projects.ProjectStatus
+	}{
+		{"now rolls", `{"cpuLimit":"2"}`, projects.StatusUpdating},
+		{"next_restart defers", `{"cpuLimit":"2","applyMode":"next_restart"}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMockProjectStore()
+			p := runningProject()
+			store.projects[p.ID] = p
+			h := NewProjectHandlers(store, nil, "v1.0.0")
+			mux := http.NewServeMux()
+			h.RegisterRoutes(mux)
+
+			req := httptest.NewRequest(http.MethodPatch, "/api/admin/projects/"+p.ID.String(), bytes.NewReader([]byte(tc.body)))
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("PATCH status = %d, body %s", rec.Code, rec.Body.String())
+			}
+			if store.updateCalls != 1 {
+				t.Errorf("store.Update calls = %d, want 1", store.updateCalls)
+			}
+			if store.calledStatus != tc.wantStatus {
+				t.Errorf("status set = %q, want %q", store.calledStatus, tc.wantStatus)
+			}
+			if p.CPULimit != "2" {
+				t.Errorf("DB row not updated: cpuLimit=%s", p.CPULimit)
+			}
+		})
+	}
+}

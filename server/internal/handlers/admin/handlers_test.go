@@ -111,8 +111,14 @@ func (m *mockProjectStore) Update(ctx context.Context, id uuid.UUID, req project
 	if req.DisplayName != nil {
 		p.DisplayName = *req.DisplayName
 	}
+	if req.CPURequest != nil {
+		p.CPURequest = *req.CPURequest
+	}
 	if req.CPULimit != nil {
 		p.CPULimit = *req.CPULimit
+	}
+	if req.MemoryRequest != nil {
+		p.MemoryRequest = *req.MemoryRequest
 	}
 	if req.MemoryLimit != nil {
 		p.MemoryLimit = *req.MemoryLimit

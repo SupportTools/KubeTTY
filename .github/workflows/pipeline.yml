@@ -438,15 +438,37 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Deploying version: ${TAG}"
 
+          # RECOMMENDED_IMAGE_TAG is the version the admin UI offers for a project
+          # upgrade, and the upgrade API accepts only semver tags. It used to be a
+          # hand-edited constant in values.prd.yaml (v1.1.6 while projects ran
+          # v1.13-v1.15), so the UI offered a downgrade and per-project sandboxes
+          # stayed on images that still trusted emSign ECC Root CA - G3
+          # (cluster-services-1333). Derive it from the release instead: the tag
+          # being deployed, or on a main push the newest vX.Y.Z tag in the repo.
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            RECOMMENDED="${TAG}"
+          else
+            RECOMMENDED=$(git ls-remote --tags --refs origin 'v*' \
+              | sed -n 's#.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$#\1#p' \
+              | sort -V | tail -1)
+          fi
+          echo "recommended=${RECOMMENDED}" >> "$GITHUB_OUTPUT"
+          echo "Recommended project image tag: ${RECOMMENDED:-<unchanged, values file>}"
+
       - name: Deploy to production
         id: deploy
         env:
           IMAGE_REPOSITORY: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           IMAGE_TAG: ${{ steps.extract-tag.outputs.tag }}
+          RECOMMENDED_TAG: ${{ steps.extract-tag.outputs.recommended }}
           IMAGE_DIGEST: ${{ needs.build.outputs.image-digest }}
           RUNTIME_IMAGE_DIGEST: ${{ needs.build.outputs.runtime-image-digest }}
         run: |
           set -euo pipefail
+          EXTRA_SET=()
+          if [[ -n "${RECOMMENDED_TAG}" ]]; then
+            EXTRA_SET+=(--set-string "env.RECOMMENDED_IMAGE_TAG=${RECOMMENDED_TAG}")
+          fi
           if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::refusing to deploy an invalid image digest: '$IMAGE_DIGEST'"
             exit 1
@@ -483,6 +505,7 @@ jobs:
             --set-string image.repository="${IMAGE_REPOSITORY}" \
             --set-string image.tag="${IMAGE_TAG}" \
             --set-string image.digest="${IMAGE_DIGEST}" \
+            "${EXTRA_SET[@]}" \
             --wait \
             --timeout="${DEPLOY_TIMEOUT}" \
             --history-max=20 \

@@ -29,7 +29,9 @@ deploymentId: kubetty-gateway
 # Production environment
 env:
   LOG_LEVEL: info
-  RECOMMENDED_IMAGE_TAG: "v1.1.6"
+  # CI overrides this on every prod deploy with the newest vX.Y.Z release
+  # (pipeline.yml, extract-tag). This value is only the fallback.
+  RECOMMENDED_IMAGE_TAG: "1.16.0"
 
 # Empty static catalog - production uses dynamic projects only
 catalog:

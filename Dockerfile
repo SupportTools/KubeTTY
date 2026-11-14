@@ -382,6 +382,32 @@ RUN chmod 644 /etc/motd
 ARG KUBETTY_VERSION
 RUN echo "${KUBETTY_VERSION}" > /etc/kubetty-version && chmod 644 /etc/kubetty-version
 
+# Fleet CA standard (operator decision 2026-11-13, SupportTools cluster-services-1375): NO eMudhra
+# emSign roots at all (ECC G3, ECC C3, Root C1, Root G1). Ubuntu's ca-certificates and certifi only
+# dropped ECC G3/C3/C1 in some places, so:
+#  - deselect every emSign root in /etc/ca-certificates.conf ("!" lines survive later ca-certificates
+#    upgrades) and rebuild the store with --fresh;
+#  - point every certifi cacert.pem and gRPC roots.pem at the cleaned system bundle;
+#  - make Node use the OpenSSL (system) store instead of its compiled-in roots, which still embed
+#    all four emSign roots in Node 20;
+#  - fail the build if any bundle or /etc/ssl/certs file still decodes (openssl) to an emSign subject.
+# No fetch: runs on what is already installed.
+RUN set -eu; \
+    sed -i -E 's@^(mozilla/emSign_[^/]*\.crt)$@!\1@' /etc/ca-certificates.conf; \
+    update-ca-certificates --fresh >/dev/null; \
+    find / -xdev \( -path '*/certifi/cacert.pem' -o -path '*/grpc/_cython/_credentials/roots.pem' \) -type f \
+      -exec ln -sf /etc/ssl/certs/ca-certificates.crt {} \; ; \
+    bad=0; \
+    for b in /etc/ssl/certs/ca-certificates.crt $(find / -xdev \( -path '*/certifi/cacert.pem' -o -path '*/grpc/_cython/_credentials/roots.pem' \)); do \
+      if openssl crl2pkcs7 -nocrl -certfile "$b" | openssl pkcs7 -print_certs -noout | grep -i '^subject=.*emSign'; then \
+        echo "FATAL: $b trusts an emSign root" >&2; bad=1; fi; \
+    done; \
+    for f in /etc/ssl/certs/*; do [ -f "$f" ] || continue; openssl x509 -noout -subject -in "$f" 2>/dev/null; done \
+      | grep -i 'emSign' && bad=1; \
+    [ "$bad" = 0 ]; \
+    echo "CA guard: no emSign roots ($(grep -c 'BEGIN CERTIFICATE' /etc/ssl/certs/ca-certificates.crt) certs)"
+ENV NODE_OPTIONS=--use-openssl-ca
+
 EXPOSE 8080
 USER mmattox
 ENTRYPOINT ["/usr/local/bin/kubetty-entrypoint"]

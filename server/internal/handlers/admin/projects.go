@@ -559,6 +559,7 @@ func (h *ProjectHandlers) GetUpgradeInfo(w http.ResponseWriter, r *http.Request)
 	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
 		"currentVersion":       project.ImageTag,
 		"recommendedVersion":   h.recommendedImageTag,
+		"imageAutoFollow":      project.ImageAutoFollow,
 		"lastActivity":         project.LastActivity,
 		"minutesSinceActivity": minutesSinceActivity,
 	})

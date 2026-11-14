@@ -108,6 +108,11 @@ type Project struct {
 	ImageRepository string `json:"imageRepository"`
 	ImageTag        string `json:"imageTag"`
 
+	// ImageAutoFollow lets the controller move this project to the gateway's
+	// recommended image tag while the project has no active session
+	// (cluster-services-1376). False pins the project on ImageTag.
+	ImageAutoFollow bool `json:"imageAutoFollow"`
+
 	// Status tracking
 	Status          ProjectStatus `json:"status"`
 	StatusMessage   string        `json:"statusMessage,omitempty"`
@@ -251,6 +256,10 @@ type UpdateProjectRequest struct {
 
 	// Image configuration
 	ImageTag *string `json:"imageTag,omitempty"`
+
+	// ImageAutoFollow sets the per-project auto-follow opt-out
+	// (cluster-services-1376). It is a setting only and never rolls the pod.
+	ImageAutoFollow *bool `json:"imageAutoFollow,omitempty"`
 
 	// ApplyMode is not stored. It tells the admin handler whether to roll the
 	// pod now ("now", the default) or leave it for the next restart

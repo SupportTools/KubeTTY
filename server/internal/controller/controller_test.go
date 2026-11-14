@@ -1995,3 +1995,7 @@ func TestController_HandleUpdating_DeploymentNotFound(t *testing.T) {
 		t.Error("Expected project to transition to creating status")
 	}
 }
+
+func (m *mockStore) AutoFollowImage(ctx context.Context, id uuid.UUID, fromTag, toTag string, idleBefore time.Time) (bool, error) {
+	return false, nil
+}

@@ -15,6 +15,10 @@ type MockStore struct {
 	projectsByName  map[string]*Project
 	err             error // For simulating errors
 	targetNamespace string
+
+	// activeTabs simulates open gateway tabs per project name for
+	// AutoFollowImage (the PG store reads gateway_tabs).
+	activeTabs map[string]int
 }
 
 // NewMockStore creates a new mock store for testing.
@@ -23,6 +27,7 @@ func NewMockStore() *MockStore {
 		projects:        make(map[uuid.UUID]*Project),
 		projectsByName:  make(map[string]*Project),
 		targetNamespace: "test-namespace",
+		activeTabs:      make(map[string]int),
 	}
 }
 
@@ -89,6 +94,7 @@ func (m *MockStore) Create(ctx context.Context, req CreateProjectRequest) (*Proj
 		EnvVars:          req.EnvVars,
 		ImageRepository:  req.ImageRepository,
 		ImageTag:         req.ImageTag,
+		ImageAutoFollow:  true,
 		Status:           StatusPending,
 		CreatedAt:        now,
 		UpdatedAt:        now,
@@ -285,6 +291,9 @@ func (m *MockStore) Update(ctx context.Context, id uuid.UUID, req UpdateProjectR
 	}
 	if req.ImageTag != nil {
 		project.ImageTag = *req.ImageTag
+	}
+	if req.ImageAutoFollow != nil {
+		project.ImageAutoFollow = *req.ImageAutoFollow
 	}
 
 	project.UpdatedAt = time.Now()
@@ -489,4 +498,37 @@ func (m *MockStore) GetRecentlyFailed(ctx context.Context, since time.Time, limi
 	}
 
 	return result, nil
+}
+
+// SetActiveTabs sets the number of open gateway tabs for a project name
+// (test helper for AutoFollowImage).
+func (m *MockStore) SetActiveTabs(projectName string, n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.activeTabs[projectName] = n
+}
+
+// AutoFollowImage mirrors the PG store's conditional UPDATE.
+func (m *MockStore) AutoFollowImage(ctx context.Context, id uuid.UUID, fromTag, toTag string, idleBefore time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.err != nil {
+		err := m.err
+		m.err = nil
+		return false, err
+	}
+	p, ok := m.projects[id]
+	if !ok || p.DeletedAt != nil || p.ImageTag != fromTag || p.Status != StatusRunning ||
+		p.Paused || !p.ImageAutoFollow || m.activeTabs[p.Name] > 0 {
+		return false, nil
+	}
+	if p.LastActivity != nil && !p.LastActivity.Before(idleBefore) {
+		return false, nil
+	}
+	p.ImageTag = toTag
+	p.Status = StatusUpdating
+	p.StatusMessage = "Auto-upgrading to " + toTag
+	p.UpdatedAt = time.Now()
+	return true, nil
 }

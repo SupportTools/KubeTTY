@@ -43,6 +43,10 @@ type Config struct {
 	// with their DB rows and record pending changes (cluster-services-1024).
 	// The check is report-only. Zero means DefaultDriftCheckInterval.
 	DriftCheckInterval time.Duration
+
+	// AutoFollow moves idle projects to the recommended sandbox image
+	// (cluster-services-1376). The loop runs only when AutoFollow.Active().
+	AutoFollow AutoFollowConfig
 }
 
 // DefaultConfig returns sensible defaults.
@@ -180,6 +184,16 @@ func (c *Controller) Start(ctx context.Context) {
 	// Drift check loop: report-only, never rolls a pod (cluster-services-1024)
 	c.wg.Add(1)
 	go c.runDriftCheckLoop(ctx)
+
+	// Sandbox image auto-follow: upgrades idle projects only (cluster-services-1376)
+	if c.cfg.AutoFollow.Active() {
+		c.wg.Add(1)
+		go c.runAutoFollowLoop(ctx)
+	} else {
+		log.WithField("enabled", c.cfg.AutoFollow.Enabled).
+			WithField("recommended_tag", c.cfg.AutoFollow.RecommendedTag).
+			Info("Sandbox image auto-follow is off (disabled, or the recommended tag is not a semver)")
+	}
 
 	// Storage monitor loop (for automatic PVC expansion)
 	c.wg.Add(1)

@@ -126,6 +126,9 @@ func (m *mockProjectStore) Update(ctx context.Context, id uuid.UUID, req project
 	if req.ImageTag != nil {
 		p.ImageTag = *req.ImageTag
 	}
+	if req.ImageAutoFollow != nil {
+		p.ImageAutoFollow = *req.ImageAutoFollow
+	}
 	m.updateCalls++
 	return p, nil
 }
@@ -1743,4 +1746,8 @@ func TestDeleteProject_DeleteReturnsNotFound(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected status 404, got %d", rec.Code)
 	}
+}
+
+func (m *mockProjectStore) AutoFollowImage(ctx context.Context, id uuid.UUID, fromTag, toTag string, idleBefore time.Time) (bool, error) {
+	return false, nil
 }

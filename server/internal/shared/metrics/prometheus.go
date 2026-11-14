@@ -115,6 +115,30 @@ var (
 		[]string{"project", "pvc", "reason"},
 	)
 
+	// SandboxImageAutoFollowTotal counts automatic sandbox image upgrades
+	// (cluster-services-1376) by result: "upgraded", or "error".
+	SandboxImageAutoFollowTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kubetty_sandbox_image_autofollow_total",
+			Help: "Automatic sandbox image upgrades to the recommended tag, by result",
+		},
+		[]string{"result"},
+	)
+
+	// SandboxImageAutoFollowProjects is the number of running projects in each
+	// auto-follow state after the latest pass: up_to_date, ahead, pinned,
+	// unmanaged (non-semver tag or custom repository), busy (active session or
+	// recent activity), upgraded, deferred (over the per-pass cap), halted
+	// (waiting on an unfinished or failed rollout to the recommended tag) or
+	// error.
+	SandboxImageAutoFollowProjects = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "kubetty_sandbox_image_autofollow_projects",
+			Help: "Running projects per sandbox image auto-follow state after the latest pass",
+		},
+		[]string{"state"},
+	)
+
 	// PVCCurrentSizeBytes tracks current PVC requested size in bytes.
 	PVCCurrentSizeBytes = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{

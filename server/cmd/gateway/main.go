@@ -248,6 +248,13 @@ func main() {
 				ExpandAmount:    cfg.Controller.StorageExpandAmount,
 				ExpandCooldown:  cfg.Controller.StorageExpandCooldown,
 			},
+			AutoFollow: controller.AutoFollowConfig{
+				Enabled:        cfg.Controller.AutoFollowImageEnabled,
+				RecommendedTag: cfg.RecommendedImageTag,
+				Interval:       cfg.Controller.AutoFollowImageInterval,
+				IdleGrace:      cfg.Controller.AutoFollowImageIdleGrace,
+				MaxPerPass:     cfg.Controller.AutoFollowImageMaxPerPass,
+			},
 		}
 		projCtrl, err = controller.New(ctrlCfg, projectStore)
 		if err != nil {

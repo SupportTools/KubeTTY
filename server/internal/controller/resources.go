@@ -420,8 +420,12 @@ func BuildNetworkPolicy(p *projects.Project, cfg ResourceConfig, gatewayNamespac
 }
 
 // DinDImage is the Docker-in-Docker sidecar image for projects with DinD
-// enabled. Bumped from docker:24.0.5-dind (EOL) in cluster-services-1008.
-const DinDImage = "docker:29.9.1-dind"
+// enabled. Bumped from docker:24.0.5-dind (EOL) in cluster-services-1008, then
+// from 29.9.1 to the digest-pinned 29.9.3 in cluster-services-1329: 29.9.1 ships
+// ca-certificates 20260909, which still trusts the compromised emSign ECC Root
+// CA - G3 (USN-8944-1); 29.9.3 ships 20261020 and does not. dockerd verifies
+// registry TLS against this bundle when it pulls images.
+const DinDImage = "docker:29.9.3-dind@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121"
 
 // BuildDeployment creates a Deployment for the project pod.
 // Name format: {prefix}{project-name}

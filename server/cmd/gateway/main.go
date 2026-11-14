@@ -248,6 +248,13 @@ func main() {
 				ExpandAmount:    cfg.Controller.StorageExpandAmount,
 				ExpandCooldown:  cfg.Controller.StorageExpandCooldown,
 			},
+			AutoFollow: controller.AutoFollowConfig{
+				Enabled:        cfg.Controller.AutoFollowImageEnabled,
+				RecommendedTag: cfg.RecommendedImageTag,
+				Interval:       cfg.Controller.AutoFollowImageInterval,
+				IdleGrace:      cfg.Controller.AutoFollowImageIdleGrace,
+				MaxPerPass:     cfg.Controller.AutoFollowImageMaxPerPass,
+			},
 		}
 		projCtrl, err = controller.New(ctrlCfg, projectStore)
 		if err != nil {
@@ -546,6 +553,8 @@ func main() {
 			mux.Handle("POST /api/admin/projects", requireAuth(http.HandlerFunc(adminHandlers.CreateProject)))
 			mux.Handle("GET /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.GetProject)))
 			mux.Handle("PUT /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.UpdateProject)))
+			// PATCH is an alias of PUT (cluster-services-1024): the update is already partial.
+			mux.Handle("PATCH /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.UpdateProject)))
 			mux.Handle("DELETE /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.DeleteProject)))
 			mux.Handle("POST /api/admin/projects/{id}/restart", requireAuth(http.HandlerFunc(adminHandlers.RestartProject)))
 			mux.Handle("POST /api/admin/projects/{id}/resync", requireAuth(http.HandlerFunc(adminHandlers.ResyncProject)))
@@ -561,6 +570,7 @@ func main() {
 			mux.HandleFunc("POST /api/admin/projects", adminHandlers.CreateProject)
 			mux.HandleFunc("GET /api/admin/projects/{id}", adminHandlers.GetProject)
 			mux.HandleFunc("PUT /api/admin/projects/{id}", adminHandlers.UpdateProject)
+			mux.HandleFunc("PATCH /api/admin/projects/{id}", adminHandlers.UpdateProject)
 			mux.HandleFunc("DELETE /api/admin/projects/{id}", adminHandlers.DeleteProject)
 			mux.HandleFunc("POST /api/admin/projects/{id}/restart", adminHandlers.RestartProject)
 			mux.HandleFunc("POST /api/admin/projects/{id}/resync", adminHandlers.ResyncProject)

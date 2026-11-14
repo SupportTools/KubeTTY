@@ -29,6 +29,7 @@ type mockProjectStore struct {
 	setStatusErr  error
 	calledStatus  projects.ProjectStatus
 	calledMessage string
+	updateCalls   int
 }
 
 func newMockProjectStore() *mockProjectStore {
@@ -110,6 +111,25 @@ func (m *mockProjectStore) Update(ctx context.Context, id uuid.UUID, req project
 	if req.DisplayName != nil {
 		p.DisplayName = *req.DisplayName
 	}
+	if req.CPURequest != nil {
+		p.CPURequest = *req.CPURequest
+	}
+	if req.CPULimit != nil {
+		p.CPULimit = *req.CPULimit
+	}
+	if req.MemoryRequest != nil {
+		p.MemoryRequest = *req.MemoryRequest
+	}
+	if req.MemoryLimit != nil {
+		p.MemoryLimit = *req.MemoryLimit
+	}
+	if req.ImageTag != nil {
+		p.ImageTag = *req.ImageTag
+	}
+	if req.ImageAutoFollow != nil {
+		p.ImageAutoFollow = *req.ImageAutoFollow
+	}
+	m.updateCalls++
 	return p, nil
 }
 
@@ -137,6 +157,14 @@ func (m *mockProjectStore) SetStatus(ctx context.Context, id uuid.UUID, status p
 	if p, ok := m.projects[id]; ok {
 		p.Status = status
 		p.StatusMessage = message
+		return nil
+	}
+	return projects.ErrProjectNotFound
+}
+
+func (m *mockProjectStore) SetPendingChanges(ctx context.Context, id uuid.UUID, changes []projects.PendingChange) error {
+	if p, ok := m.projects[id]; ok {
+		p.PendingChanges = changes
 		return nil
 	}
 	return projects.ErrProjectNotFound
@@ -1718,4 +1746,8 @@ func TestDeleteProject_DeleteReturnsNotFound(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected status 404, got %d", rec.Code)
 	}
+}
+
+func (m *mockProjectStore) AutoFollowImage(ctx context.Context, id uuid.UUID, fromTag, toTag string, idleBefore time.Time) (bool, error) {
+	return false, nil
 }

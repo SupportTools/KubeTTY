@@ -76,6 +76,14 @@ type ControllerConfig struct {
 	StorageExpandThreshold float64       // Expand PVC when usage >= this fraction (default: 0.70)
 	StorageExpandAmount    string        // Fixed amount to expand by (default: "10Gi")
 	StorageExpandCooldown  time.Duration // Minimum time between expansions (default: 5m)
+
+	// Sandbox image auto-follow (cluster-services-1376): move idle projects to
+	// RECOMMENDED_IMAGE_TAG. A project with an open tab or recent activity is
+	// never touched. Off when RECOMMENDED_IMAGE_TAG is not a semver.
+	AutoFollowImageEnabled    bool          // AUTO_FOLLOW_IMAGE_ENABLED (default: true)
+	AutoFollowImageInterval   time.Duration // AUTO_FOLLOW_IMAGE_INTERVAL (default: 5m)
+	AutoFollowImageIdleGrace  time.Duration // AUTO_FOLLOW_IMAGE_IDLE_GRACE (default: 30m)
+	AutoFollowImageMaxPerPass int           // AUTO_FOLLOW_IMAGE_MAX_PER_PASS (default: 1)
 }
 
 // ParseEnvironment extracts the environment suffix from ProjectsNamespace.
@@ -135,6 +143,11 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 			StorageExpandThreshold: sharedconfig.GetEnvFloat64("STORAGE_EXPAND_THRESHOLD", 0.70),
 			StorageExpandAmount:    sharedconfig.GetEnv("STORAGE_EXPAND_AMOUNT", "10Gi"),
 			StorageExpandCooldown:  sharedconfig.GetEnvDuration("STORAGE_EXPAND_COOLDOWN", 5*time.Minute),
+
+			AutoFollowImageEnabled:    sharedconfig.GetEnvBool("AUTO_FOLLOW_IMAGE_ENABLED", true),
+			AutoFollowImageInterval:   sharedconfig.GetEnvDuration("AUTO_FOLLOW_IMAGE_INTERVAL", 5*time.Minute),
+			AutoFollowImageIdleGrace:  sharedconfig.GetEnvDuration("AUTO_FOLLOW_IMAGE_IDLE_GRACE", 30*time.Minute),
+			AutoFollowImageMaxPerPass: sharedconfig.GetEnvInt("AUTO_FOLLOW_IMAGE_MAX_PER_PASS", 1),
 		},
 		LeaderElection: LeaderElectionConfig{
 			Enabled:       sharedconfig.GetEnvBool("LEADER_ELECTION_ENABLED", true),

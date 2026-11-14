@@ -1401,6 +1401,22 @@ button.danger:hover:not(:disabled) {
   text-transform: capitalize;
 }
 
+/* Pending changes (cluster-services-1024): DB ahead of the running pod */
+.pending-changes-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #f59e0b;
+  border: 1px solid #f59e0b;
+}
+
+.pending-changes-table .mono {
+  font-family: monospace;
+}
+
 /* Admin Form */
 .form-section {
   margin-bottom: 1.5rem;

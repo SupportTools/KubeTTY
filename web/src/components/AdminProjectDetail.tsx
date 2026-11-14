@@ -66,6 +66,8 @@ const AdminProjectDetail = ({
     storageSize: "",
   });
   const [savingResources, setSavingResources] = useState(false);
+  // cluster-services-1024: save to the DB only and leave the pod running
+  const [applyOnNextRestart, setApplyOnNextRestart] = useState(false);
 
   // Manage Secrets modal state
   const [showSecretsModal, setShowSecretsModal] = useState(false);
@@ -194,6 +196,7 @@ const AdminProjectDetail = ({
       memoryLimit: project.memoryLimit,
       storageSize: project.storageSize,
     });
+    setApplyOnNextRestart(false);
     setShowEditResourcesModal(true);
     setError(null);
   };
@@ -227,6 +230,7 @@ const AdminProjectDetail = ({
           memoryRequest: editResources.memoryRequest,
           memoryLimit: editResources.memoryLimit,
           storageSize: editResources.storageSize,
+          applyMode: applyOnNextRestart ? "next_restart" : "now",
         }),
       });
       if (!res.ok) {
@@ -491,6 +495,39 @@ const AdminProjectDetail = ({
               )}
             </div>
           </div>
+
+          {project.pendingChanges && project.pendingChanges.length > 0 && (
+            <div className="detail-section">
+              <h3>Pending Changes</h3>
+              <div className="info-box pending-changes-box">
+                The running pod differs from the saved configuration. These changes
+                apply on the next restart; nothing restarts automatically.
+              </div>
+              <table className="admin-table pending-changes-table">
+                <thead>
+                  <tr>
+                    <th>Field</th>
+                    <th>Running</th>
+                    <th>On next restart</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {project.pendingChanges.map((c) => (
+                    <tr key={c.field}>
+                      <td>{c.field}</td>
+                      <td className="mono">{c.running || "(unset)"}</td>
+                      <td className="mono">{c.desired}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {project.driftCheckedAt && (
+                <small className="form-help">
+                  Checked {new Date(project.driftCheckedAt).toLocaleString()}
+                </small>
+              )}
+            </div>
+          )}
 
           {project.statusMessage && (
             <div className="detail-section">
@@ -791,8 +828,26 @@ const AdminProjectDetail = ({
               <div className="modal-body">
                 {error && <p className="error">{error}</p>}
 
+                <div className="form-group checkbox-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={applyOnNextRestart}
+                      onChange={(e) => setApplyOnNextRestart(e.target.checked)}
+                      disabled={savingResources}
+                    />
+                    Apply on next restart
+                  </label>
+                  <small className="form-help">
+                    Save without restarting the pod. The change shows as pending until the
+                    project is next restarted. Storage size cannot be changed this way.
+                  </small>
+                </div>
+
                 <div className="info-box">
-                  Updating resources will restart the project pod. Any running processes will be terminated.
+                  {applyOnNextRestart
+                    ? "The pod keeps running with its current resources. The new values apply on the next restart."
+                    : "Updating resources will restart the project pod. Any running processes will be terminated."}
                 </div>
 
                 <div className="form-group">

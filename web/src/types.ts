@@ -141,6 +141,18 @@ export type AdminProjectStatus =
   | 'deleting'
   | 'deleted';
 
+// One field where the running Deployment differs from the project's DB row
+// (cluster-services-1024). The next restart applies `desired`.
+export interface PendingChange {
+  field: string;
+  running: string;
+  desired: string;
+}
+
+// When an admin update reaches the pod: "now" rolls it right away (default),
+// "next_restart" only saves to the DB.
+export type ApplyMode = 'now' | 'next_restart';
+
 export interface AdminProject {
   id: string;
   name: string;
@@ -185,6 +197,9 @@ export interface AdminProject {
   createdAt: string;
   updatedAt: string;
   deletedAt?: string;
+  // Drift check result: pending changes that apply on the next restart
+  pendingChanges?: PendingChange[];
+  driftCheckedAt?: string;
 }
 
 export interface CreateProjectRequest {
@@ -246,6 +261,7 @@ export interface UpdateProjectRequest {
   ptyLoggingIncludeRaw?: boolean;   // Include base64 raw bytes
   envVars?: Record<string, string>;
   imageTag?: string;
+  applyMode?: ApplyMode;
 }
 
 export interface AdminProjectsResponse {

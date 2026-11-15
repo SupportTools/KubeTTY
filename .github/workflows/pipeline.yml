@@ -351,11 +351,160 @@ jobs:
           path: helm-packages/*.tgz
           retention-days: 3
 
-  # Stage 6: Deploy to Production
+  # Stage 6a: Deploy to Dev (health gate for production)
+  # The dev gateway (kubetty-gateway-dev, https://kubetty-dev.support.tools) used to be
+  # hand-deployed with `helm upgrade --reuse-values --set-string image.digest=...`, so dev
+  # drifted and prd was the first place a build ran. Now every main/tag run deploys the SAME
+  # build digest to dev first, health-gates it, and deploy-production needs this job: a dev
+  # failure stops the prd deploy. Auth is the prd pattern: keyless GitHub OIDC -> Vault
+  # kubernetes-onprem/creds/kubetty -> kubetty-ci-deployer (dev RBAC: cluster-services
+  # github-actions/supporttools/ci-deployers/kubetty-rbac.yaml, cluster-services-1407).
+  # values.dev.yaml + the three --set-string values below render byte-identical to the
+  # hand-deployed revision 21 (verified 2026-11-15), so --reuse-values is not needed.
+  deploy-dev:
+    name: Deploy to Dev
+    runs-on: self-hosted-linux
+    needs: [build, helm-validate]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      id-token: write          # GitHub OIDC -> Vault (keyless, namespace-scoped K8s token)
+    timeout-minutes: 45
+    env:
+      DEPLOY_TIMEOUT: 15m      # cold pull of the ~2.7 GB image (taskforge-2682)
+      DEV_NAMESPACE: kubetty-gateway-dev
+      # In-cluster Service: the runners are pods in a1-ops-prd, so this tests the gateway
+      # itself rather than ingress/DNS/Cloudflare. /api/healthz pings the database.
+      DEV_HEALTH_URL: http://gateway.kubetty-gateway-dev.svc:8080/api/healthz
+    outputs:
+      deployed-digest: ${{ steps.deploy.outputs.deployed-digest }}
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    environment:
+      name: dev
+      url: https://kubetty-dev.support.tools
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.3'
+
+      - name: Helm (baked into the runner image)
+        run: |
+          command -v helm >/dev/null || { echo "::error::helm is not on the runner image; fix ci-runners, do not download it here"; exit 1; }
+          helm version --short
+
+      - name: Set up dev kubeconfig
+        uses: ./.github/actions/setup-kubeconfig-onprem
+        with:
+          namespace: kubetty-gateway-dev
+
+      - name: Resolve image tag
+        id: extract-tag
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"; TAG="${TAG#v}"
+            RECOMMENDED="${TAG}"
+          else
+            TAG="latest"
+            RECOMMENDED=$(git ls-remote --tags --refs origin 'v*' \
+              | sed -n 's#.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$#\1#p' \
+              | sort -V | tail -1)
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "recommended=${RECOMMENDED}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to dev
+        id: deploy
+        env:
+          IMAGE_REPOSITORY: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ steps.extract-tag.outputs.tag }}
+          RECOMMENDED_TAG: ${{ steps.extract-tag.outputs.recommended }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.image-digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::refusing to deploy an invalid image digest: '$IMAGE_DIGEST'"
+            exit 1
+          fi
+          EXTRA_SET=()
+          if [[ -n "${RECOMMENDED_TAG}" ]]; then
+            EXTRA_SET+=(--set-string "env.RECOMMENDED_IMAGE_TAG=${RECOMMENDED_TAG}")
+          fi
+          echo "Previous dev image: $(kubectl get deployment gateway -n "$DEV_NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '<none>')"
+          echo "Deploying ${IMAGE_REPOSITORY}@${IMAGE_DIGEST} (tag ${IMAGE_TAG}) to ${DEV_NAMESPACE}"
+          # --atomic: a failed rollout rolls dev back and fails this job, which skips prd.
+          helm upgrade --install kubetty-gateway deploy/helm-gateway/ \
+            -n "$DEV_NAMESPACE" \
+            -f deploy/helm-gateway/values.dev.yaml \
+            --set-string image.repository="${IMAGE_REPOSITORY}" \
+            --set-string image.tag="${IMAGE_TAG}" \
+            --set-string image.digest="${IMAGE_DIGEST}" \
+            "${EXTRA_SET[@]}" \
+            --wait \
+            --timeout="${DEPLOY_TIMEOUT}" \
+            --history-max=20 \
+            --atomic
+          echo "deployed-digest=${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Health gate
+        env:
+          EXPECTED_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image-digest }}
+        run: |
+          set -euo pipefail
+          kubectl rollout status deployment/gateway -n "$DEV_NAMESPACE" --timeout="${DEPLOY_TIMEOUT}"
+          DEPLOYED_IMAGE=$(kubectl get deployment gateway -n "$DEV_NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          if [[ "$DEPLOYED_IMAGE" != "$EXPECTED_IMAGE" ]]; then
+            echo "::error::dev deployment image '$DEPLOYED_IMAGE' does not match '$EXPECTED_IMAGE'"
+            exit 1
+          fi
+          # Every non-terminating pod must be Ready on the expected image.
+          BAD=$(kubectl get pods -n "$DEV_NAMESPACE" -l app.kubernetes.io/name=kubetty-gateway -o json \
+            | jq --arg e "$EXPECTED_IMAGE" '[.items[] | select(.metadata.deletionTimestamp == null) | select(.spec.containers[0].image != $e or (.status.containerStatuses[0].ready != true))] | length')
+          if [[ "$BAD" -ne 0 ]]; then
+            echo "::error::${BAD} dev gateway pod(s) not Ready on ${EXPECTED_IMAGE}"
+            kubectl get pods -n "$DEV_NAMESPACE" -l app.kubernetes.io/name=kubetty-gateway -o wide || true
+            exit 1
+          fi
+          # Application health: status=healthy and database=ok, 3 consecutive passes.
+          ok=0
+          for i in $(seq 1 30); do
+            BODY=$(curl -sS -m 10 "$DEV_HEALTH_URL" 2>&1 || true)
+            if jq -e '.status == "healthy" and .components.database == "ok"' >/dev/null 2>&1 <<<"$BODY"; then
+              ok=$((ok + 1))
+              [[ $ok -ge 3 ]] && { echo "✓ dev health: ${BODY}"; exit 0; }
+            else
+              ok=0
+              echo "attempt ${i}: not healthy yet: ${BODY}"
+            fi
+            sleep 10
+          done
+          echo "::error::dev gateway did not report healthy at ${DEV_HEALTH_URL}; production deploy is blocked"
+          exit 1
+
+      - name: Roll dev back on failed health gate
+        if: failure() && steps.deploy.outcome == 'success'
+        run: |
+          set -euo pipefail
+          kubectl logs deployment/gateway -n "$DEV_NAMESPACE" --tail=100 || true
+          kubectl get events -n "$DEV_NAMESPACE" --sort-by='.lastTimestamp' | tail -20 || true
+          PREV=$(helm history kubetty-gateway -n "$DEV_NAMESPACE" -o json | jq -r '[.[] | select(.status == "superseded")] | last | .revision // empty')
+          if [[ -n "$PREV" ]]; then
+            helm rollback kubetty-gateway "$PREV" -n "$DEV_NAMESPACE" --wait --timeout="${DEPLOY_TIMEOUT}"
+            echo "Rolled dev back to revision ${PREV}"
+          fi
+
+  # Stage 6b: Deploy to Production
   deploy-production:
     name: Deploy to Production
     runs-on: self-hosted-linux
-    needs: [build, helm-validate]
+    needs: [build, helm-validate, deploy-dev]   # dev must deploy and pass its health gate first
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
@@ -463,6 +612,7 @@ jobs:
           RECOMMENDED_TAG: ${{ steps.extract-tag.outputs.recommended }}
           IMAGE_DIGEST: ${{ needs.build.outputs.image-digest }}
           RUNTIME_IMAGE_DIGEST: ${{ needs.build.outputs.runtime-image-digest }}
+          DEV_DIGEST: ${{ needs.deploy-dev.outputs.deployed-digest }}
         run: |
           set -euo pipefail
           EXTRA_SET=()
@@ -478,6 +628,11 @@ jobs:
             exit 1
           fi
           EXPECTED_IMAGE="${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+          if [[ "$IMAGE_DIGEST" != "$DEV_DIGEST" ]]; then
+            echo "::error::prd digest '$IMAGE_DIGEST' is not the digest dev was health-gated on: '$DEV_DIGEST'"
+            exit 1
+          fi
+          echo "Same digest as health-gated dev: ${DEV_DIGEST}"
 
           # Capture current revision for potential rollback
           CURRENT_REVISION=$(helm history kubetty-gateway -n kubetty-gateway-prd --max 1 -o json 2>/dev/null | jq -r '.[0].revision // "0"') || CURRENT_REVISION="0"

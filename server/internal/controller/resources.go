@@ -425,7 +425,11 @@ func BuildNetworkPolicy(p *projects.Project, cfg ResourceConfig, gatewayNamespac
 // ca-certificates 20260909, which still trusts the compromised emSign ECC Root
 // CA - G3 (USN-8944-1); 29.9.3 ships 20261020 and does not. dockerd verifies
 // registry TLS against this bundle when it pulls images.
-const DinDImage = "docker:29.9.3-dind@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121"
+// cluster-services-1405: 20261020 still ships emSign C1, C3 and G1 (only G3 was
+// removed), so the sidecar now runs the no-emSign derived image of that same
+// 29.9.3 digest (SupportTools/noemsign-images: one appended clean CA-bundle layer,
+// upstream layers and config untouched), pulled from Harbor project `noemsign`.
+const DinDImage = "harbor.support.tools/noemsign/library/docker:29.9.3-dind-noemsign.1@sha256:005e01ddc00d15946f3098ec36777d4844abb057a3ea570de2d0a723251bbf64"
 
 // BuildDeployment creates a Deployment for the project pod.
 // Name format: {prefix}{project-name}

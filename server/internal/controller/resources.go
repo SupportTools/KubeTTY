@@ -433,6 +433,82 @@ const DinDImage = "harbor.support.tools/noemsign/library/docker:29.9.3-dind-noem
 
 // BuildDeployment creates a Deployment for the project pod.
 // Name format: {prefix}{project-name}
+// initPermissionsScript is the init-permissions container's script. It makes
+// the project volume's opt/home/usr-local-go trees owned by mmattox before
+// the sandbox starts.
+//
+// The cost is the walk, not the chown. A project volume holds the user's whole
+// workspace: on 2026-11-17 fruition had 5.2M inodes and fcp 4.9M (about 93% of
+// them source checkouts under ~/go/src), and a warm-cache walk took ~42s while
+// the number of files that actually needed a chown was zero. Cold-cache, over
+// iSCSI, the walk exceeded the old fixed `timeout 300`, so the init container
+// failed and kubelet restarted it, which began the same walk again from the
+// top (cluster-services-1430: fruition 2 init restarts, fcp 1).
+//
+// So the walk is supervised instead of hard-killed:
+//   - stall: if find (plus its reaped chown children) accrues no CPU time for
+//     CHOWN_STALL_SECONDS, the volume is treated as hung and the container
+//     fails, so kubelet retries. This keeps the original intent of the timeout
+//     (do not D-state forever on a dead CSI/iSCSI session,
+//     cluster-services-alert-remediation-111).
+//   - budget: a walk that is still making progress after CHOWN_BUDGET_SECONDS
+//     is stopped and startup continues (exit 0). Anything it did not reach is
+//     fixed on a later start, and the sandbox is never held in an init
+//     restart loop by a large but healthy volume.
+//
+// find -exec ... {} + batches chown calls; chown -h changes a symlink itself
+// rather than whatever it points to; -xdev keeps the walk on the volume.
+// KUBETTY_DATA_DIR and the CHOWN_* variables exist so tests can drive it.
+const initPermissionsScript = `
+set -euo pipefail
+DATA="${KUBETTY_DATA_DIR:-/data}"
+BUDGET="${CHOWN_BUDGET_SECONDS:-900}"
+STALL="${CHOWN_STALL_SECONDS:-120}"
+POLL="${CHOWN_POLL_SECONDS:-5}"
+if ! getent group mmattox >/dev/null 2>&1; then
+  groupadd -g 1000 mmattox
+fi
+if ! id -u mmattox >/dev/null 2>&1; then
+  useradd -u 1000 -g mmattox -M -s /usr/sbin/nologin mmattox
+fi
+mkdir -p "$DATA/opt" "$DATA/home" "$DATA/usr-local-go" "$DATA/var-lib-docker"
+mkdir -p "$DATA/home/mmattox"
+
+find "$DATA/opt" "$DATA/home" "$DATA/usr-local-go" -xdev \! -user mmattox -exec chown -h mmattox:mmattox {} + &
+pid=$!
+
+# utime+stime+cutime+cstime of the walker, in clock ticks.
+cpu_ticks() { awk '{print $14+$15+$16+$17}' "/proc/$1/stat" 2>/dev/null || echo gone; }
+
+start=$SECONDS
+last=""
+idle=0
+while kill -0 "$pid" 2>/dev/null; do
+  sleep "$POLL"
+  now=$(cpu_ticks "$pid")
+  [ "$now" = gone ] && break
+  if [ "$now" = "$last" ]; then idle=$((idle + POLL)); else idle=0; last=$now; fi
+  if [ "$idle" -ge "$STALL" ]; then
+    echo "init-permissions: ownership walk made no CPU progress for ${idle}s; failing so kubelet retries (storage may be hung)" >&2
+    kill "$pid" 2>/dev/null || true
+    exit 1
+  fi
+  if [ $((SECONDS - start)) -ge "$BUDGET" ]; then
+    echo "init-permissions: ownership walk still running after ${BUDGET}s on a large volume; continuing startup, files not reached are fixed on a later start" >&2
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    exit 0
+  fi
+done
+rc=0
+wait "$pid" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "init-permissions: ownership walk failed (exit $rc)" >&2
+  exit "$rc"
+fi
+echo "init-permissions: ownership walk finished in $((SECONDS - start))s"
+`
+
 func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName string) *appsv1.Deployment {
 	replicas := int32(1)
 	resourceName := cfg.ResourceName(p.Name)
@@ -629,24 +705,9 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 
 	// Permission setup init container
 	initContainers = append(initContainers, corev1.Container{
-		Name:  "init-permissions",
-		Image: "ubuntu:22.04",
-		Command: []string{"/bin/bash", "-c", `
-set -euo pipefail
-if ! getent group mmattox >/dev/null 2>&1; then
-  groupadd -g 1000 mmattox
-fi
-if ! id -u mmattox >/dev/null 2>&1; then
-  useradd -u 1000 -g mmattox -M -s /usr/sbin/nologin mmattox
-fi
-mkdir -p /data/opt /data/home /data/usr-local-go /data/var-lib-docker
-mkdir -p /data/home/mmattox
-# Idempotent + bounded chown: only touch files not already owned by mmattox
-# (warm restarts become near-instant), and cap runtime so a transient CSI/iSCSI
-# session hang fails the init fast for kubelet to recreate the pod with a fresh
-# session, instead of D-stating indefinitely. Ref: cluster-services-alert-remediation-111.
-timeout 300 find /data/opt /data/home /data/usr-local-go \! -user mmattox -exec chown mmattox:mmattox {} +
-`},
+		Name:            "init-permissions",
+		Image:           "ubuntu:22.04",
+		Command:         []string{"/bin/bash", "-c", initPermissionsScript},
 		SecurityContext: &corev1.SecurityContext{RunAsUser: &rootID},
 		VolumeMounts:    []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
 	})

@@ -146,8 +146,10 @@ spec:
               value: {{ .Values.env.claudeMaxTokens | quote }}
             - name: ANTHROPIC_BASE_URL
               value: {{ .Values.env.anthropicBaseURL | quote }}
+            # --use-openssl-ca is always appended: Node's compiled-in roots still include eMudhra
+            # emSign roots; the image's OpenSSL store has none (fleet CA standard, cluster-services-1375).
             - name: NODE_OPTIONS
-              value: {{ .Values.env.nodeOptions | quote }}
+              value: {{ printf "%s --use-openssl-ca" (.Values.env.nodeOptions | default "") | trim | quote }}
             - name: CLAUDE_CONFIG_DIR
               value: {{ .Values.env.claudeConfigDir | quote }}
             {{- if .Values.pipelines.dind.enabled }}

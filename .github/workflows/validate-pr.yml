@@ -178,7 +178,10 @@ jobs:
           KUBERNETES_SERVICE_HOST: ''
           KUBERNETES_SERVICE_PORT: ''
         run: |
-          go test -v -race -run Integration ./...
+          # -p 1: every package shares this one database. gateway/tabs tests wipe gateway_tabs, which
+          # raced projects' auto-follow test (its open-tab rows vanished mid-test) when packages ran in
+          # parallel (cluster-services-1438 PR CI).
+          go test -p 1 -v -race -run Integration ./...
 
       - name: Run all tests with database
         working-directory: server
@@ -192,7 +195,10 @@ jobs:
           KUBERNETES_SERVICE_HOST: ''
           KUBERNETES_SERVICE_PORT: ''
         run: |
-          go test -v -race -coverprofile=coverage-integration.out -covermode=atomic ./...
+          # -p 1: every package shares this one database. gateway/tabs tests wipe gateway_tabs, which
+          # raced projects' auto-follow test (its open-tab rows vanished mid-test) when packages ran in
+          # parallel (cluster-services-1438 PR CI).
+          go test -p 1 -v -race -coverprofile=coverage-integration.out -covermode=atomic ./...
 
       - name: Upload integration coverage report
         uses: actions/upload-artifact@v4

@@ -383,29 +383,21 @@ ARG KUBETTY_VERSION
 RUN echo "${KUBETTY_VERSION}" > /etc/kubetty-version && chmod 644 /etc/kubetty-version
 
 # Fleet CA standard (operator decision 2026-11-13, SupportTools cluster-services-1375): NO eMudhra
-# emSign roots at all (ECC G3, ECC C3, Root C1, Root G1). Ubuntu's ca-certificates and certifi only
-# dropped ECC G3/C3/C1 in some places, so:
-#  - deselect every emSign root in /etc/ca-certificates.conf ("!" lines survive later ca-certificates
-#    upgrades) and rebuild the store with --fresh;
-#  - point every certifi cacert.pem and gRPC roots.pem at the cleaned system bundle;
-#  - make Node use the OpenSSL (system) store instead of its compiled-in roots, which still embed
-#    all four emSign roots in Node 20;
-#  - fail the build if any bundle or /etc/ssl/certs file still decodes (openssl) to an emSign subject.
-# No fetch: runs on what is already installed.
-RUN set -eu; \
-    sed -i -E 's@^(mozilla/emSign_[^/]*\.crt)$@!\1@' /etc/ca-certificates.conf; \
-    update-ca-certificates --fresh >/dev/null; \
-    find / -xdev \( -path '*/certifi/cacert.pem' -o -path '*/grpc/_cython/_credentials/roots.pem' \) -type f \
-      -exec ln -sf /etc/ssl/certs/ca-certificates.crt {} \; ; \
-    bad=0; \
-    for b in /etc/ssl/certs/ca-certificates.crt $(find / -xdev \( -path '*/certifi/cacert.pem' -o -path '*/grpc/_cython/_credentials/roots.pem' \)); do \
-      if openssl crl2pkcs7 -nocrl -certfile "$b" | openssl pkcs7 -print_certs -noout | grep -i '^subject=.*emSign'; then \
-        echo "FATAL: $b trusts an emSign root" >&2; bad=1; fi; \
-    done; \
-    for f in /etc/ssl/certs/*; do [ -f "$f" ] || continue; openssl x509 -noout -subject -in "$f" 2>/dev/null; done \
-      | grep -i 'emSign' && bad=1; \
-    [ "$bad" = 0 ]; \
-    echo "CA guard: no emSign roots ($(grep -c 'BEGIN CERTIFICATE' /etc/ssl/certs/ca-certificates.crt) certs)"
+# emSign roots at all (ECC G3, ECC C3, Root C1, Root G1), in any file of the image. This is the last
+# root step, so nothing installed later can bring one back. noemsign-ca.sh is a vendored copy of the
+# canonical SupportTools/cluster-services noemsign/noemsign-ca.sh (keep the sha256 identical;
+# cluster-services-1438):
+#  - strip: deselects every emSign entry in /etc/ca-certificates.conf ("!" lines survive later
+#    ca-certificates upgrades), rebuilds the store with --fresh, then deletes every emSign certificate
+#    file (including the deselected /usr/share/ca-certificates/mozilla/emSign_*.crt sources) and
+#    rewrites every PEM bundle (certifi, gRPC roots.pem, ...) without its emSign certificates;
+#  - guard: fails the build if any PEM/DER certificate anywhere on the filesystem still decodes to
+#    an emSign/eMudhra subject. Node's compiled-in roots are a binary (WARN only); NODE_OPTIONS below
+#    makes Node use the cleaned system store instead.
+# No fetch: runs on what is already installed. This one image is both the gateway and the project
+# sandbox image, so the guard covers both.
+COPY --chmod=0755 noemsign-ca.sh /usr/local/sbin/noemsign-ca.sh
+RUN /usr/local/sbin/noemsign-ca.sh strip / && /usr/local/sbin/noemsign-ca.sh guard /
 ENV NODE_OPTIONS=--use-openssl-ca
 
 EXPOSE 8080

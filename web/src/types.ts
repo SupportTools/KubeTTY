@@ -188,6 +188,9 @@ export interface AdminProject {
   envVars?: Record<string, string>;
   imageRepository: string;
   imageTag: string;
+  // Sandbox image auto-follow (cluster-services-1376/1382): when true (the default) the controller
+  // moves an idle project to the gateway's recommended image; false pins it to imageTag.
+  imageAutoFollow?: boolean;
   status: AdminProjectStatus;
   statusMessage?: string;
   lastHealthCheck?: string;

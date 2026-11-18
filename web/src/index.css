@@ -1413,6 +1413,18 @@ button.danger:hover:not(:disabled) {
   border: 1px solid #f59e0b;
 }
 
+/* cluster-services-1382: project pinned to its image (auto-follow off) */
+.pinned-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: #94a3b8;
+  border: 1px solid #94a3b8;
+}
+
 .pending-changes-table .mono {
   font-family: monospace;
 }

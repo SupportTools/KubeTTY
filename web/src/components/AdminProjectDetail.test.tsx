@@ -114,3 +114,34 @@ describe("AdminProjectDetail pending changes", () => {
     expect(putBodies()[0]).toMatchObject({ cpuLimit: "2", applyMode: "next_restart" });
   });
 });
+
+// cluster-services-1382: per-project sandbox image auto-follow switch.
+describe("AdminProjectDetail image auto-follow switch", () => {
+  beforeEach(() => {
+    authFetch.mockReset();
+  });
+
+  it("shows the switch on when imageAutoFollow is unset or true", () => {
+    renderDetail(project());
+    const sw = screen.getByRole("switch", { name: "Auto-follow recommended image" });
+    expect(sw).toBeChecked();
+  });
+
+  it("shows the switch off and the pinned tag when imageAutoFollow is false", () => {
+    renderDetail(project({ imageAutoFollow: false }));
+    expect(screen.getByRole("switch", { name: "Auto-follow recommended image" })).not.toBeChecked();
+    expect(screen.getByText(/Pinned to v1.0.0/)).toBeInTheDocument();
+  });
+
+  it("turning it off sends a settings-only PUT with imageAutoFollow and nothing that rolls the pod", async () => {
+    renderDetail(project());
+    fireEvent.click(screen.getByRole("switch", { name: "Auto-follow recommended image" }));
+    await waitFor(() => expect(putBodies()).toHaveLength(1));
+    expect(putBodies()[0]).toEqual({ imageAutoFollow: false });
+    for (const k of ["imageTag", "cpuRequest", "cpuLimit", "memoryRequest", "memoryLimit", "storageSize"]) {
+      expect(putBodies()[0]).not.toHaveProperty(k);
+    }
+    const restarts = authFetch.mock.calls.filter(([url]) => String(url).match(/\/(restart|upgrade)$/));
+    expect(restarts).toHaveLength(0);
+  });
+});

@@ -81,6 +81,9 @@ const AdminProjectDetail = ({
   // Pause/Unpause state
   const [pausing, setPausing] = useState(false);
 
+  // Image auto-follow switch (cluster-services-1382)
+  const [savingAutoFollow, setSavingAutoFollow] = useState(false);
+
   // Edit Settings modal state
   const [showEditSettingsModal, setShowEditSettingsModal] = useState(false);
   const [editSettings, setEditSettings] = useState({
@@ -414,6 +417,32 @@ const AdminProjectDetail = ({
     return date.toLocaleString();
   };
 
+  // Image auto-follow (cluster-services-1382). A settings-only PUT: the request carries
+  // imageAutoFollow and nothing else, so the server saves it without rolling the pod
+  // (only imageTag/resource fields set status=updating).
+  const autoFollow = project.imageAutoFollow !== false;
+  const handleAutoFollowToggle = async (enabled: boolean) => {
+    setSavingAutoFollow(true);
+    setError(null);
+    try {
+      const res = await authFetch(`/api/admin/projects/${project.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageAutoFollow: enabled }),
+      });
+      if (!res.ok) {
+        throw new Error(await parseErrorResponse(res));
+      }
+      const updated = (await res.json()) as AdminProject;
+      setProject((prev) => ({ ...prev, ...updated }));
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update image auto-follow");
+    } finally {
+      setSavingAutoFollow(false);
+    }
+  };
+
   // Pause/Unpause handlers
   const handlePauseToggle = async () => {
     const action = project.paused ? "unpause" : "pause";
@@ -574,6 +603,27 @@ const AdminProjectDetail = ({
               <div className="detail-item">
                 <label>Image</label>
                 <span className="mono">{project.imageRepository}:{project.imageTag}</span>
+              </div>
+              <div className="detail-item">
+                <label htmlFor="image-auto-follow">Auto-follow recommended image</label>
+                <span className="checkbox-group">
+                  <input
+                    id="image-auto-follow"
+                    type="checkbox"
+                    role="switch"
+                    aria-checked={autoFollow}
+                    checked={autoFollow}
+                    disabled={savingAutoFollow}
+                    onChange={(e) => handleAutoFollowToggle(e.target.checked)}
+                  />{" "}
+                  {autoFollow ? "On" : "Off (pinned)"}
+                </span>
+                <small className="form-help">
+                  {autoFollow
+                    ? "When idle, the project moves to the recommended image automatically."
+                    : `Pinned to ${project.imageTag}; upgrade it by hand.`}{" "}
+                  Changing this does not restart the pod.
+                </small>
               </div>
               <div className="detail-item">
                 <label>Max Tabs (Per Client)</label>

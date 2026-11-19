@@ -19,6 +19,11 @@ func main() {
 	if os.Getenv("SESSION_ID") == "" {
 		_ = os.Setenv("SESSION_ID", "kubetty-authuser")
 	}
+	// The CLI only talks to the database; it never authenticates a request. The
+	// project-mode config.Load validates AUTH_MODE settings it does not read, so in
+	// the gateway pod (AUTH_MODE=cloudflare-access) it refused to start
+	// (cluster-services-1534). Validate only what this tool uses.
+	_ = os.Setenv("AUTH_MODE", "disabled")
 
 	cfg, err := config.Load()
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	"github.com/supporttools/KubeTTY/server/internal/config"
@@ -48,6 +49,8 @@ func main() {
 		handleList(db)
 	case "set-active":
 		handleSetActive(db, os.Args[2:])
+	case "scramble-passwords":
+		handleScramble(db, os.Args[2:])
 	default:
 		usage()
 	}
@@ -121,6 +124,23 @@ func handleSetActive(store auth.Store, args []string) {
 	fmt.Printf("user %s is now %s\n", user.Username, state)
 }
 
+// handleScramble retires every local password (cluster-services-1534): each
+// hash becomes bcrypt(64 random bytes, discarded) and refresh tokens are revoked.
+// Take a database backup first; there is no undo short of restoring it.
+func handleScramble(store auth.Store, args []string) {
+	fs := flag.NewFlagSet("scramble-passwords", flag.ExitOnError)
+	confirm := fs.Bool("confirm", false, "required: really replace every password hash")
+	fs.Parse(args)
+	if !*confirm {
+		log.Fatalf("refusing without --confirm: this replaces EVERY account's password hash with an unusable one")
+	}
+	res, err := auth.ScramblePasswords(context.Background(), store, nil, time.Now())
+	if err != nil {
+		log.Fatalf("scramble passwords (stopped after %d accounts): %v", res.Users, err)
+	}
+	fmt.Printf("scrambled %d password hash(es); revoked %d refresh token(s)\n", res.Users, res.RevokedRefresh)
+}
+
 func handleList(store auth.Store) {
 	users, err := store.ListUsers(context.Background())
 	if err != nil {
@@ -148,6 +168,10 @@ Commands:
   update-password --username <name> --password <secret>
   set-active      --username <name> [--active=true|false]
   list
+  scramble-passwords --confirm
+                  replace EVERY password hash with bcrypt(64 random bytes,
+                  discarded) and revoke all refresh tokens (local passwords
+                  retired, cluster-services-1534). Back up the database first.
 
 Environment:
   SESSION_ID must be set (the helper defaults to kubetty-authuser if absent).

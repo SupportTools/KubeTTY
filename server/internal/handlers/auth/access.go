@@ -70,12 +70,13 @@ func ParseAccessUsers(spec string) (map[string]string, error) {
 // yet gets an SSO-only account on first login. Existing accounts (with their
 // tab ownership) are reused by username.
 type AccessUserMapper struct {
-	store  auth.Store
-	users  map[string]string
-	ttl    time.Duration
-	now    func() time.Time
-	mu     sync.Mutex
-	cached map[string]accessCacheEntry
+	store    auth.Store
+	users    map[string]string
+	services map[string]ServicePrincipal
+	ttl      time.Duration
+	now      func() time.Time
+	mu       sync.Mutex
+	cached   map[string]accessCacheEntry
 }
 
 type accessCacheEntry struct {
@@ -88,6 +89,78 @@ func NewAccessUserMapper(store auth.Store, users map[string]string) *AccessUserM
 	return &AccessUserMapper{store: store, users: users, ttl: time.Minute, now: time.Now, cached: map[string]accessCacheEntry{}}
 }
 
+// ServicePrincipal is what an allowlisted Access service token maps to: a
+// dedicated KubeTTY user that is always Restricted to one project.
+type ServicePrincipal struct {
+	Username string
+	Project  string
+}
+
+// ParseAccessServiceTokens parses AUTH_ACCESS_SERVICE_TOKENS: comma-separated
+// <client_id>=<username>:<project> entries (cluster-services-1534). An empty
+// spec means no service token is accepted. A username listed in
+// AUTH_ACCESS_USERS (a human account) is refused, so a service token can never
+// act as a person.
+func ParseAccessServiceTokens(spec string, humans map[string]string) (map[string]ServicePrincipal, error) {
+	out := map[string]ServicePrincipal{}
+	humanNames := map[string]bool{}
+	for _, u := range humans {
+		humanNames[strings.ToLower(u)] = true
+	}
+	seenUser := map[string]bool{}
+	for _, item := range strings.Split(spec, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		clientID, rest, ok := strings.Cut(item, "=")
+		clientID = strings.TrimSpace(clientID)
+		username, project, ok2 := strings.Cut(rest, ":")
+		username = strings.TrimSpace(username)
+		project = strings.TrimSpace(project)
+		if !ok || !ok2 || !strings.HasSuffix(clientID, ".access") || len(clientID) <= len(".access") || username == "" || project == "" {
+			return nil, fmt.Errorf("AUTH_ACCESS_SERVICE_TOKENS entry %q must be <client_id>.access=<username>:<project>", item)
+		}
+		if len(username) > MaxUsernameLength || !UsernameRegex.MatchString(username) {
+			return nil, fmt.Errorf("AUTH_ACCESS_SERVICE_TOKENS entry %q: invalid username", item)
+		}
+		if humanNames[strings.ToLower(username)] {
+			return nil, fmt.Errorf("AUTH_ACCESS_SERVICE_TOKENS entry %q: %q is a human account in AUTH_ACCESS_USERS", item, username)
+		}
+		if _, dup := out[clientID]; dup {
+			return nil, fmt.Errorf("AUTH_ACCESS_SERVICE_TOKENS lists %q twice", clientID)
+		}
+		if seenUser[strings.ToLower(username)] {
+			return nil, fmt.Errorf("AUTH_ACCESS_SERVICE_TOKENS maps two tokens to %q", username)
+		}
+		seenUser[strings.ToLower(username)] = true
+		out[clientID] = ServicePrincipal{Username: username, Project: project}
+	}
+	return out, nil
+}
+
+// WithServiceTokens enables the given Access service tokens (client ID ->
+// principal). Without it every service token is refused (403).
+func (m *AccessUserMapper) WithServiceTokens(services map[string]ServicePrincipal) *AccessUserMapper {
+	m.services = services
+	return m
+}
+
+// LookupServiceToken returns the restricted KubeTTY user for an allowlisted
+// service token client ID. The account is created on first use with a
+// password hash bcrypt can never match.
+func (m *AccessUserMapper) LookupServiceToken(ctx context.Context, clientID string) (*User, error) {
+	p, ok := m.services[strings.TrimSpace(clientID)]
+	if !ok {
+		return nil, ErrAccessUserNotAllowed
+	}
+	u, err := m.loadOrCreate(ctx, "svc:"+clientID, p.Username)
+	if err != nil {
+		return nil, err
+	}
+	return &User{ID: u.ID, Username: u.Username, Restricted: true, AllowedProject: p.Project}, nil
+}
+
 // Lookup returns the KubeTTY user for email.
 func (m *AccessUserMapper) Lookup(ctx context.Context, email string) (*User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
@@ -95,8 +168,14 @@ func (m *AccessUserMapper) Lookup(ctx context.Context, email string) (*User, err
 	if !ok {
 		return nil, ErrAccessUserNotAllowed
 	}
+	return m.loadOrCreate(ctx, email, username)
+}
+
+// loadOrCreate returns the (cached) active account for username, creating an
+// SSO-only one if it does not exist. key identifies the identity in the cache.
+func (m *AccessUserMapper) loadOrCreate(ctx context.Context, key, username string) (*User, error) {
 	m.mu.Lock()
-	if e, ok := m.cached[email]; ok && m.now().Sub(e.at) < m.ttl {
+	if e, ok := m.cached[key]; ok && m.now().Sub(e.at) < m.ttl {
 		m.mu.Unlock()
 		return e.user, nil
 	}
@@ -107,7 +186,7 @@ func (m *AccessUserMapper) Lookup(ctx context.Context, email string) (*User, err
 		nu := auth.User{ID: uuid.New(), Username: username, PasswordHash: ssoPasswordHash, IsActive: true}
 		cerr := m.store.CreateUser(ctx, nu)
 		if cerr == nil {
-			log.WithFields(log.Fields{"username": username, "email": email}).Info("auth/access: created SSO-only user on first login")
+			log.WithFields(log.Fields{"username": username, "identity": key}).Info("auth/access: created SSO-only user on first login")
 		}
 		// Re-read either way: a concurrent first login may have created it.
 		u, err = m.store.GetUserByUsername(ctx, username)
@@ -124,7 +203,7 @@ func (m *AccessUserMapper) Lookup(ctx context.Context, email string) (*User, err
 	_ = m.store.UpdateLastLogin(ctx, u.ID, m.now())
 	out := &User{ID: u.ID, Username: u.Username}
 	m.mu.Lock()
-	m.cached[email] = accessCacheEntry{user: out, at: m.now()}
+	m.cached[key] = accessCacheEntry{user: out, at: m.now()}
 	m.mu.Unlock()
 	return out, nil
 }
@@ -146,6 +225,15 @@ func RequireAccess(v *cfaccess.Verifier, m *AccessUserMapper) func(http.Handler)
 					"error":     err.Error(),
 				}).Warn("auth/access: request refused")
 				WriteAccessFailure(w, status)
+				return
+			}
+			if user.Restricted && !RestrictedRouteAllowed(r) {
+				log.WithFields(log.Fields{
+					"path":     r.URL.Path,
+					"method":   r.Method,
+					"username": user.Username,
+				}).Warn("auth/access: route refused for restricted service principal")
+				_ = util.WriteJSON(w, http.StatusForbidden, map[string]any{"error": "this service principal may not use this endpoint"})
 				return
 			}
 			if isWebSocketUpgrade(r) && !sameOrigin(r) {
@@ -172,14 +260,52 @@ func AuthenticateAccess(r *http.Request, v *cfaccess.Verifier, m *AccessUserMapp
 		}
 		return nil, http.StatusUnauthorized, err
 	}
-	user, err := m.Lookup(r.Context(), claims.Email)
+	var user *User
+	ident := claims.Email
+	if claims.ServiceToken {
+		ident = "service token " + claims.CommonName
+		user, err = m.LookupServiceToken(r.Context(), claims.CommonName)
+	} else {
+		user, err = m.Lookup(r.Context(), claims.Email)
+	}
 	if err != nil {
 		if errors.Is(err, ErrAccessUserNotAllowed) {
-			return nil, http.StatusForbidden, fmt.Errorf("%w: %s", err, claims.Email)
+			return nil, http.StatusForbidden, fmt.Errorf("%w: %s", err, ident)
 		}
 		return nil, http.StatusInternalServerError, err
 	}
 	return user, 0, nil
+}
+
+// RestrictedRouteAllowed is the complete list of what a restricted service
+// principal (the CI smoke token, cluster-services-1534) may do: read who it
+// is, list/open its own terminal tabs, attach to one, and close one. The
+// handlers still enforce tab ownership and the allowed project; everything
+// else (admin API, settings, project list, events, VNC, session logs,
+// force-takeover) is refused here.
+func RestrictedRouteAllowed(r *http.Request) bool {
+	p := r.URL.Path
+	switch {
+	case r.Method == http.MethodGet && (p == "/api/auth/me" || p == "/api/auth/refresh"):
+		return true
+	case p == "/api/tabs" && (r.Method == http.MethodGet || r.Method == http.MethodPost):
+		return true
+	case r.Method == http.MethodDelete && strings.HasPrefix(p, "/api/tabs/"):
+		id := strings.TrimPrefix(p, "/api/tabs/")
+		return id != "" && !strings.Contains(id, "/") && id != "reorder" && id != "events"
+	case r.Method == http.MethodGet && p == "/ws":
+		return r.URL.Query().Get("force") == ""
+	}
+	return false
+}
+
+// RestrictedTabRequestAllowed checks a POST /api/tabs body for a restricted
+// principal: a terminal (not GUI) tab on its one project, created new.
+func RestrictedTabRequestAllowed(u *User, projectID string, guiMode bool, openAction string) bool {
+	if u == nil || !u.Restricted {
+		return true
+	}
+	return u.AllowedProject != "" && projectID == u.AllowedProject && !guiMode && (openAction == "" || openAction == "create_new")
 }
 
 // WriteAccessFailure writes the JSON error for a refused request.

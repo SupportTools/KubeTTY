@@ -167,11 +167,16 @@ func main() {
 			// Not fatal: Verify refetches on demand. Requests fail closed (503) until it succeeds.
 			log.WithFields(log.Fields{"error": err.Error(), "certs_url": accessVerifier.CertsURL()}).Warn("gateway/main: could not prefetch Cloudflare Access signing keys")
 		}
-		accessMapper = handlers_auth.NewAccessUserMapper(authStore, users)
+		services, err := handlers_auth.ParseAccessServiceTokens(cfg.AccessServiceTokens, users)
+		if err != nil {
+			log.WithFields(log.Fields{"error": err.Error()}).Fatal("gateway/main: invalid AUTH_ACCESS_SERVICE_TOKENS")
+		}
+		accessMapper = handlers_auth.NewAccessUserMapper(authStore, users).WithServiceTokens(services)
 		log.WithFields(log.Fields{
-			"team_domain": cfg.AccessTeamDomain,
-			"audiences":   len(cfg.AccessAUDs),
-			"users":       len(users),
+			"team_domain":    cfg.AccessTeamDomain,
+			"audiences":      len(cfg.AccessAUDs),
+			"users":          len(users),
+			"service_tokens": len(services),
 		}).Info("gateway/main: authentication via Cloudflare Access JWT (local passwords retired)")
 	}
 	if authStore != nil {
@@ -953,6 +958,12 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.ProjectID == "" {
 			apierrors.WriteError(w, apierrors.BadRequest("projectId is required", ""))
+			return
+		}
+		// A restricted service principal (CI smoke token) may only open a new
+		// terminal tab on its one project (cluster-services-1534).
+		if !handlers_auth.RestrictedTabRequestAllowed(handlers_auth.UserFromContext(r.Context()), req.ProjectID, req.GUIMode, req.OpenAction) {
+			apierrors.WriteError(w, apierrors.Forbidden("this service principal may not open that tab", ""))
 			return
 		}
 

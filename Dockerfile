@@ -99,7 +99,8 @@ WORKDIR /workspace/server
 RUN BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ') && \
     LDFLAGS="-X main.version=${KUBETTY_VERSION} -X main.gitCommit=${GIT_COMMIT} -X main.buildTime=${BUILD_TIME}" && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o /workspace/kubetty-gateway ./cmd/gateway && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o /workspace/kubetty-project ./cmd/project
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o /workspace/kubetty-project ./cmd/project && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /workspace/kubetty-authuser ./cmd/kubetty-authuser
 
 ###############################
 # Runtime image with tooling  #
@@ -508,6 +509,9 @@ RUN chmod +x /etc/profile.d/claude.sh
 # Copy compiled server binaries.
 COPY --from=go-builder /workspace/kubetty-gateway /usr/local/bin/kubetty-gateway
 COPY --from=go-builder /workspace/kubetty-project /usr/local/bin/kubetty-project
+# Account admin CLI (create/list/set-active/scramble-passwords). Run it in the gateway pod, which has the
+# CNPG_* environment: kubectl exec deploy/gateway -- kubetty-authuser list (cluster-services-1534).
+COPY --from=go-builder /workspace/kubetty-authuser /usr/local/bin/kubetty-authuser
 
 # Copy and install entrypoint script for mode selection.
 COPY scripts/entrypoint.sh /usr/local/bin/kubetty-entrypoint

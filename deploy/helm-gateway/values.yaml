@@ -43,10 +43,14 @@ auth:
   # users: comma-separated email=username allowlist. An email maps to the existing
   #   KubeTTY account with that username (keeping its tabs); an allowlisted email
   #   with no account gets an SSO-only account on first login. Others get 403.
+  # serviceTokens: comma-separated <client_id>.access=<username>:<project> entries mapping an
+  #   Access service token to a RESTRICTED user (own tabs on that one project, nothing else).
+  #   Empty = every service token gets 403. Used only by the dev CI smoke (cluster-services-1534).
   access:
     teamDomain: https://supporttools.cloudflareaccess.com
     aud: ""
     users: ""
+    serviceTokens: ""
 
   # JWT secret (inline - not recommended for production)
   jwtSecret: ""

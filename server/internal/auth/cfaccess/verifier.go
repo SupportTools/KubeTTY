@@ -11,7 +11,10 @@
 //   - iss equals the team domain;
 //   - aud contains the Access application's AUD tag for this environment;
 //   - exp is present and in the future, nbf/iat are not in the future;
-//   - an email claim is present (service tokens carry none and are refused).
+//   - an email claim is present, OR the token is an Access service-token token
+//     (type "app", no email, a common_name = the token's client ID). Service
+//     tokens come back with ServiceToken set and an empty Email; the caller
+//     decides whether that client ID is allowed (cluster-services-1534).
 //
 // The Cf-Access-Authenticated-User-Email header is never trusted: it is not
 // signed and any client that reaches the origin directly can set it.
@@ -51,6 +54,11 @@ type Claims struct {
 	Email     string
 	Subject   string
 	ExpiresAt time.Time
+	// ServiceToken is true for a token Cloudflare issued to an Access service
+	// token (non_identity policy). Email is then empty and CommonName holds the
+	// service token's client ID ("<hex>.access").
+	ServiceToken bool
+	CommonName   string
 }
 
 // Config configures a Verifier.
@@ -184,12 +192,21 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (*Claims, error) {
 	}
 	email, _ := claims["email"].(string)
 	email = strings.ToLower(strings.TrimSpace(email))
-	if email == "" {
-		return nil, ErrNoEmail
-	}
 	sub, _ := claims.GetSubject()
 	exp, _ := claims.GetExpirationTime()
 	out := &Claims{Email: email, Subject: sub}
+	if email == "" {
+		// Service-token tokens: type "app", no email, no subject, and the
+		// client ID in common_name. Anything else without an email is refused.
+		typ, _ := claims["type"].(string)
+		cn, _ := claims["common_name"].(string)
+		cn = strings.TrimSpace(cn)
+		if typ != "app" || sub != "" || cn == "" {
+			return nil, ErrNoEmail
+		}
+		out.ServiceToken = true
+		out.CommonName = cn
+	}
 	if exp != nil {
 		out.ExpiresAt = exp.Time
 	}

@@ -224,9 +224,12 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # APT_FALLBACK=none: apt must come from the org fetch-cache (cluster-services-1494); an
+          # unreachable mirror fails the build instead of silently going to the Ubuntu archive.
           build-args: |
             GO_VERSION=1.24.3
             NODE_MAJOR=20
+            APT_FALLBACK=none
 
       - name: Record pushed image identity
         id: image-identity

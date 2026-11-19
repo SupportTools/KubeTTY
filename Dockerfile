@@ -1,4 +1,24 @@
-# syntax=docker/dockerfile:1.6
+# No `# syntax=` directive on purpose: it makes BuildKit pull the docker/dockerfile frontend from
+# Docker Hub before anything else; the frontend built into BuildKit covers every instruction here.
+#
+# Fetch tiers (cluster-services CLAUDE.md build rule; cluster-services-1494):
+#   - base images: the Harbor Docker Hub proxy cache (a cache we run), tag AND digest pinned. The
+#     digests are the ones these tags resolved to on 2026-11-19 (KubeTTY#46 build), so the bases
+#     are byte-identical to what docker.io served. Off-network, override e.g.
+#     --build-arg RUNTIME_IMAGE=ubuntu:22.04.
+#   - apt, Ubuntu archive + security (runtime stage): the org fetch-cache /ubuntu/ and
+#     /ubuntu-security/ prefixes (cluster-services fetch-cache/, in-cluster name, resolves inside a
+#     buildx RUN on the self-hosted-linux runners). Anywhere else it fails fast and falls back to
+#     upstream ("apt source: MIRROR FAILED"); APT_FALLBACK=none makes that a build failure (CI).
+#     Pass --build-arg APT_MIRROR= to skip the attempt. apt verifies the InRelease signatures
+#     either way. The image's own /etc/apt/sources.list is restored after the last apt step, so
+#     the shipped image points at the Ubuntu archive exactly as before.
+#   - STILL pinned/unpinned upstream (follow-up filed from cluster-services-1494): npm (ui-builder
+#     and the global playwright/puppeteer install), Go modules, the NodeSource and Google Chrome apt
+#     repos, the Playwright browser download, pip, and the release binaries curl'd below.
+ARG NODE_IMAGE=harbor.support.tools/dockerhub/library/node:20-bullseye@sha256:c0122351f25f04facee976f9db7214789eabadb489f4e4aea9cd00a0d6af77c4
+ARG GO_IMAGE=harbor.support.tools/dockerhub/library/golang:1.24.3-bullseye@sha256:abe2e2bb9bc0342dd1ba2f719af5c6b3859ca9ad93a7d9bcdd21310bda0327e1
+ARG RUNTIME_IMAGE=harbor.support.tools/dockerhub/library/ubuntu:22.04@sha256:9abcaffc92a5279fff3a6a41635c0800ea33e528425fb389658806476e7defde
 
 ARG GO_VERSION=1.24.3
 ARG NODE_MAJOR=20
@@ -10,7 +30,7 @@ ARG KUBETTY_VERSION=dev
 ###############################
 # Build React frontend assets #
 ###############################
-FROM node:${NODE_MAJOR}-bullseye AS ui-builder
+FROM ${NODE_IMAGE} AS ui-builder
 WORKDIR /workspace
 
 # Copy both web and server so Vite's output path (../server/cmd/gateway/ui/dist) exists.
@@ -24,7 +44,7 @@ RUN npm run build
 ###############################
 # Build Go backend binary     #
 ###############################
-FROM golang:${GO_VERSION}-bullseye AS go-builder
+FROM ${GO_IMAGE} AS go-builder
 ARG KUBETTY_VERSION=dev
 ARG GIT_COMMIT=unknown
 WORKDIR /workspace
@@ -48,7 +68,7 @@ RUN BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ') && \
 ###############################
 # Runtime image with tooling  #
 ###############################
-FROM ubuntu:22.04 AS runtime
+FROM ${RUNTIME_IMAGE} AS runtime
 ARG NODE_MAJOR
 ARG GO_VERSION
 ARG KUBECTL_VERSION
@@ -62,6 +82,35 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 WORKDIR /workspace
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Point apt at the org fetch-cache for every apt step in this stage (see the header). The original
+# sources.list is kept aside and restored after the last apt step below.
+# --error-on=any matters: plain `apt-get update` exits 0 when every mirror fetch fails (it only
+# warns), so without it an unreachable mirror is "success" and the install then dies (exit 100).
+ARG APT_MIRROR=http://fetch-cache.fetch-cache.svc.a1-ops-prd.local
+ARG APT_FALLBACK=upstream
+RUN set -eu; \
+    src=/etc/apt/sources.list; \
+    cp -p "$src" /etc/apt/sources.list.kubetty-orig; \
+    if [ -n "${APT_MIRROR}" ]; then \
+      sed -i -e "s#http://archive.ubuntu.com/ubuntu/\?#${APT_MIRROR}/ubuntu/#g" \
+             -e "s#http://security.ubuntu.com/ubuntu/\?#${APT_MIRROR}/ubuntu-security/#g" "$src"; \
+    fi; \
+    if [ -n "${APT_MIRROR}" ] && apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=10 update --error-on=any; then \
+      echo "apt source: mirror ${APT_MIRROR}"; \
+    else \
+      [ -z "${APT_MIRROR}" ] || echo "apt source: MIRROR FAILED (${APT_MIRROR})"; \
+      if [ "${APT_FALLBACK}" = "none" ]; then echo "APT_FALLBACK=none: refusing upstream" >&2; exit 1; fi; \
+      cp -p /etc/apt/sources.list.kubetty-orig "$src"; \
+      echo "apt source: upstream"; \
+    fi; \
+    grep -E '^deb ' "$src"; \
+    # Build-time only (removed with the sources.list restore below): a cold fetch-cache MISS is as
+    # slow as the Canonical archive behind it, which on 2026-11-19 timed out TLS handshakes and gave
+    # 504s (cluster-services-1497), so retry each file instead of failing the whole install.
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "300";\n' > /etc/apt/apt.conf.d/99kubetty-build-retries; \
+    rm -rf /var/lib/apt/lists/*
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     aggregate \
     bash \
@@ -198,6 +247,12 @@ RUN npm install -g playwright puppeteer \
 # Install Docker CLI from Debian repos.
 RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
     && rm -rf /var/lib/apt/lists/*
+
+# Last apt step: restore the image's stock Ubuntu sources.list (byte-identical to the base image's)
+# and drop the build-time retry config, so the shipped image does not depend on the fetch-cache.
+RUN mv /etc/apt/sources.list.kubetty-orig /etc/apt/sources.list \
+    && rm /etc/apt/apt.conf.d/99kubetty-build-retries \
+    && grep -q '^deb http://archive.ubuntu.com/ubuntu/ jammy main' /etc/apt/sources.list
 
 # Install Docker Compose V2 plugin and V1 compatibility symlink
 RUN mkdir -p /usr/local/lib/docker/cli-plugins \

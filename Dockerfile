@@ -105,6 +105,10 @@ RUN set -eu; \
       echo "apt source: upstream"; \
     fi; \
     grep -E '^deb ' "$src"; \
+    # Build-time only (removed with the sources.list restore below): a cold fetch-cache MISS is as
+    # slow as the Canonical archive behind it, which on 2026-11-19 timed out TLS handshakes and gave
+    # 504s (cluster-services-1497), so retry each file instead of failing the whole install.
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "300";\n' > /etc/apt/apt.conf.d/99kubetty-build-retries; \
     rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -244,9 +248,10 @@ RUN npm install -g playwright puppeteer \
 RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
     && rm -rf /var/lib/apt/lists/*
 
-# Last apt step: restore the image's stock Ubuntu sources.list (byte-identical to the base image's),
-# so the shipped image does not depend on the build-time fetch-cache.
+# Last apt step: restore the image's stock Ubuntu sources.list (byte-identical to the base image's)
+# and drop the build-time retry config, so the shipped image does not depend on the fetch-cache.
 RUN mv /etc/apt/sources.list.kubetty-orig /etc/apt/sources.list \
+    && rm /etc/apt/apt.conf.d/99kubetty-build-retries \
     && grep -q '^deb http://archive.ubuntu.com/ubuntu/ jammy main' /etc/apt/sources.list
 
 # Install Docker Compose V2 plugin and V1 compatibility symlink

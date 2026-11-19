@@ -822,6 +822,10 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 		"force":       forceTakeover,
 	}).Debug("gateway/main: WebSocket tab connection attempt")
 
+	if !s.checkTabAttach(w, tabID, clientID, forceTakeover) {
+		return
+	}
+
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.WithFields(log.Fields{
@@ -857,6 +861,28 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// checkTabAttach refuses, before the WebSocket upgrade, an attach to a tab the
+// caller does not own (403). An unknown tab is left to the attach path, which
+// reports it on the socket as before.
+// force=true does not bypass ownership (cluster-services-1542); it only
+// preempts the caller's own existing connection to the tab.
+func (s *server) checkTabAttach(w http.ResponseWriter, tabID, clientID string, force bool) bool {
+	switch err := s.tabManager.CheckAttach(tabID, clientID); {
+	case err == nil, errors.Is(err, tabs.ErrNotFound):
+		return true
+	case errors.Is(err, manager.ErrTabNotOwned):
+		log.WithFields(log.Fields{
+			"tab_id":    tabID,
+			"client_id": clientID,
+			"force":     force,
+		}).Warn("gateway/main: attach to another owner's tab refused")
+		apierrors.WriteError(w, apierrors.Forbidden("tab belongs to another user", "force takeover only applies to your own tabs"))
+	default:
+		apierrors.WriteError(w, apierrors.InternalServerError("tab attach check failed", ""))
+	}
+	return false
+}
+
 // handleVNCWebsocket handles WebSocket connections for VNC/GUI tabs.
 // It validates the tab exists, is a VNC tab, and then proxies the connection.
 func (s *server) handleVNCWebsocket(w http.ResponseWriter, r *http.Request) {
@@ -889,6 +915,10 @@ func (s *server) handleVNCWebsocket(w http.ResponseWriter, r *http.Request) {
 			"client_id": clientID,
 		}).Warn("gateway/main: VNC WebSocket request for tab without VNC support")
 		apierrors.WriteError(w, apierrors.BadRequest("tab does not have VNC support (project GUI not enabled)", ""))
+		return
+	}
+
+	if !s.checkTabAttach(w, tabID, clientID, forceTakeover) {
 		return
 	}
 

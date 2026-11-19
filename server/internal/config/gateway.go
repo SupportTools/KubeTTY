@@ -37,6 +37,9 @@ type GatewayConfig struct {
 	AccessTeamDomain string   // CF_ACCESS_TEAM_DOMAIN, e.g. https://supporttools.cloudflareaccess.com
 	AccessAUDs       []string // CF_ACCESS_AUD, comma-separated Access application AUD tag(s)
 	AccessUsers      string   // AUTH_ACCESS_USERS, comma-separated email=username allowlist
+	// AUTH_ACCESS_SERVICE_TOKENS, comma-separated <client_id>=<username>:<project>.
+	// Access service tokens mapped to restricted users (CI smoke, cluster-services-1534).
+	AccessServiceTokens string
 	// Metrics collection configuration
 	MetricsEnabled  bool          // Enable tab resource metrics collection (default: true)
 	MetricsInterval time.Duration // Metrics collection interval (default: 15s)
@@ -119,21 +122,22 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 	}
 
 	cfg := GatewayConfig{
-		CommonConfig:       common,
-		ProjectCatalogPath: os.Getenv("PROJECT_CATALOG_PATH"),
-		TabIdleTimeout:     sharedconfig.GetEnvDuration("TAB_IDLE_TIMEOUT", 2*time.Hour),
-		AuthMode:           sharedconfig.GetEnv("AUTH_MODE", "disabled"),
-		AuthJWTSecret:      os.Getenv("AUTH_JWT_SECRET"),
-		AuthAccessTTL:      sharedconfig.GetEnvDuration("AUTH_ACCESS_TTL", 15*time.Minute),
-		AuthRefreshTTL:     sharedconfig.GetEnvDuration("AUTH_REFRESH_TTL", 30*24*time.Hour),
-		AuthIssuer:         sharedconfig.GetEnv("AUTH_ISSUER", "kubetty"),
-		AuthCookieDomain:   os.Getenv("AUTH_COOKIE_DOMAIN"),
-		AuthCookieSecure:   sharedconfig.GetEnvBool("AUTH_COOKIE_SECURE", true),
-		AccessTeamDomain:   strings.TrimRight(strings.TrimSpace(os.Getenv("CF_ACCESS_TEAM_DOMAIN")), "/"),
-		AccessAUDs:         splitCSV(os.Getenv("CF_ACCESS_AUD")),
-		AccessUsers:        os.Getenv("AUTH_ACCESS_USERS"),
-		MetricsEnabled:     sharedconfig.GetEnvBool("METRICS_ENABLED", true),
-		MetricsInterval:    sharedconfig.GetEnvDuration("METRICS_INTERVAL", 15*time.Second),
+		CommonConfig:        common,
+		ProjectCatalogPath:  os.Getenv("PROJECT_CATALOG_PATH"),
+		TabIdleTimeout:      sharedconfig.GetEnvDuration("TAB_IDLE_TIMEOUT", 2*time.Hour),
+		AuthMode:            sharedconfig.GetEnv("AUTH_MODE", "disabled"),
+		AuthJWTSecret:       os.Getenv("AUTH_JWT_SECRET"),
+		AuthAccessTTL:       sharedconfig.GetEnvDuration("AUTH_ACCESS_TTL", 15*time.Minute),
+		AuthRefreshTTL:      sharedconfig.GetEnvDuration("AUTH_REFRESH_TTL", 30*24*time.Hour),
+		AuthIssuer:          sharedconfig.GetEnv("AUTH_ISSUER", "kubetty"),
+		AuthCookieDomain:    os.Getenv("AUTH_COOKIE_DOMAIN"),
+		AuthCookieSecure:    sharedconfig.GetEnvBool("AUTH_COOKIE_SECURE", true),
+		AccessTeamDomain:    strings.TrimRight(strings.TrimSpace(os.Getenv("CF_ACCESS_TEAM_DOMAIN")), "/"),
+		AccessAUDs:          splitCSV(os.Getenv("CF_ACCESS_AUD")),
+		AccessUsers:         os.Getenv("AUTH_ACCESS_USERS"),
+		AccessServiceTokens: os.Getenv("AUTH_ACCESS_SERVICE_TOKENS"),
+		MetricsEnabled:      sharedconfig.GetEnvBool("METRICS_ENABLED", true),
+		MetricsInterval:     sharedconfig.GetEnvDuration("METRICS_INTERVAL", 15*time.Second),
 		Controller: ControllerConfig{
 			Enabled:                sharedconfig.GetEnvBool("CONTROLLER_ENABLED", false),
 			ProjectsNamespace:      os.Getenv("PROJECTS_NAMESPACE"),

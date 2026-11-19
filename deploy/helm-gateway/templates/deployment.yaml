@@ -113,6 +113,11 @@ spec:
               value: {{ required "auth.access.aud is required for cloudflare-access" $acc.aud | quote }}
             - name: AUTH_ACCESS_USERS
               value: {{ required "auth.access.users is required for cloudflare-access" $acc.users | quote }}
+            {{- with $acc.serviceTokens }}
+            # Access service tokens -> restricted users (CI smoke, cluster-services-1534). Dev only.
+            - name: AUTH_ACCESS_SERVICE_TOKENS
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- if or .Values.catalog.inline .Values.catalog.existingConfigMap }}
             - name: PROJECT_CATALOG_PATH

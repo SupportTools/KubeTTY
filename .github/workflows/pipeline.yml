@@ -352,6 +352,18 @@ jobs:
       - name: Test gateway image references
         run: bash .github/scripts/test-helm-image-ref.sh
 
+      # cluster-services-1534: the CI smoke service token is a DEV-only identity. Prod must never map
+      # an Access service token to a user, so its render must not carry AUTH_ACCESS_SERVICE_TOKENS.
+      - name: Production renders no Access service token mapping
+        run: |
+          set -euo pipefail
+          if helm template gateway deploy/helm-gateway/ -f deploy/helm-gateway/values.prd.yaml | grep -q AUTH_ACCESS_SERVICE_TOKENS; then
+            echo "::error::values.prd.yaml maps an Access service token (AUTH_ACCESS_SERVICE_TOKENS); service tokens are dev-only"
+            exit 1
+          fi
+          helm template gateway deploy/helm-gateway/ -f deploy/helm-gateway/values.dev.yaml | grep -q 'AUTH_ACCESS_SERVICE_TOKENS' \
+            || { echo "::error::values.dev.yaml lost the CI smoke service token mapping; the dev smoke gate would fail"; exit 1; }
+
       - name: Package Helm charts
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -515,11 +527,115 @@ jobs:
             echo "Rolled dev back to revision ${PREV}"
           fi
 
+  # Stage 6a2: functional smoke against DEV (cluster-services-1534, operator decision 2026-11-19
+  # "Automated smoke test before prod"). The dev health gate only proves the database answers;
+  # this proves a real Access-authenticated session works end to end, through Cloudflare exactly
+  # like a browser: GET /api/auth/me = 200 as the smoke user, the smoke user is restricted, and a
+  # throwaway terminal tab echoes a shell-evaluated line over /ws. CI cannot do a Google login, so
+  # it presents a Cloudflare Access SERVICE TOKEN that only the kubetty-dev Access app admits
+  # (cluster-services network/cloudflare-tunnels/terraform access.tf kubetty_dev_smoke). KubeTTY dev
+  # maps it (values.dev.yaml auth.access.serviceTokens) to kubetty-smoke, which may only open/close
+  # its own tab on test-project. The token comes keylessly from Vault (GitHub OIDC, role gha-kubetty).
+  # deploy-production needs this job: a smoke failure skips prod and rolls dev back.
+  smoke-dev:
+    name: Smoke Test Dev (Access + terminal)
+    runs-on: self-hosted-linux
+    needs: [build, deploy-dev]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      id-token: write          # GitHub OIDC -> Vault (smoke token + namespace-scoped K8s token)
+    timeout-minutes: 30
+    env:
+      DEV_NAMESPACE: kubetty-gateway-dev
+      DEPLOY_TIMEOUT: 15m
+      KUBETTY_SMOKE_URL: https://kubetty-dev.support.tools
+      KUBETTY_SMOKE_USER: kubetty-smoke
+      KUBETTY_SMOKE_PROJECT: test-project
+      KUBETTY_SMOKE_TIMEOUT: 4m
+    concurrency:
+      group: deploy-dev          # no other run may redeploy dev while this run smoke-tests it
+      cancel-in-progress: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify baked Go
+        run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner (no download fallback)"; exit 1; }
+          go version
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.3'
+
+      - name: Helm (baked into the runner image)
+        run: |
+          command -v helm >/dev/null || { echo "::error::helm is not on the runner image; fix ci-runners, do not download it here"; exit 1; }
+          helm version --short
+
+      - name: Set up dev kubeconfig
+        uses: ./.github/actions/setup-kubeconfig-onprem
+        with:
+          namespace: kubetty-gateway-dev
+
+      - name: Dev runs this build
+        id: digest
+        env:
+          EXPECTED_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image-digest }}
+        run: |
+          set -euo pipefail
+          DEPLOYED_IMAGE=$(kubectl get deployment gateway -n "$DEV_NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}')
+          if [[ "$DEPLOYED_IMAGE" != "$EXPECTED_IMAGE" ]]; then
+            echo "::error::dev runs '$DEPLOYED_IMAGE', not this run's '$EXPECTED_IMAGE' (a newer run redeployed dev?); not smoke-testing someone else's build"
+            exit 1
+          fi
+          echo "ours=true" >> "$GITHUB_OUTPUT"
+          echo "✓ dev runs ${EXPECTED_IMAGE}"
+
+      # Keyless: GitHub OIDC -> Vault jwt role gha-kubetty (policy gha-kubetty-read) -> the dev-only
+      # Access service token. vault-action masks both values in the log.
+      - name: Vault login (GitHub OIDC) + dev smoke Access token
+        uses: hashicorp/vault-action@v3
+        with:
+          url: https://vault.support.tools
+          method: jwt
+          path: github-actions
+          role: gha-kubetty
+          jwtGithubAudience: https://github.com/SupportTools
+          exportEnv: true
+          secrets: |
+            secret/data/kubetty/ci-smoke-access-token client_id | CF_ACCESS_CLIENT_ID ;
+            secret/data/kubetty/ci-smoke-access-token client_secret | CF_ACCESS_CLIENT_SECRET
+
+      # server/cmd/kubetty-smoke. Fetch tier: Go modules from Athens only (GOPROXY=goproxy.support.tools,
+      # no proxy.golang.org fallthrough), same as the image build.
+      - name: Functional smoke (Access-authenticated /api/auth/me + terminal websocket echo)
+        working-directory: server
+        env:
+          GOPROXY: https://goproxy.support.tools
+          GOFLAGS: -mod=readonly
+        run: go run ./cmd/kubetty-smoke
+
+      - name: Roll dev back on failed smoke
+        if: failure() && steps.digest.outputs.ours == 'true'
+        run: |
+          set -euo pipefail
+          kubectl logs deployment/gateway -n "$DEV_NAMESPACE" --tail=100 || true
+          PREV=$(helm history kubetty-gateway -n "$DEV_NAMESPACE" -o json | jq -r '[.[] | select(.status == "superseded")] | last | .revision // empty')
+          if [[ -n "$PREV" ]]; then
+            helm rollback kubetty-gateway "$PREV" -n "$DEV_NAMESPACE" --wait --timeout="${DEPLOY_TIMEOUT}"
+            echo "Rolled dev back to revision ${PREV}; production deploy is skipped"
+          fi
+
   # Stage 6b: Deploy to Production
   deploy-production:
     name: Deploy to Production
     runs-on: self-hosted-linux
-    needs: [build, helm-validate, deploy-dev]   # dev must deploy and pass its health gate first
+    # dev must deploy, pass its health gate AND the functional smoke first (cluster-services-1534)
+    needs: [build, helm-validate, deploy-dev, smoke-dev]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read

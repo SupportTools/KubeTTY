@@ -54,6 +54,11 @@ const authUserContextKey contextKey = "kubettyAuthUser"
 type User struct {
 	ID       uuid.UUID
 	Username string
+	// Restricted marks a machine principal (a Cloudflare Access service token,
+	// cluster-services-1534). It may only use the routes in
+	// RestrictedRouteAllowed and open terminal tabs on AllowedProject.
+	Restricted     bool
+	AllowedProject string
 }
 
 // StoreMetricsObserver defines an interface for observing store operations.

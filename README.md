@@ -287,13 +287,14 @@ WebSocket upgrades and the `/api/tabs/events` stream, it verifies the `Cf-Access
   unknown `kid` at most every 30s and when older than 1h; a stale cache keeps verifying known keys during a
   Cloudflare outage);
 - `iss` = the team domain, `aud` contains this environment's Access app AUD, `exp` required, `nbf`/`iat` not in the
-  future (30s leeway), and an `email` claim (service tokens are refused).
+  future (30s leeway), and an `email` claim. The one exception is an allowlisted Access service token (below).
 
 | Env var | Meaning |
 |---|---|
 | `CF_ACCESS_TEAM_DOMAIN` | `https://supporttools.cloudflareaccess.com` (the JWT issuer) |
 | `CF_ACCESS_AUD` | AUD tag(s) of this environment's Access app, comma-separated |
 | `AUTH_ACCESS_USERS` | `email=username,...` allowlist. The email maps to the existing account with that username (its tabs are kept); an allowlisted email without an account gets an SSO-only account on first login |
+| `AUTH_ACCESS_SERVICE_TOKENS` | `<client_id>.access=<username>:<project>,...` (optional, dev only). An Access service-token JWT (`type` app, no email, `common_name` = client ID) maps to a **restricted** user: `GET /api/auth/me`, list/open its own terminal tabs on that one project, attach `/ws` (no force takeover), close its own tab. Everything else is 403. A username in `AUTH_ACCESS_USERS` is refused. Empty: every service token gets 403 |
 
 Responses: no or invalid JWT -> 401; valid JWT for an email not on the allowlist (or an inactive account) -> 403;
 signing keys unreachable and not cached -> 503. A browser WebSocket whose `Origin` is not the gateway host -> 403.
@@ -307,8 +308,19 @@ directly (old DNS cache, `--resolve`, `kubectl port-forward`) has no JWT and get
 
 **Break-glass** (Google or Cloudflare down): there is no password path. Use kubeconfig access instead:
 `kubectl -n kubetty-projects-prd exec -it <project pod> -- bash` gives the same shell a KubeTTY tab gives.
-Rolling the gateway back to `auth.mode: local` (the JWT secret is still mounted) restores the old login for accounts
-that still have a password; accounts created by SSO have no usable password.
+Rolling the gateway back to `auth.mode: local` does NOT restore password login: on 2026-11-19 every password hash in
+the prd and dev databases was replaced with bcrypt of 64 random bytes (discarded) and every refresh token was revoked
+(`kubetty-authuser scramble-passwords --confirm`, cluster-services-1534, operator decision "Scramble them"). Setting a
+new password needs `kubetty-authuser update-password` in the gateway pod.
+
+**Pre-production smoke (cluster-services-1534).** The pipeline's `smoke-dev` job runs `server/cmd/kubetty-smoke`
+against `https://kubetty-dev.support.tools` after every dev deploy, and `deploy-production` needs it. Through Cloudflare
+Access, with the dev-only service token `kubetty-dev-smoke` (Vault `secret/kubetty/ci-smoke-access-token`, read keylessly
+by the `gha-kubetty` role), it checks `/api/auth/me` = 200 as `kubetty-smoke`, that `/api/projects` and the admin API are
+403 for it, opens a throwaway terminal tab on `test-project`, waits for a shell-evaluated `printf` over `/ws`, and
+closes the tab. A failure rolls dev back and skips production. The token is admitted only by the kubetty-dev Access
+app (cluster-services `network/cloudflare-tunnels/terraform/access.tf` `kubetty_dev_smoke`); production maps no
+service token (the `helm-validate` job fails if `values.prd.yaml` ever does).
 
 ### Creating Users
 

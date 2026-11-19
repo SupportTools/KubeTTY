@@ -147,7 +147,14 @@ func TestVerify(t *testing.T) {
 		{"nbf in future", sign(t, k1, "k1", mod(func(c jwt.MapClaims) { c["nbf"] = now.Add(10 * time.Minute).Unix() })), ErrInvalidToken},
 		{"iat in future", sign(t, k1, "k1", mod(func(c jwt.MapClaims) { c["iat"] = now.Add(10 * time.Minute).Unix() })), ErrInvalidToken},
 		{"wrong issuer", sign(t, k1, "k1", mod(func(c jwt.MapClaims) { c["iss"] = "https://evil.cloudflareaccess.com" })), ErrInvalidToken},
-		{"no email (service token)", sign(t, k1, "k1", mod(func(c jwt.MapClaims) { delete(c, "email"); c["common_name"] = "svc" })), ErrNoEmail},
+		{"no email and no common_name", sign(t, k1, "k1", mod(func(c jwt.MapClaims) { delete(c, "email"); c["sub"] = "" })), ErrNoEmail},
+		{"no email, common_name but a user subject", sign(t, k1, "k1", mod(func(c jwt.MapClaims) { delete(c, "email"); c["common_name"] = "svc.access" })), ErrNoEmail},
+		{"no email, common_name but type is not app", sign(t, k1, "k1", mod(func(c jwt.MapClaims) {
+			delete(c, "email")
+			c["sub"] = ""
+			c["common_name"] = "svc.access"
+			c["type"] = "org"
+		})), ErrNoEmail},
 		{"unknown kid", sign(t, k1, "nope", goodClaims(s.URL, now)), ErrInvalidToken},
 		{"alg none", noneToken(t, goodClaims(s.URL, now)), ErrInvalidToken},
 		{"alg HS256 with public key as secret", hsToken(t, k1, goodClaims(s.URL, now)), ErrInvalidToken},
@@ -168,6 +175,40 @@ func TestVerify(t *testing.T) {
 				t.Fatalf("want %v, got %v (claims %+v)", tc.wantErr, err, c)
 			}
 		})
+	}
+}
+
+// A real Cloudflare service-token token (shape captured from kubetty-dev,
+// cluster-services-1534): type app, empty sub, common_name = client ID, no email.
+func TestVerifyServiceToken(t *testing.T) {
+	now := time.Now()
+	s := newJWKSServer(t)
+	k1 := genKey(t)
+	s.setKeys(map[string]*rsa.PrivateKey{"k1": k1})
+	v := newVerifier(t, s, func() time.Time { return now })
+	c := jwt.MapClaims{
+		"type": "app", "iss": s.URL, "aud": []string{testAUD}, "sub": "",
+		"common_name": "74db6234cffb8c621b7e6616192f810d.access",
+		"iat":         now.Unix(), "exp": now.Add(8 * time.Hour).Unix(),
+	}
+	got, err := v.Verify(context.Background(), sign(t, k1, "k1", c))
+	if err != nil {
+		t.Fatalf("service token refused: %v", err)
+	}
+	if !got.ServiceToken || got.CommonName != "74db6234cffb8c621b7e6616192f810d.access" || got.Email != "" {
+		t.Fatalf("claims = %+v", got)
+	}
+	// Every other check still applies to service tokens.
+	c["aud"] = []string{"aud-kubetty-prd"}
+	if _, err := v.Verify(context.Background(), sign(t, k1, "k1", c)); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("wrong-aud service token: want ErrInvalidToken, got %v", err)
+	}
+	// A user token is never reported as a service token, even with a common_name.
+	u := goodClaims(s.URL, now)
+	u["common_name"] = "74db6234cffb8c621b7e6616192f810d.access"
+	got, err = v.Verify(context.Background(), sign(t, k1, "k1", u))
+	if err != nil || got.ServiceToken || got.Email == "" {
+		t.Fatalf("user token: %+v %v", got, err)
 	}
 }
 

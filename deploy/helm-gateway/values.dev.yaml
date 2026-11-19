@@ -25,6 +25,11 @@ auth:
     teamDomain: https://supporttools.cloudflareaccess.com
     aud: 58a946efbe8d7ae906c73b639b039600469a4f6fdd41d4562ff747c669cf48a8
     users: mmattox@mattoxengineering.com=mmattox
+    # CI smoke (cluster-services-1534): the kubetty-dev-only Access service token (cluster-services
+    # network/cloudflare-tunnels/terraform access.tf kubetty_dev_smoke; secret in Vault
+    # secret/kubetty/ci-smoke-access-token) maps to the restricted user kubetty-smoke, which may only
+    # open/close its own terminal tab on test-project. <client_id>=<username>:<project>. Never in prd.
+    serviceTokens: 74db6234cffb8c621b7e6616192f810d.access=kubetty-smoke:test-project
   jwtSecretSecret:
     name: "kubetty-gateway-dev-auth"
     key: jwt-secret

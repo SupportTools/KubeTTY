@@ -17,9 +17,14 @@ env:
   # Use semantic version for recommended upgrades (not floating tags like "dev")
   RECOMMENDED_IMAGE_TAG: "v0.8.0"
 
-# Authentication - enabled for dev testing
+# Authentication - Cloudflare Access SSO (cluster-services-1299), dev's own
+# Access app "owner (google): kubetty-dev.support.tools" (separate AUD from prod).
 auth:
-  mode: local
+  mode: cloudflare-access
+  access:
+    teamDomain: https://supporttools.cloudflareaccess.com
+    aud: 58a946efbe8d7ae906c73b639b039600469a4f6fdd41d4562ff747c669cf48a8
+    users: mmattox@mattoxengineering.com=mmattox
   jwtSecretSecret:
     name: "kubetty-gateway-dev-auth"
     key: jwt-secret

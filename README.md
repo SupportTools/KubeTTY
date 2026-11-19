@@ -250,7 +250,7 @@ KubeTTY is configured via environment variables injected by Helm:
 - `CLAUDE_CONFIG_DIR` - Claude configuration directory
 
 **Authentication (required configuration):**
-- `AUTH_MODE` - **Required.** Set to `local` to enable built-in login, or `disabled` to run without authentication. Empty values are rejected to prevent accidental insecure deployments.
+- `AUTH_MODE` - **Required.** `cloudflare-access` (gateway SSO, see below), `local` for built-in login, or `disabled` to run without authentication. Empty values are rejected to prevent accidental insecure deployments.
 - `AUTH_JWT_SECRET` - Base64 (recommended) or raw secret used to sign JWTs. Generate via `openssl rand -base64 48`. Required when `AUTH_MODE=local`.
 - `AUTH_ACCESS_TTL` / `AUTH_REFRESH_TTL` - Token lifetimes (e.g., `15m`, `720h`).
 - `AUTH_ISSUER` - JWT issuer claim (default: `kubetty`).
@@ -274,6 +274,41 @@ KubeTTY is configured via environment variables injected by Helm:
 > **For production deployments, always use `AUTH_MODE=local` with a strong `AUTH_JWT_SECRET`.**
 
 These knobs are exposed through the Helm chart under the `auth` section (`deploy/helm/values.yaml`). You can point `AUTH_JWT_SECRET` at a Kubernetes Secret via `auth.jwtSecretSecret` to avoid storing raw secrets in values files.
+
+### Cloudflare Access SSO (`AUTH_MODE=cloudflare-access`, gateway only)
+
+The production and dev gateways (kubetty.support.tools, kubetty-dev.support.tools) run in this mode since
+cluster-services-1299 (operator decision 2026-11-19, "Switch to SSO"). Each host sits behind its own Cloudflare
+Access application (Google Workspace sign-in, operator only, 8h session). The gateway does not trust the
+`Cf-Access-Authenticated-User-Email` header; on every protected request, including the `/ws` and `/vnc`
+WebSocket upgrades and the `/api/tabs/events` stream, it verifies the `Cf-Access-Jwt-Assertion` JWT:
+
+- RS256 signature against `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` (keys cached, refetched on an
+  unknown `kid` at most every 30s and when older than 1h; a stale cache keeps verifying known keys during a
+  Cloudflare outage);
+- `iss` = the team domain, `aud` contains this environment's Access app AUD, `exp` required, `nbf`/`iat` not in the
+  future (30s leeway), and an `email` claim (service tokens are refused).
+
+| Env var | Meaning |
+|---|---|
+| `CF_ACCESS_TEAM_DOMAIN` | `https://supporttools.cloudflareaccess.com` (the JWT issuer) |
+| `CF_ACCESS_AUD` | AUD tag(s) of this environment's Access app, comma-separated |
+| `AUTH_ACCESS_USERS` | `email=username,...` allowlist. The email maps to the existing account with that username (its tabs are kept); an allowlisted email without an account gets an SSO-only account on first login |
+
+Responses: no or invalid JWT -> 401; valid JWT for an email not on the allowlist (or an inactive account) -> 403;
+signing keys unreachable and not cached -> 503. A browser WebSocket whose `Origin` is not the gateway host -> 403.
+`/api/auth/login` and `/api/auth/password` answer 410 (local passwords are retired); `/api/auth/me` and
+`/api/auth/refresh` report the Access identity; logout goes to `/cdn-cgi/access/logout`. `/api/auth/config`,
+`/api/healthz`, `/api/version` and `/metrics` stay unauthenticated.
+
+**LAN and WARP users:** the internal (split-horizon) DNS records for both hosts point at Cloudflare, like
+`odin.support.tools`, so LAN and WARP browsers also pass Access and get a JWT. A request that reaches the ingress
+directly (old DNS cache, `--resolve`, `kubectl port-forward`) has no JWT and gets 401.
+
+**Break-glass** (Google or Cloudflare down): there is no password path. Use kubeconfig access instead:
+`kubectl -n kubetty-projects-prd exec -it <project pod> -- bash` gives the same shell a KubeTTY tab gives.
+Rolling the gateway back to `auth.mode: local` (the JWT secret is still mounted) restores the old login for accounts
+that still have a password; accounts created by SSO have no usable password.
 
 ### Creating Users
 

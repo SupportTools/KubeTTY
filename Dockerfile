@@ -13,9 +13,25 @@
 #     Pass --build-arg APT_MIRROR= to skip the attempt. apt verifies the InRelease signatures
 #     either way. The image's own /etc/apt/sources.list is restored after the last apt step, so
 #     the shipped image points at the Ubuntu archive exactly as before.
-#   - STILL pinned/unpinned upstream (follow-up filed from cluster-services-1494): npm (ui-builder
-#     and the global playwright/puppeteer install), Go modules, the NodeSource and Google Chrome apt
-#     repos, the Playwright browser download, pip, and the release binaries curl'd below.
+#   - npm (ui-builder `npm ci` and the global playwright/puppeteer install): the org Verdaccio
+#     mirror (ns npm-proxy, cluster-services-853/1027), a cache we run. Same fallback rules as apt:
+#     NPM_FALLBACK=none in CI, NPM_REGISTRY= to skip. The mirror only counts as used if npm's http
+#     log shows fetches from it. ui-builder installs strictly from web/package-lock.json (sha512
+#     integrity). The global tools have no lockfile, so they are pinned by version plus
+#     --before=${NPM_BEFORE}: every transitive dependency resolves to what the registry held at that
+#     instant, which reproduces the tree prod shipped on 2026-11-19 exactly (cluster-services-1496).
+#   - Go modules: Athens (GOPROXY=https://goproxy.support.tools, a cache we run). CI passes Athens
+#     only; the default falls through to proxy.golang.org off-network. go.sum verifies every module.
+#   - Playwright and Puppeteer browser zips: the fetch-cache /playwright/ prefix (cdn.playwright.dev;
+#     Chrome for Testing under builds/cft/), FETCH_FALLBACK=none in CI.
+#   - kubectl, helm, yq: the fetch-cache /k8s/, /helm/, /github-releases/ prefixes, sha256 pinned
+#     (build/fetch.sh), FETCH_FALLBACK=none in CI.
+#   - upstream-pinned (no tier we run serves them yet; follow-up cluster-services-1496 notes): the
+#     other release binaries, the Go tarball, the Google Chrome .deb and the NodeSource nodejs .deb
+#     (apt, GPG-verified against the vendored build/nodesource.gpg), and pip (PyPI,
+#     --require-hashes on build/requirements-ai.txt). Each is pinned to the exact version prod
+#     shipped on 2026-11-19 and, except apt/pip which verify their own way, sha256-checked by
+#     build/fetch.sh, which prints "source=upstream-pinned" for each one in the build log.
 ARG NODE_IMAGE=harbor.support.tools/dockerhub/library/node:20-bullseye@sha256:c0122351f25f04facee976f9db7214789eabadb489f4e4aea9cd00a0d6af77c4
 ARG GO_IMAGE=harbor.support.tools/dockerhub/library/golang:1.24.3-bullseye@sha256:abe2e2bb9bc0342dd1ba2f719af5c6b3859ca9ad93a7d9bcdd21310bda0327e1
 ARG RUNTIME_IMAGE=harbor.support.tools/dockerhub/library/ubuntu:22.04@sha256:9abcaffc92a5279fff3a6a41635c0800ea33e528425fb389658806476e7defde
@@ -38,7 +54,22 @@ COPY web ./web
 COPY server ./server
 
 WORKDIR /workspace/web
-RUN npm install
+ARG NPM_REGISTRY=http://verdaccio.npm-proxy.svc.a1-ops-prd.local/
+ARG NPM_FALLBACK=upstream
+RUN set -eu; \
+    used=0; \
+    if [ -n "${NPM_REGISTRY}" ] \
+       && npm ci --no-audit --fund=false --registry="${NPM_REGISTRY}" --loglevel=http > /tmp/npm.log 2>&1; then \
+      hits=$(grep -c "fetch GET 200 ${NPM_REGISTRY}" /tmp/npm.log || true); \
+      if [ "${hits}" -gt 0 ]; then used=1; echo "npm source: mirror ${NPM_REGISTRY} (${hits} fetches)"; \
+      else echo "npm source: mirror requested but 0 fetches went to it"; fi; \
+    fi; \
+    if [ "${used}" = 0 ]; then \
+      [ -z "${NPM_REGISTRY}" ] || { echo "npm source: MIRROR FAILED (${NPM_REGISTRY})"; tail -20 /tmp/npm.log; }; \
+      if [ "${NPM_FALLBACK}" = "none" ]; then echo "NPM_FALLBACK=none: refusing upstream" >&2; exit 1; fi; \
+      echo "npm source: upstream"; rm -rf node_modules; npm ci --no-audit --fund=false; \
+    fi; \
+    rm -f /tmp/npm.log
 RUN npm run build
 
 ###############################
@@ -49,8 +80,13 @@ ARG KUBETTY_VERSION=dev
 ARG GIT_COMMIT=unknown
 WORKDIR /workspace
 
+# GOTOOLCHAIN=local: never download a toolchain at build time (the image's Go satisfies go.mod).
+ARG GOPROXY=https://goproxy.support.tools|https://proxy.golang.org
+ENV GOPROXY=${GOPROXY} \
+    GOTOOLCHAIN=local
 COPY server/go.mod server/go.sum ./server/
-RUN cd server && go mod download
+# -x prints every "# get <url>" line, so the build log shows which proxy served each module.
+RUN cd server && echo "go module source: GOPROXY=${GOPROXY}" && go mod download -x
 
 COPY server ./server
 # Vite outputs to server/cmd/gateway/ui/dist; both binaries embed ui/dist relative to their cmd dir
@@ -89,6 +125,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 # warns), so without it an unreachable mirror is "success" and the install then dies (exit 100).
 ARG APT_MIRROR=http://fetch-cache.fetch-cache.svc.a1-ops-prd.local
 ARG APT_FALLBACK=upstream
+# build/fetch.sh (pinned release binaries) and the Playwright/Puppeteer browser downloads use the
+# same fetch-cache; FETCH_MIRROR= skips it, FETCH_FALLBACK=none (CI) refuses upstream.
+ARG FETCH_MIRROR=http://fetch-cache.fetch-cache.svc.a1-ops-prd.local
+ARG FETCH_FALLBACK=upstream
 RUN set -eu; \
     src=/etc/apt/sources.list; \
     cp -p "$src" /etc/apt/sources.list.kubetty-orig; \
@@ -211,13 +251,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Note: Chromium from apt is a snap package which doesn't work in containers
 # Chrome is installed to /opt/google/chrome/ but /opt is mounted as a PVC in project pods,
 # so we backup Chrome to /usr/local/share/chrome-backup for sync on container start
-RUN curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb \
+# Pinned to the version prod shipped on 2026-11-19 (cluster-services-1496); upstream-pinned tier
+# (dl.google.com, sha256 checked). Google drops old .debs from the pool after a while, so a bump is
+# CHROME_VERSION + CHROME_SHA256 together (sha256sum of the new pool .deb).
+# The google-chrome.sources the package's postinst writes is held aside until the last apt step, so
+# the later apt-get updates fetch only the Ubuntu fetch-cache, not dl.google.com.
+ARG CHROME_VERSION=158.0.8127.36-1
+ARG CHROME_SHA256=4696bce00b128f385a870ba2eb6eede61698f22374ea0d8e09af8a1c6543d397
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh \
+    sh /tmp/fetch.sh /tmp/chrome.deb "${CHROME_SHA256}" \
+       "https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}_amd64.deb" \
     && apt-get update \
     && apt-get install -y --no-install-recommends /tmp/chrome.deb \
     && rm -f /tmp/chrome.deb \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /usr/local/share/chrome-backup \
-    && cp -a /opt/google /usr/local/share/chrome-backup/
+    && cp -a /opt/google /usr/local/share/chrome-backup/ \
+    && mkdir -p /etc/apt/sources.list.d.kubetty-held \
+    && mv /etc/apt/sources.list.d/google-chrome.sources /etc/apt/sources.list.d.kubetty-held/
 
 RUN groupadd -g 1000 mmattox && useradd -m -u 1000 -g mmattox -s /bin/bash mmattox \
     && echo 'mmattox:mmattox' | chpasswd \
@@ -227,22 +278,81 @@ RUN groupadd -g 1000 mmattox && useradd -m -u 1000 -g mmattox -s /bin/bash mmatt
 WORKDIR /home/mmattox
 
 # Install Node.js runtime (for running React/JS tooling inside the pod if needed).
-RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+# Does what https://deb.nodesource.com/setup_20.x did, without piping a live script into bash
+# (cluster-services-1496): the same pre-requisite packages, the NodeSource keyring (vendored as
+# build/nodesource.gpg, byte-identical to `curl .../gpgkey/nodesource-repo.gpg.key | gpg --dearmor`
+# on 2026-11-19, key 6F71F525282841EEDAF851B42F59B5F99B1BE0B4), the same sources/preferences files,
+# and nodejs pinned to the version prod shipped. Tier: upstream-pinned (deb.nodesource.com; apt
+# verifies the InRelease signature against the vendored key and the .deb against its hash).
+# The nodesource.sources file is held aside after the install, like google-chrome.sources.
+ARG NODEJS_VERSION=20.20.2-1nodesource1
+COPY build/nodesource.gpg /usr/share/keyrings/nodesource.gpg
+RUN set -eu; \
+    chmod 644 /usr/share/keyrings/nodesource.gpg; \
+    apt-get update; \
+    apt-get install -y apt-transport-https ca-certificates curl gnupg; \
+    printf 'Types: deb\nURIs: https://deb.nodesource.com/node_%s.x\nSuites: nodistro\nComponents: main\nArchitectures: %s\nSigned-By: /usr/share/keyrings/nodesource.gpg\n' \
+      "${NODE_MAJOR}" "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/nodesource.sources; \
+    printf 'Package: nsolid\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/nsolid; \
+    printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/nodejs; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends "nodejs=${NODEJS_VERSION}"; \
+    mv /etc/apt/sources.list.d/nodesource.sources /etc/apt/sources.list.d.kubetty-held/; \
+    rm -rf /var/lib/apt/lists/*
 
 # Install Playwright and Puppeteer globally with Chromium only
 # Note: Firefox and WebKit removed to reduce image size (~1.7GB savings)
 # Browsers installed to /opt/ms-playwright (set via PLAYWRIGHT_BROWSERS_PATH env var)
 # Backed up to /opt/ms-playwright-backup because /opt is mounted as PVC in project pods
-RUN npm install -g playwright puppeteer \
-    && mkdir -p /opt/ms-playwright \
-    && npx playwright install --with-deps chromium \
-    && chown -R mmattox:mmattox /usr/lib/node_modules/ \
-    && chown -R mmattox:mmattox /opt/ms-playwright \
-    && cp -a /opt/ms-playwright /opt/ms-playwright-backup \
-    && rm -rf /tmp/* /root/.npm
+# Fetch tiers (cluster-services-1496): npm from Verdaccio (NPM_FALLBACK as in ui-builder); versions
+# pinned and transitive deps frozen with --before (see the header), which reproduces prod's
+# 2026-11-19 tree. Browser zips from the fetch-cache /playwright/ prefix: Playwright via
+# PLAYWRIGHT_DOWNLOAD_HOST, Puppeteer's Chrome for Testing via its *_DOWNLOAD_BASE_URL variables
+# (cdn.playwright.dev serves builds/cft/<version>/...). puppeteer's postinstall is skipped during
+# `npm install` and run explicitly afterwards (the same `node install.mjs`), so the browser fetch
+# has its own mirror/fallback branch. The browsers land in /root/.cache/puppeteer as before.
+ARG PLAYWRIGHT_VERSION=1.65.1
+ARG PUPPETEER_VERSION=24.43.1
+ARG NPM_BEFORE=2026-11-19T12:59:00Z
+ARG NPM_REGISTRY=http://verdaccio.npm-proxy.svc.a1-ops-prd.local/
+ARG NPM_FALLBACK=upstream
+RUN set -eu; \
+    pkgs="playwright@${PLAYWRIGHT_VERSION} puppeteer@${PUPPETEER_VERSION}"; \
+    used=0; \
+    if [ -n "${NPM_REGISTRY}" ] \
+       && PUPPETEER_SKIP_DOWNLOAD=true npm install -g --no-audit --fund=false --before="${NPM_BEFORE}" \
+            --registry="${NPM_REGISTRY}" --loglevel=http $pkgs > /tmp/npm.log 2>&1; then \
+      hits=$(grep -c "fetch GET 200 ${NPM_REGISTRY}" /tmp/npm.log || true); \
+      if [ "${hits}" -gt 0 ]; then used=1; echo "npm source: mirror ${NPM_REGISTRY} (${hits} fetches)"; \
+      else echo "npm source: mirror requested but 0 fetches went to it"; fi; \
+    fi; \
+    if [ "${used}" = 0 ]; then \
+      [ -z "${NPM_REGISTRY}" ] || { echo "npm source: MIRROR FAILED (${NPM_REGISTRY})"; tail -20 /tmp/npm.log; }; \
+      if [ "${NPM_FALLBACK}" = "none" ]; then echo "NPM_FALLBACK=none: refusing upstream" >&2; exit 1; fi; \
+      echo "npm source: upstream"; \
+      PUPPETEER_SKIP_DOWNLOAD=true npm install -g --no-audit --fund=false --before="${NPM_BEFORE}" $pkgs; \
+    fi; \
+    rm -f /tmp/npm.log; \
+    mkdir -p /opt/ms-playwright; \
+    browsers() { \
+      (cd /usr/lib/node_modules/puppeteer && node install.mjs) && npx playwright install --with-deps chromium; \
+    }; \
+    if [ -n "${FETCH_MIRROR}" ] && ( \
+         export PLAYWRIGHT_DOWNLOAD_HOST="${FETCH_MIRROR}/playwright"; \
+         export PUPPETEER_CHROME_DOWNLOAD_BASE_URL="${FETCH_MIRROR}/playwright/builds/cft"; \
+         export PUPPETEER_CHROME_HEADLESS_SHELL_DOWNLOAD_BASE_URL="${FETCH_MIRROR}/playwright/builds/cft"; \
+         browsers ); then \
+      echo "browser source: fetch-cache ${FETCH_MIRROR}/playwright"; \
+    else \
+      [ -z "${FETCH_MIRROR}" ] || echo "browser source: MIRROR FAILED (${FETCH_MIRROR}/playwright)"; \
+      if [ "${FETCH_FALLBACK}" = "none" ]; then echo "FETCH_FALLBACK=none: refusing upstream" >&2; exit 1; fi; \
+      rm -rf /root/.cache/puppeteer /opt/ms-playwright/*; \
+      echo "browser source: upstream"; browsers; \
+    fi; \
+    chown -R mmattox:mmattox /usr/lib/node_modules/; \
+    chown -R mmattox:mmattox /opt/ms-playwright; \
+    cp -a /opt/ms-playwright /opt/ms-playwright-backup; \
+    rm -rf /tmp/* /root/.npm
 
 # Install Docker CLI from Debian repos.
 RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
@@ -250,113 +360,140 @@ RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
 
 # Last apt step: restore the image's stock Ubuntu sources.list (byte-identical to the base image's)
 # and drop the build-time retry config, so the shipped image does not depend on the fetch-cache.
+# The held NodeSource/Chrome sources go back too, so /etc/apt matches what the image always shipped.
 RUN mv /etc/apt/sources.list.kubetty-orig /etc/apt/sources.list \
+    && mv /etc/apt/sources.list.d.kubetty-held/* /etc/apt/sources.list.d/ \
+    && rmdir /etc/apt/sources.list.d.kubetty-held \
     && rm /etc/apt/apt.conf.d/99kubetty-build-retries \
     && grep -q '^deb http://archive.ubuntu.com/ubuntu/ jammy main' /etc/apt/sources.list
 
+# Release binaries below: build/fetch.sh, sha256 pinned to the exact files prod shipped on
+# 2026-11-19 (cluster-services-1496; the `latest`/branch-head fetches were pinned to the versions
+# prod already contained, so the image content does not change). Each call prints its source tier.
 # Install Docker Compose V2 plugin and V1 compatibility symlink
-RUN mkdir -p /usr/local/lib/docker/cli-plugins \
-    && curl -fsSL https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-x86_64 \
-       -o /usr/local/lib/docker/cli-plugins/docker-compose \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh mkdir -p /usr/local/lib/docker/cli-plugins \
+    && sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-compose 5ea89dd65d33912a83737d8a4bf070d5de534a32b8493a21fbefc924484786a9 \
+       https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-x86_64 \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
     && ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 
 # Install Docker Buildx plugin
-RUN curl -fsSL https://github.com/docker/buildx/releases/download/v0.16.2/buildx-v0.16.2.linux-amd64 \
-       -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-buildx 43e4c928a0be38ab34e206c82957edfdd54f3e7124f1dadd7779591c3acf77ea \
+       https://github.com/docker/buildx/releases/download/v0.16.2/buildx-v0.16.2.linux-amd64 \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
 
 # Symlink fd command.
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
 
 # Install Go toolchain for on-cluster development.
-RUN curl --http1.1 --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 30 \
-      -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -o /tmp/go.tgz \
+# sha256 = go.dev's published checksum for go1.24.3.linux-amd64.tar.gz (GO_VERSION and this move together).
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/go.tgz 3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8 \
+      https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm /tmp/go.tgz
 
 # Install Kubernetes/Cloud tooling.
-RUN set -eux; \
-    curl -fsSL https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.2/kustomize_v5.4.2_linux_amd64.tar.gz -o /tmp/kustomize.tgz; \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh set -eux; \
+    sh /tmp/fetch.sh /tmp/kustomize.tgz 881c6e9007c7ea2b9ecc214d13f4cdd1f837635dcf4db49ce4479898f7d911a3 https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.2/kustomize_v5.4.2_linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/kustomize.tgz; \
     mv /tmp/kustomize /usr/local/bin/kustomize; \
-    curl -fsSL https://github.com/helmfile/helmfile/releases/download/v0.161.0/helmfile_0.161.0_linux_amd64.tar.gz -o /tmp/helmfile.tgz; \
+    sh /tmp/fetch.sh /tmp/helmfile.tgz c7545124335e693fbf147c7f43447507078a6ec7db52a26bd8686c085b2cc2f0 https://github.com/helmfile/helmfile/releases/download/v0.161.0/helmfile_0.161.0_linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/helmfile.tgz; \
     mv /tmp/helmfile /usr/local/bin/helmfile; \
-    curl -fsSL https://github.com/derailed/k9s/releases/download/v0.32.4/k9s_Linux_amd64.tar.gz -o /tmp/k9s.tgz; \
+    sh /tmp/fetch.sh /tmp/k9s.tgz d62611d9be2c35b782a765e98421500196acbf8be844cd3d9e32d4fa7846da05 https://github.com/derailed/k9s/releases/download/v0.32.4/k9s_Linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/k9s.tgz; \
     mv /tmp/k9s /usr/local/bin/k9s; \
-    curl -fsSL https://releases.hashicorp.com/terraform/1.8.5/terraform_1.8.5_linux_amd64.zip -o /tmp/terraform.zip; \
+    sh /tmp/fetch.sh /tmp/terraform.zip bb1ee3e8314da76658002e2e584f2d8854b6def50b7f124e27b957a42ddacfea https://releases.hashicorp.com/terraform/1.8.5/terraform_1.8.5_linux_amd64.zip; \
     unzip /tmp/terraform.zip -d /usr/local/bin; \
-    curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip; \
+    sh /tmp/fetch.sh /tmp/awscliv2.zip f1b67518c009e9deb94152aaba5cc015e80af6b0630a7931d3662df42b5f568e https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.41.1.zip; \
     unzip /tmp/awscliv2.zip -d /tmp; \
     /tmp/aws/install --update; \
     rm -rf /tmp/kustomize.tgz /tmp/helmfile.tgz /tmp/k9s.tgz /tmp/terraform.zip /tmp/awscliv2.zip /tmp/aws
 
 # Install kubectl.
-RUN curl -fsSLo /usr/local/bin/kubectl https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kubectl abd83816bd236b266c3643e6c852b446f068fe260f3296af1a25b550854ec7e5 \
+      https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl k8s/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl \
     && chmod +x /usr/local/bin/kubectl
 
 # Install Helm.
-RUN curl -fsSL https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz -o /tmp/helm.tgz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/helm.tgz 2694b91c3e501cff57caf650e639604a274645f61af2ea4d601677b746b44fe2 \
+      https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz helm/helm-${HELM_VERSION}-linux-amd64.tar.gz \
     && tar -C /tmp -xzf /tmp/helm.tgz \
     && mv /tmp/linux-amd64/helm /usr/local/bin/helm \
     && rm -rf /tmp/helm.tgz /tmp/linux-amd64
 
 # Install yq.
-RUN curl -fsSL https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64 -o /usr/local/bin/yq \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/yq a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7 \
+      https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64 github-releases/mikefarah/yq/${YQ_VERSION}/yq_linux_amd64 \
     && chmod +x /usr/local/bin/yq
 
 # Install Kind (Kubernetes in Docker) for spinning up temporary k8s clusters.
-RUN curl -fsSL https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64 -o /usr/local/bin/kind \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kind b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64 \
     && chmod +x /usr/local/bin/kind
 
 # Install k3d (k3s in Docker) for lightweight temporary k8s clusters.
-RUN curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+# Was `curl .../k3d-io/k3d/main/install.sh | bash` (installs the latest release binary); prod had v5.9.0.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/k3d 06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0 \
+      https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64 \
+    && chmod 755 /usr/local/bin/k3d
 
 # Install Minikube for local Kubernetes clusters.
-RUN curl -fsSL https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64 -o /usr/local/bin/minikube \
+# Was releases/latest; prod had v1.39.0.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/minikube b738496da01be06bbaf80c688f57ce25acd3849fbb518155f3a88e03ef555aa4 https://storage.googleapis.com/minikube/releases/v1.39.0/minikube-linux-amd64 \
     && chmod +x /usr/local/bin/minikube
 
 # Install Skaffold for continuous k8s development.
-RUN curl -fsSL https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64 -o /usr/local/bin/skaffold \
+# Was releases/latest; prod had v2.25.0.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/skaffold 42b9e2e3246c19b78fcc53dd60cc7ded1da8704293886b909a2a02b9bef34d20 https://storage.googleapis.com/skaffold/releases/v2.25.0/skaffold-linux-amd64 \
     && chmod +x /usr/local/bin/skaffold
 
 # Install Tilt for live k8s development.
-RUN curl -fsSL https://raw.githubusercontent.com/tilt-dev/tilt/master/scripts/install.sh | bash
+# Was `curl .../tilt-dev/tilt/master/scripts/install.sh | bash` (latest release into /usr/local/bin);
+# prod had v0.37.9.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/tilt.tgz e70bb856b8e1cddb249b1e4231c1b1edca1f78167415effbdc9a1e893b6b9a19 \
+      https://github.com/tilt-dev/tilt/releases/download/v0.37.9/tilt.0.37.9.linux.x86_64.tar.gz \
+    && tar -C /usr/local/bin -xzf /tmp/tilt.tgz tilt \
+    && rm -f /tmp/tilt.tgz
 
 # Install Telepresence for connecting local dev to remote clusters.
-RUN curl -fsSL https://app.getambassador.io/download/tel2oss/releases/download/v2.18.0/telepresence-linux-amd64 -o /usr/local/bin/telepresence \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/telepresence b34ec6977a4636acf5f6047fcc4b7d04e73c60332f73af957218a6a5d942c4bc https://app.getambassador.io/download/tel2oss/releases/download/v2.18.0/telepresence-linux-amd64 \
     && chmod +x /usr/local/bin/telepresence
 
 # Install kubectx and kubens for quick context/namespace switching.
-RUN curl -fsSL https://github.com/ahmetb/kubectx/releases/download/v0.9.5/kubectx_v0.9.5_linux_x86_64.tar.gz -o /tmp/kubectx.tgz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/kubectx.tgz a2247ffd23e79f89abdd0e8173379d7172511f02a3f63c9936d3824e0dd60648 https://github.com/ahmetb/kubectx/releases/download/v0.9.5/kubectx_v0.9.5_linux_x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/kubectx.tgz kubectx \
-    && curl -fsSL https://github.com/ahmetb/kubectx/releases/download/v0.9.5/kubens_v0.9.5_linux_x86_64.tar.gz -o /tmp/kubens.tgz \
+    && sh /tmp/fetch.sh /tmp/kubens.tgz acc1a9c7f6b722fbe5fad25dd0e784a7335d18436b9c414ab996629e82702cba https://github.com/ahmetb/kubectx/releases/download/v0.9.5/kubens_v0.9.5_linux_x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/kubens.tgz kubens \
     && rm -f /tmp/kubectx.tgz /tmp/kubens.tgz
 
 # Install stern for multi-pod log tailing.
-RUN curl -fsSL https://github.com/stern/stern/releases/download/v1.30.0/stern_1.30.0_linux_amd64.tar.gz -o /tmp/stern.tgz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/stern.tgz ea1bf1f1dddf1fd4b9971148582e88c637884ac1592dcba71838a6a42277708b https://github.com/stern/stern/releases/download/v1.30.0/stern_1.30.0_linux_amd64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/stern.tgz stern \
     && rm -f /tmp/stern.tgz
 
 # Install DevSpace for k8s development workflow.
-RUN curl -fsSL https://github.com/devspace-sh/devspace/releases/latest/download/devspace-linux-amd64 -o /usr/local/bin/devspace \
+# Was releases/latest; prod had v6.3.21.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/devspace 9720a6c87a2465f6d73b4db5a908e15e1971158443b5de9162d94aa5f87f79f0 https://github.com/devspace-sh/devspace/releases/download/v6.3.21/devspace-linux-amd64 \
     && chmod +x /usr/local/bin/devspace
 
 # Install ctlptl for declarative local cluster management.
-RUN curl -fsSL https://github.com/tilt-dev/ctlptl/releases/download/v0.8.28/ctlptl.0.8.28.linux.x86_64.tar.gz -o /tmp/ctlptl.tgz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/ctlptl.tgz 98a55d8bfd61ab95b72e2e81d21e540d704065ce90d7972cd4ed8600dd091905 https://github.com/tilt-dev/ctlptl/releases/download/v0.8.28/ctlptl.0.8.28.linux.x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/ctlptl.tgz ctlptl \
     && rm -f /tmp/ctlptl.tgz
 
 # Install vcluster for virtual clusters inside k8s.
-RUN curl -fsSL https://github.com/loft-sh/vcluster/releases/latest/download/vcluster-linux-amd64 -o /usr/local/bin/vcluster \
+# Was releases/latest; prod had v0.38.0.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/vcluster a27849d95f6565fb0eaf452f593b17628116201dd054cde6d83354afac6f89e5 https://github.com/loft-sh/vcluster/releases/download/v0.38.0/vcluster-linux-amd64 \
     && chmod +x /usr/local/bin/vcluster
 
 # Install python-based helpers for LLM tooling (placeholders for Claude/Codex/Gemini CLIs).
 # certifi >= 2026.10.19 drops the eMudhra emSign roots (USN-8944-1).
-RUN pip3 install --no-cache-dir anthropic google-generativeai openai 'certifi>=2026.10.19'
+# Exact pins of the set prod shipped on 2026-11-19, every file hash-checked (cluster-services-1496).
+# Tier: upstream-pinned (PyPI); no PyPI mirror runs in the org yet. To change the set, re-resolve
+# the four top-level packages and regenerate build/requirements-ai.txt with all PyPI hashes.
+RUN --mount=type=bind,source=build/requirements-ai.txt,target=/tmp/requirements-ai.txt \
+    echo "pip source: upstream-pinned https://pypi.org (--require-hashes)" \
+    && pip3 install --no-cache-dir --require-hashes -r /tmp/requirements-ai.txt
 
 # Create directory for optional proprietary CLI binaries (installed at runtime).
 RUN mkdir -p /opt/ai/bin && chmod 755 /opt/ai/bin

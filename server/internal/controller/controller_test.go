@@ -482,15 +482,18 @@ func TestController_CorrectResourceNaming(t *testing.T) {
 	}
 }
 
-// TestController_ClusterRoleNaming verifies cluster-scoped resources use ClusterRoleName.
-func TestController_ClusterRoleNaming(t *testing.T) {
+// TestController_ProjectGetsNoAPIAccess: the pod runs an unsandboxed agent, so AdminNamespaces must not grant it API access.
+func TestController_ProjectGetsNoAPIAccess(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	store := newMockStore()
 	cfg := newControllerConfig()
+	sharedNS := cfg.ResourceConfig.Namespace
 
 	ctrl := NewWithClient(cfg, store, client)
 
 	project := newTestProjectWithStatus("rbac-test", projects.StatusPending)
+	project.AdminNamespaces = []string{"app-staging", sharedNS}
+	project.ReadNamespaces = []string{"app-production"}
 	store.addProject(project)
 
 	ctx := context.Background()
@@ -498,42 +501,43 @@ func TestController_ClusterRoleNaming(t *testing.T) {
 		t.Fatalf("handlePending failed: %v", err)
 	}
 
-	// Verify admin ClusterRole name uses env suffix
-	expectedAdminName := cfg.ResourceConfig.ClusterRoleName(project.Name, "admin")
-	adminRole, err := client.RbacV1().ClusterRoles().Get(ctx, expectedAdminName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Admin ClusterRole not found with expected name %s: %v", expectedAdminName, err)
+	rbac := client.RbacV1()
+	clusterRoles, err := rbac.ClusterRoles().List(ctx, metav1.ListOptions{})
+	if err != nil || len(clusterRoles.Items) != 0 {
+		t.Errorf("want no ClusterRoles, got %v (err %v)", clusterRoles, err)
 	}
-	if adminRole.Name != expectedAdminName {
-		t.Errorf("Admin ClusterRole name mismatch: expected %s, got %s", expectedAdminName, adminRole.Name)
+	clusterRoleBindings, err := rbac.ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+	if err != nil || len(clusterRoleBindings.Items) != 0 {
+		t.Errorf("want no ClusterRoleBindings, got %v (err %v)", clusterRoleBindings, err)
 	}
-
-	// Verify admin ClusterRoleBinding name
-	adminBinding, err := client.RbacV1().ClusterRoleBindings().Get(ctx, expectedAdminName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Admin ClusterRoleBinding not found with expected name %s: %v", expectedAdminName, err)
+	roles, err := rbac.Roles(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil || len(roles.Items) != 0 {
+		t.Errorf("want no Roles, got %v (err %v)", roles, err)
 	}
-	if adminBinding.Name != expectedAdminName {
-		t.Errorf("Admin ClusterRoleBinding name mismatch: expected %s, got %s", expectedAdminName, adminBinding.Name)
-	}
-
-	// Verify read ClusterRole name
-	expectedReadName := cfg.ResourceConfig.ClusterRoleName(project.Name, "read")
-	readRole, err := client.RbacV1().ClusterRoles().Get(ctx, expectedReadName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Read ClusterRole not found with expected name %s: %v", expectedReadName, err)
-	}
-	if readRole.Name != expectedReadName {
-		t.Errorf("Read ClusterRole name mismatch: expected %s, got %s", expectedReadName, readRole.Name)
+	roleBindings, err := rbac.RoleBindings(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil || len(roleBindings.Items) != 0 {
+		t.Errorf("want no RoleBindings, got %v (err %v)", roleBindings, err)
 	}
 
-	// Verify read ClusterRoleBinding name
-	readBinding, err := client.RbacV1().ClusterRoleBindings().Get(ctx, expectedReadName, metav1.GetOptions{})
+	resourceName := cfg.ResourceConfig.ResourceName(project.Name)
+	sa, err := client.CoreV1().ServiceAccounts(sharedNS).Get(ctx, resourceName+"-sa", metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("Read ClusterRoleBinding not found with expected name %s: %v", expectedReadName, err)
+		t.Fatalf("ServiceAccount not found: %v", err)
 	}
-	if readBinding.Name != expectedReadName {
-		t.Errorf("Read ClusterRoleBinding name mismatch: expected %s, got %s", expectedReadName, readBinding.Name)
+	if v := sa.AutomountServiceAccountToken; v == nil || *v {
+		t.Error("ServiceAccount automountServiceAccountToken must be explicitly false")
+	}
+
+	deploy, err := client.AppsV1().Deployments(sharedNS).Get(ctx, resourceName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Deployment not found: %v", err)
+	}
+	podSpec := deploy.Spec.Template.Spec
+	if podSpec.ServiceAccountName != resourceName+"-sa" {
+		t.Errorf("pod serviceAccountName = %q, want %q", podSpec.ServiceAccountName, resourceName+"-sa")
+	}
+	if v := podSpec.AutomountServiceAccountToken; v == nil || *v {
+		t.Error("pod automountServiceAccountToken must be explicitly false")
 	}
 }
 
@@ -598,66 +602,6 @@ func TestController_LabelSelectors(t *testing.T) {
 		if got := svc.Spec.Selector[key]; got != expected {
 			t.Errorf("Service selector %s: expected %s, got %s", key, expected, got)
 		}
-	}
-}
-
-// TestController_HandleDeletingCleansUpClusterRoles verifies cluster-scoped resources are deleted.
-func TestController_HandleDeletingCleansUpClusterRoles(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	store := newMockStore()
-	cfg := newControllerConfig()
-
-	ctrl := NewWithClient(cfg, store, client)
-
-	project := newTestProjectWithStatus("cleanup-test", projects.StatusPending)
-	store.addProject(project)
-
-	ctx := context.Background()
-
-	// First create resources
-	if err := ctrl.handlePending(ctx, project); err != nil {
-		t.Fatalf("handlePending failed: %v", err)
-	}
-
-	// Verify resources exist before deletion
-	expectedAdminName := cfg.ResourceConfig.ClusterRoleName(project.Name, "admin")
-	expectedReadName := cfg.ResourceConfig.ClusterRoleName(project.Name, "read")
-
-	_, err := client.RbacV1().ClusterRoles().Get(ctx, expectedAdminName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Admin ClusterRole should exist before deletion: %v", err)
-	}
-	_, err = client.RbacV1().ClusterRoles().Get(ctx, expectedReadName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Read ClusterRole should exist before deletion: %v", err)
-	}
-
-	// Now delete
-	project.Status = projects.StatusDeleting
-	if err := ctrl.handleDeleting(ctx, project); err != nil {
-		t.Fatalf("handleDeleting failed: %v", err)
-	}
-
-	// Verify ClusterRoles are deleted
-	_, err = client.RbacV1().ClusterRoles().Get(ctx, expectedAdminName, metav1.GetOptions{})
-	if err == nil {
-		t.Errorf("Admin ClusterRole should be deleted but still exists")
-	}
-
-	_, err = client.RbacV1().ClusterRoles().Get(ctx, expectedReadName, metav1.GetOptions{})
-	if err == nil {
-		t.Errorf("Read ClusterRole should be deleted but still exists")
-	}
-
-	// Verify ClusterRoleBindings are deleted
-	_, err = client.RbacV1().ClusterRoleBindings().Get(ctx, expectedAdminName, metav1.GetOptions{})
-	if err == nil {
-		t.Errorf("Admin ClusterRoleBinding should be deleted but still exists")
-	}
-
-	_, err = client.RbacV1().ClusterRoleBindings().Get(ctx, expectedReadName, metav1.GetOptions{})
-	if err == nil {
-		t.Errorf("Read ClusterRoleBinding should be deleted but still exists")
 	}
 }
 

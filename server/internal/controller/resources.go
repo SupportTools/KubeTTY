@@ -10,7 +10,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -53,7 +52,7 @@ type ResourceConfig struct {
 	Prefix string
 
 	// Env is the environment suffix parsed from the namespace
-	// (e.g., "dev", "prd") - used for cluster-scoped resources
+	// (e.g., "dev", "prd")
 	Env string
 
 	// ImagePullSecrets lists secret names for pulling container images
@@ -117,17 +116,6 @@ func (c ResourceConfig) PVCName(projectName string) string {
 		suffix = "-data"
 	}
 	return fmt.Sprintf("%s%s", c.ResourceName(projectName), suffix)
-}
-
-// ClusterRoleName returns the name for a cluster-scoped RBAC resource.
-// Format: {prefix}{project-name}-{role}-{env}
-// If Env is empty, it omits the environment suffix.
-func (c ResourceConfig) ClusterRoleName(projectName, role string) string {
-	baseName := c.ResourceName(projectName)
-	if c.Env == "" {
-		return fmt.Sprintf("%s-%s", baseName, role)
-	}
-	return fmt.Sprintf("%s-%s-%s", baseName, role, c.Env)
 }
 
 // buildImagePullSecrets converts a list of secret names to LocalObjectReferences.
@@ -284,8 +272,10 @@ echo "Template sync job completed"
 
 // BuildServiceAccount creates a ServiceAccount for the project pod.
 // Name format: {prefix}{project-name}-sa
+// It has no RBAC and no mounted token: the sandbox runs an unsandboxed agent.
 func BuildServiceAccount(p *projects.Project, cfg ResourceConfig) *corev1.ServiceAccount {
 	resourceName := fmt.Sprintf("%s-sa", cfg.ResourceName(p.Name))
+	automount := false
 
 	return &corev1.ServiceAccount{
 		TypeMeta: metav1.TypeMeta{
@@ -297,6 +287,7 @@ func BuildServiceAccount(p *projects.Project, cfg ResourceConfig) *corev1.Servic
 			Namespace: cfg.Namespace,
 			Labels:    projectLabels(p, cfg),
 		},
+		AutomountServiceAccountToken: &automount,
 	}
 }
 
@@ -696,6 +687,7 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 	userID := int64(1000)
 	groupID := int64(1000)
 	rootID := int64(0)
+	automountToken := false
 
 	initContainers := []corev1.Container{}
 
@@ -764,8 +756,9 @@ fi
 					},
 				},
 				Spec: corev1.PodSpec{
-					Hostname:           p.Name,
-					ServiceAccountName: saName,
+					Hostname:                     p.Name,
+					ServiceAccountName:           saName,
+					AutomountServiceAccountToken: &automountToken,
 					SecurityContext: &corev1.PodSecurityContext{
 						SupplementalGroups: []int64{0},
 					},
@@ -776,118 +769,6 @@ fi
 					TopologySpreadConstraints: projectTopologySpreadConstraints(cfg),
 				},
 			},
-		},
-	}
-}
-
-// BuildAdminClusterRole creates a ClusterRole with admin permissions.
-// Name format: {prefix}{project-name}-admin-{env}
-// This is cluster-scoped to allow cross-namespace access based on AdminNamespaces.
-func BuildAdminClusterRole(p *projects.Project, cfg ResourceConfig) *rbacv1.ClusterRole {
-	resourceName := cfg.ClusterRoleName(p.Name, "admin")
-
-	return &rbacv1.ClusterRole{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "ClusterRole",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: projectLabels(p, cfg),
-		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{"", "apps", "batch", "extensions", "networking.k8s.io"},
-				Resources: []string{"*"},
-				Verbs:     []string{"*"},
-			},
-		},
-	}
-}
-
-// BuildReadClusterRole creates a ClusterRole with read-only permissions.
-// Name format: {prefix}{project-name}-read-{env}
-// This is cluster-scoped to allow cross-namespace access based on ReadNamespaces.
-func BuildReadClusterRole(p *projects.Project, cfg ResourceConfig) *rbacv1.ClusterRole {
-	resourceName := cfg.ClusterRoleName(p.Name, "read")
-
-	return &rbacv1.ClusterRole{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "ClusterRole",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: projectLabels(p, cfg),
-		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{"", "apps", "batch", "extensions", "networking.k8s.io"},
-				Resources: []string{"*"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-		},
-	}
-}
-
-// BuildAdminClusterRoleBinding creates a ClusterRoleBinding for admin access.
-// Name format: {prefix}{project-name}-admin-{env}
-// Binds the admin ClusterRole to the project's ServiceAccount.
-func BuildAdminClusterRoleBinding(p *projects.Project, cfg ResourceConfig) *rbacv1.ClusterRoleBinding {
-	resourceName := cfg.ClusterRoleName(p.Name, "admin")
-	saName := fmt.Sprintf("%s-sa", cfg.ResourceName(p.Name))
-
-	return &rbacv1.ClusterRoleBinding{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "ClusterRoleBinding",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: projectLabels(p, cfg),
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      "ServiceAccount",
-				Name:      saName,
-				Namespace: cfg.Namespace,
-			},
-		},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "ClusterRole",
-			Name:     resourceName,
-		},
-	}
-}
-
-// BuildReadClusterRoleBinding creates a ClusterRoleBinding for read-only access.
-// Name format: {prefix}{project-name}-read-{env}
-// Binds the read ClusterRole to the project's ServiceAccount.
-func BuildReadClusterRoleBinding(p *projects.Project, cfg ResourceConfig) *rbacv1.ClusterRoleBinding {
-	resourceName := cfg.ClusterRoleName(p.Name, "read")
-	saName := fmt.Sprintf("%s-sa", cfg.ResourceName(p.Name))
-
-	return &rbacv1.ClusterRoleBinding{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "ClusterRoleBinding",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: projectLabels(p, cfg),
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      "ServiceAccount",
-				Name:      saName,
-				Namespace: cfg.Namespace,
-			},
-		},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "ClusterRole",
-			Name:     resourceName,
 		},
 	}
 }

@@ -12,7 +12,6 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/projects"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -333,34 +332,6 @@ func (c *Controller) handlePending(ctx context.Context, p *projects.Project) err
 		}
 	}
 
-	// Create ClusterRole and ClusterRoleBinding for admin access
-	adminRole := BuildAdminClusterRole(p, cfg)
-	if _, err := c.clientset.RbacV1().ClusterRoles().Create(ctx, adminRole, metav1.CreateOptions{}); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			logger.WithError(err).Warn("Failed to create admin ClusterRole")
-		}
-	}
-	adminBinding := BuildAdminClusterRoleBinding(p, cfg)
-	if _, err := c.clientset.RbacV1().ClusterRoleBindings().Create(ctx, adminBinding, metav1.CreateOptions{}); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			logger.WithError(err).Warn("Failed to create admin ClusterRoleBinding")
-		}
-	}
-
-	// Create ClusterRole and ClusterRoleBinding for read access
-	readRole := BuildReadClusterRole(p, cfg)
-	if _, err := c.clientset.RbacV1().ClusterRoles().Create(ctx, readRole, metav1.CreateOptions{}); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			logger.WithError(err).Warn("Failed to create read ClusterRole")
-		}
-	}
-	readBinding := BuildReadClusterRoleBinding(p, cfg)
-	if _, err := c.clientset.RbacV1().ClusterRoleBindings().Create(ctx, readBinding, metav1.CreateOptions{}); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			logger.WithError(err).Warn("Failed to create read ClusterRoleBinding")
-		}
-	}
-
 	// Create Service
 	svc := BuildService(p, cfg)
 	if _, err := c.clientset.CoreV1().Services(cfg.Namespace).Create(ctx, svc, metav1.CreateOptions{}); err != nil {
@@ -657,35 +628,6 @@ func (c *Controller) handleDeleting(ctx context.Context, p *projects.Project) er
 	if err := c.clientset.CoreV1().Secrets(cfg.Namespace).Delete(ctx, envSecretName, metav1.DeleteOptions{}); err != nil {
 		if !errors.IsNotFound(err) {
 			logger.WithError(err).Warn("Failed to delete env secret")
-		}
-	}
-
-	// Delete cluster-scoped RBAC resources
-	// Use ClusterRoleName for consistent naming with the builders
-	adminRoleName := cfg.ClusterRoleName(p.Name, "admin")
-	readRoleName := cfg.ClusterRoleName(p.Name, "read")
-
-	// Delete admin ClusterRoleBinding and ClusterRole
-	if err := c.clientset.RbacV1().ClusterRoleBindings().Delete(ctx, adminRoleName, metav1.DeleteOptions{}); err != nil {
-		if !errors.IsNotFound(err) {
-			logger.WithError(err).Warn("Failed to delete admin ClusterRoleBinding")
-		}
-	}
-	if err := c.clientset.RbacV1().ClusterRoles().Delete(ctx, adminRoleName, metav1.DeleteOptions{}); err != nil {
-		if !errors.IsNotFound(err) {
-			logger.WithError(err).Warn("Failed to delete admin ClusterRole")
-		}
-	}
-
-	// Delete read ClusterRoleBinding and ClusterRole
-	if err := c.clientset.RbacV1().ClusterRoleBindings().Delete(ctx, readRoleName, metav1.DeleteOptions{}); err != nil {
-		if !errors.IsNotFound(err) {
-			logger.WithError(err).Warn("Failed to delete read ClusterRoleBinding")
-		}
-	}
-	if err := c.clientset.RbacV1().ClusterRoles().Delete(ctx, readRoleName, metav1.DeleteOptions{}); err != nil {
-		if !errors.IsNotFound(err) {
-			logger.WithError(err).Warn("Failed to delete read ClusterRole")
 		}
 	}
 
@@ -1338,7 +1280,5 @@ func (c *Controller) updateNetworkPolicyIfNeeded(ctx context.Context, p *project
 
 // Ensure interfaces are implemented (compile-time check)
 var (
-	_ *appsv1.Deployment         = nil
-	_ *rbacv1.ClusterRole        = nil
-	_ *rbacv1.ClusterRoleBinding = nil
+	_ *appsv1.Deployment = nil
 )

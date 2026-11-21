@@ -10,7 +10,7 @@ const mockFns = vi.hoisted(() => ({
 }));
 
 // Mock must be defined before importing the component
-vi.mock('@novnc/novnc/lib/rfb', () => {
+vi.mock('@novnc/novnc', () => {
   const MockRFB = vi.fn().mockImplementation(function (
     this: Record<string, unknown>,
     _target: HTMLElement,

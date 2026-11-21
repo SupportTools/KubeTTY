@@ -8,6 +8,7 @@ import {
   UpgradeInfoResponse,
 } from "../types";
 import { parseErrorResponse } from "../utils/errorParser";
+import { isValidGitHubRepo } from "../utils/githubRepo";
 
 interface Props {
   project: AdminProject;
@@ -86,6 +87,8 @@ const AdminProjectDetail = ({
 
   // Image auto-follow switch (cluster-services-1382)
   const [savingAutoFollow, setSavingAutoFollow] = useState(false);
+  const [githubRepoDraft, setGitHubRepoDraft] = useState(initialProject.githubRepo || "");
+  const [savingGitHubRepo, setSavingGitHubRepo] = useState(false);
 
   // Edit Settings modal state
   const [showEditSettingsModal, setShowEditSettingsModal] = useState(false);
@@ -455,6 +458,35 @@ const AdminProjectDetail = ({
     }
   };
 
+  // A settings-only PUT like auto-follow: it never rolls the pod.
+  const handleGitHubRepoSave = async () => {
+    const repo = githubRepoDraft.trim();
+    if (!isValidGitHubRepo(repo)) {
+      setError("GitHub repository must be owner/name");
+      return;
+    }
+    setSavingGitHubRepo(true);
+    setError(null);
+    try {
+      const res = await authFetch(`/api/admin/projects/${project.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ githubRepo: repo }),
+      });
+      if (!res.ok) {
+        throw new Error(await parseErrorResponse(res));
+      }
+      const updated = (await res.json()) as AdminProject;
+      setProject((prev) => ({ ...prev, ...updated, githubRepo: updated.githubRepo }));
+      setGitHubRepoDraft(updated.githubRepo || "");
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update the GitHub repository");
+    } finally {
+      setSavingGitHubRepo(false);
+    }
+  };
+
   // Pause/Unpause handlers
   const handlePauseToggle = async () => {
     const action = project.paused ? "unpause" : "pause";
@@ -515,6 +547,26 @@ const AdminProjectDetail = ({
               <div className="detail-item">
                 <label>Owner</label>
                 <span>{project.userName}</span>
+              </div>
+              <div className="detail-item">
+                <label htmlFor="project-github-repo">GitHub repository</label>
+                <span>
+                  <input
+                    id="project-github-repo"
+                    type="text"
+                    value={githubRepoDraft}
+                    placeholder="owner/name (empty: admins only)"
+                    disabled={savingGitHubRepo}
+                    onChange={(e) => setGitHubRepoDraft(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    disabled={savingGitHubRepo || githubRepoDraft.trim() === (project.githubRepo || "")}
+                    onClick={handleGitHubRepoSave}
+                  >
+                    {savingGitHubRepo ? "Saving..." : "Save"}
+                  </button>
+                </span>
               </div>
               <div className="detail-item">
                 <label>Namespace</label>

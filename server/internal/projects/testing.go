@@ -95,6 +95,7 @@ func (m *MockStore) Create(ctx context.Context, req CreateProjectRequest) (*Proj
 		ImageRepository:  req.ImageRepository,
 		ImageTag:         req.ImageTag,
 		ImageAutoFollow:  true,
+		GitHubRepo:       req.GitHubRepo,
 		Status:           StatusPending,
 		CreatedAt:        now,
 		UpdatedAt:        now,
@@ -294,6 +295,9 @@ func (m *MockStore) Update(ctx context.Context, id uuid.UUID, req UpdateProjectR
 	}
 	if req.ImageAutoFollow != nil {
 		project.ImageAutoFollow = *req.ImageAutoFollow
+	}
+	if req.GitHubRepo != nil {
+		project.GitHubRepo = *req.GitHubRepo
 	}
 
 	project.UpdatedAt = time.Now()

@@ -27,7 +27,19 @@ var (
 	ErrTokenExpired       = errors.New("token expired")
 	ErrTokenRevoked       = errors.New("token revoked")
 	ErrWeakPassword       = errors.New("password must be at least 8 characters")
+	// ErrNotAdmitted means the account may no longer sign in (for example it left the GitHub team).
+	ErrNotAdmitted = errors.New("account is not allowed to sign in")
 )
+
+// Roles carried in the access token.
+const (
+	RoleAdmin = "admin"
+	RoleUser  = "user"
+)
+
+// Admission decides, when tokens are issued or refreshed, whether user may
+// sign in and with which role. It returns ErrNotAdmitted to refuse.
+type Admission func(ctx context.Context, user *User) (role string, err error)
 
 // TokenPair captures newly issued JWT + refresh token values.
 type TokenPair struct {
@@ -49,7 +61,9 @@ type TokenMetadata struct {
 
 // AccessClaims defines our JWT payload.
 type AccessClaims struct {
-	Username string `json:"username"`
+	Username    string `json:"username"`
+	Role        string `json:"role,omitempty"`
+	GitHubLogin string `json:"gh,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -61,9 +75,23 @@ type Manager struct {
 	accessTTL  time.Duration
 	refreshTTL time.Duration
 	now        func() time.Time
+	admission  Admission
 }
 
 // NewManager configures an auth manager.
+// SetAdmission installs the admission check. Without one every active
+// account is admitted as admin, which is how local and Access modes behave.
+func (m *Manager) SetAdmission(a Admission) {
+	m.admission = a
+}
+
+func (m *Manager) admit(ctx context.Context, user *User) (string, error) {
+	if m.admission == nil {
+		return RoleAdmin, nil
+	}
+	return m.admission(ctx, user)
+}
+
 func NewManager(store Store, secret string, issuer string, accessTTL, refreshTTL time.Duration) (*Manager, error) {
 	key, err := decodeSecret(secret)
 	if err != nil {
@@ -202,9 +230,13 @@ func (m *Manager) IssueTokenPair(ctx context.Context, user *User, meta TokenMeta
 		"client_ip": meta.ClientIP,
 	}).Debug("auth/manager: issuing token pair")
 
+	role, err := m.admit(ctx, user)
+	if err != nil {
+		return nil, err
+	}
 	now := m.now()
 	accessExp := now.Add(m.accessTTL)
-	accessToken, err := m.signAccessToken(user, now, accessExp)
+	accessToken, err := m.signAccessToken(user, role, now, accessExp)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"user_id":  user.ID.String(),
@@ -305,10 +337,24 @@ func (m *Manager) Refresh(ctx context.Context, token string, meta TokenMetadata)
 		}).Warn("auth/manager: refresh token for inactive user")
 		return nil, ErrInvalidCredentials
 	}
+	role, err := m.admit(ctx, user)
+	if errors.Is(err, ErrNotAdmitted) {
+		if rerr := m.store.RevokeRefreshToken(ctx, tokenID, now); rerr != nil {
+			log.WithError(rerr).WithField("token_id", tokenID.String()).Warn("auth/manager: could not revoke refresh token of a refused account")
+		}
+		log.WithFields(log.Fields{
+			"user_id":  user.ID.String(),
+			"username": user.Username,
+		}).Warn("auth/manager: refresh refused, account no longer admitted")
+		return nil, ErrNotAdmitted
+	}
+	if err != nil {
+		return nil, err
+	}
 
 	// Issue new access token only (no rotation - reuse existing refresh token)
 	accessExp := now.Add(m.accessTTL)
-	accessToken, err := m.signAccessToken(user, now, accessExp)
+	accessToken, err := m.signAccessToken(user, role, now, accessExp)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"token_id": tokenID.String(),
@@ -372,9 +418,11 @@ type refreshResult struct {
 	record RefreshToken
 }
 
-func (m *Manager) signAccessToken(user *User, issuedAt, expiresAt time.Time) (string, error) {
+func (m *Manager) signAccessToken(user *User, role string, issuedAt, expiresAt time.Time) (string, error) {
 	claims := AccessClaims{
-		Username: user.Username,
+		Username:    user.Username,
+		Role:        role,
+		GitHubLogin: user.GitHubLogin,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   user.ID.String(),
 			Issuer:    m.issuer,

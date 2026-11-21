@@ -9,7 +9,7 @@ import (
 
 // MeResponse represents the current user information response.
 type MeResponse struct {
-	User map[string]any `json:"user"` // User object with id and username
+	User map[string]any `json:"user"` // id, username, role and, for GitHub accounts, githubLogin
 }
 
 // NewAuthMeHandler creates an HTTP handler for retrieving the current authenticated user.
@@ -41,10 +41,19 @@ func NewAuthMeHandler() http.HandlerFunc {
 		}
 
 		_ = util.WriteJSON(w, http.StatusOK, MeResponse{
-			User: map[string]any{
-				"id":       user.ID.String(),
-				"username": user.Username,
-			},
+			User: meUser(user),
 		})
 	}
+}
+
+func meUser(user *User) map[string]any {
+	out := map[string]any{
+		"id":       user.ID.String(),
+		"username": user.Username,
+		"role":     user.Role,
+	}
+	if user.GitHubLogin != "" {
+		out["githubLogin"] = user.GitHubLogin
+	}
+	return out
 }

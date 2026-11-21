@@ -119,6 +119,37 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- if eq .Values.auth.mode "github" }}
+            {{- $gh := .Values.auth.github | default dict }}
+            - name: AUTH_GITHUB_CLIENT_ID
+              value: {{ required "auth.github.clientId is required for github" $gh.clientId | quote }}
+            - name: AUTH_GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "auth.github.secretName is required for github" $gh.secretName | quote }}
+                  key: client-secret
+            - name: AUTH_GITHUB_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $gh.secretName | quote }}
+                  key: private-key
+            - name: AUTH_GITHUB_CALLBACK_URL
+              value: {{ required "auth.github.callbackUrl is required for github" $gh.callbackUrl | quote }}
+            - name: AUTH_GITHUB_ALLOW
+              value: {{ required "auth.github.allow is required for github" $gh.allow | quote }}
+            - name: AUTH_GITHUB_ADMIN_TEAMS
+              value: {{ $gh.adminTeams | default "SupportTools/admins" | quote }}
+            - name: AUTH_GITHUB_CACHE_TTL
+              value: {{ $gh.cacheTTL | default "1m" | quote }}
+            {{- end }}
+            {{- with .Values.auth.breakGlassUser }}
+            - name: AUTH_BREAKGLASS_USER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.auth.restrictedUsers }}
+            - name: AUTH_RESTRICTED_USERS
+              value: {{ . | quote }}
+            {{- end }}
             {{- if or .Values.catalog.inline .Values.catalog.existingConfigMap }}
             - name: PROJECT_CATALOG_PATH
               value: "{{ .Values.catalog.mountPath }}/{{ .Values.catalog.fileName }}"

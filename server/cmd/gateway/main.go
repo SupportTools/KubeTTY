@@ -32,6 +32,7 @@ import (
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	"github.com/supporttools/KubeTTY/server/internal/auth/cfaccess"
+	ghauth "github.com/supporttools/KubeTTY/server/internal/auth/github"
 	"github.com/supporttools/KubeTTY/server/internal/config"
 	"github.com/supporttools/KubeTTY/server/internal/controller"
 	gatewayconfig "github.com/supporttools/KubeTTY/server/internal/gateway/config"
@@ -94,7 +95,7 @@ func main() {
 	}
 
 	// Security warning when authentication is disabled
-	if cfg.AuthMode != "local" && cfg.AuthMode != handlers_auth.AuthModeCloudflareAccess {
+	if !passwordOrGitHub(cfg.AuthMode) && cfg.AuthMode != handlers_auth.AuthModeCloudflareAccess {
 		log.WithFields(log.Fields{
 			"auth_mode": cfg.AuthMode,
 		}).Warn("gateway/main: SECURITY WARNING - authentication is DISABLED, all routes are unprotected")
@@ -128,7 +129,7 @@ func main() {
 		accessVerifier *cfaccess.Verifier
 		accessMapper   *handlers_auth.AccessUserMapper
 	)
-	if cfg.AuthMode == "local" || cfg.AuthMode == handlers_auth.AuthModeCloudflareAccess {
+	if passwordOrGitHub(cfg.AuthMode) || cfg.AuthMode == handlers_auth.AuthModeCloudflareAccess {
 		authPoolConfig, err := cfg.ConnConfig()
 		if err != nil {
 			log.WithFields(log.Fields{
@@ -142,7 +143,7 @@ func main() {
 			}).Fatal("gateway/main: failed to connect to auth store")
 		}
 	}
-	if cfg.AuthMode == "local" {
+	if passwordOrGitHub(cfg.AuthMode) {
 		authManager, err = auth.NewManager(authStore, cfg.AuthJWTSecret, cfg.AuthIssuer, cfg.AuthAccessTTL, cfg.AuthRefreshTTL)
 		if err != nil {
 			log.WithFields(log.Fields{
@@ -178,6 +179,17 @@ func main() {
 			"users":          len(users),
 			"service_tokens": len(services),
 		}).Info("gateway/main: authentication via Cloudflare Access JWT (local passwords retired)")
+	}
+	restrictedUsers, err := handlers_auth.ParseRestrictedUsers(cfg.RestrictedUsers)
+	if err != nil {
+		log.WithFields(log.Fields{"error": err.Error()}).Fatal("gateway/main: invalid AUTH_RESTRICTED_USERS")
+	}
+	var (
+		githubSignIn *handlers_auth.GitHubSignIn
+		githubAuthz  *ghauth.Authorizer
+	)
+	if cfg.AuthMode == handlers_auth.AuthModeGitHub {
+		githubSignIn, githubAuthz = setupGitHub(cfg, authStore, authManager, restrictedUsers)
 	}
 	if authStore != nil {
 		defer authStore.Close()
@@ -523,6 +535,7 @@ func main() {
 		store:          store,
 		authStore:      authStore,
 		authMgr:        authManager,
+		githubAuthz:    githubAuthz,
 		accessVerifier: accessVerifier,
 		accessMapper:   accessMapper,
 		projectStore:   projectStore,
@@ -571,12 +584,20 @@ func main() {
 	mux.HandleFunc("/api/version", handleVersion)
 
 	// Auth middleware
-	requireAuth := handlers_auth.RequireAuth(srv.cfg, srv.authMgr)
+	authenticate := handlers_auth.RequireAuth(srv.cfg, srv.authMgr)
+	restrict := handlers_auth.RestrictUsers(restrictedUsers)
+	requireAuth := func(next http.Handler) http.Handler { return authenticate(restrict(next)) }
 	if srv.ssoEnabled() {
 		requireAuth = handlers_auth.RequireAccess(srv.accessVerifier, srv.accessMapper)
 	}
-	// Public: tells the UI whether to show the password form or the Access sign-in screen.
+	adminOnly := handlers_auth.RequireAdmin(srv.authEnabled())
+	requireAdmin := func(next http.Handler) http.Handler { return requireAuth(adminOnly(next)) }
+	// Public: tells the UI which sign-in screen to show.
 	mux.Handle("/api/auth/config", handlers_auth.NewAuthConfigHandler(cfg.AuthMode))
+	if githubSignIn != nil {
+		mux.Handle("GET /api/auth/github/login", githubSignIn.LoginHandler())
+		mux.Handle("GET /api/auth/github/callback", githubSignIn.CallbackHandler())
+	}
 
 	// Admin API handlers for project management (requires auth when enabled)
 	if srv.projectStore != nil && srv.projCtrl != nil {
@@ -588,22 +609,22 @@ func main() {
 		// Wire settings store for applying defaults to new projects
 		adminHandlers.SetSettingsStore(settingsStore)
 		if srv.authEnabled() {
-			mux.Handle("GET /api/admin/projects", requireAuth(http.HandlerFunc(adminHandlers.ListProjects)))
-			mux.Handle("POST /api/admin/projects", requireAuth(http.HandlerFunc(adminHandlers.CreateProject)))
-			mux.Handle("GET /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.GetProject)))
-			mux.Handle("PUT /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.UpdateProject)))
+			mux.Handle("GET /api/admin/projects", requireAdmin(http.HandlerFunc(adminHandlers.ListProjects)))
+			mux.Handle("POST /api/admin/projects", requireAdmin(http.HandlerFunc(adminHandlers.CreateProject)))
+			mux.Handle("GET /api/admin/projects/{id}", requireAdmin(http.HandlerFunc(adminHandlers.GetProject)))
+			mux.Handle("PUT /api/admin/projects/{id}", requireAdmin(http.HandlerFunc(adminHandlers.UpdateProject)))
 			// PATCH is an alias of PUT (cluster-services-1024): the update is already partial.
-			mux.Handle("PATCH /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.UpdateProject)))
-			mux.Handle("DELETE /api/admin/projects/{id}", requireAuth(http.HandlerFunc(adminHandlers.DeleteProject)))
-			mux.Handle("POST /api/admin/projects/{id}/restart", requireAuth(http.HandlerFunc(adminHandlers.RestartProject)))
-			mux.Handle("POST /api/admin/projects/{id}/resync", requireAuth(http.HandlerFunc(adminHandlers.ResyncProject)))
-			mux.Handle("POST /api/admin/projects/{id}/pause", requireAuth(http.HandlerFunc(adminHandlers.PauseProject)))
-			mux.Handle("POST /api/admin/projects/{id}/unpause", requireAuth(http.HandlerFunc(adminHandlers.UnpauseProject)))
-			mux.Handle("GET /api/admin/projects/{id}/status", requireAuth(http.HandlerFunc(adminHandlers.GetProjectStatus)))
-			mux.Handle("GET /api/admin/projects/{id}/upgrade-info", requireAuth(http.HandlerFunc(adminHandlers.GetUpgradeInfo)))
-			mux.Handle("POST /api/admin/projects/{id}/upgrade", requireAuth(http.HandlerFunc(adminHandlers.UpgradeProject)))
-			mux.Handle("GET /api/admin/projects/{id}/secrets", requireAuth(http.HandlerFunc(adminHandlers.GetProjectSecrets)))
-			mux.Handle("PUT /api/admin/projects/{id}/secrets", requireAuth(http.HandlerFunc(adminHandlers.UpdateProjectSecrets)))
+			mux.Handle("PATCH /api/admin/projects/{id}", requireAdmin(http.HandlerFunc(adminHandlers.UpdateProject)))
+			mux.Handle("DELETE /api/admin/projects/{id}", requireAdmin(http.HandlerFunc(adminHandlers.DeleteProject)))
+			mux.Handle("POST /api/admin/projects/{id}/restart", requireAdmin(http.HandlerFunc(adminHandlers.RestartProject)))
+			mux.Handle("POST /api/admin/projects/{id}/resync", requireAdmin(http.HandlerFunc(adminHandlers.ResyncProject)))
+			mux.Handle("POST /api/admin/projects/{id}/pause", requireAdmin(http.HandlerFunc(adminHandlers.PauseProject)))
+			mux.Handle("POST /api/admin/projects/{id}/unpause", requireAdmin(http.HandlerFunc(adminHandlers.UnpauseProject)))
+			mux.Handle("GET /api/admin/projects/{id}/status", requireAdmin(http.HandlerFunc(adminHandlers.GetProjectStatus)))
+			mux.Handle("GET /api/admin/projects/{id}/upgrade-info", requireAdmin(http.HandlerFunc(adminHandlers.GetUpgradeInfo)))
+			mux.Handle("POST /api/admin/projects/{id}/upgrade", requireAdmin(http.HandlerFunc(adminHandlers.UpgradeProject)))
+			mux.Handle("GET /api/admin/projects/{id}/secrets", requireAdmin(http.HandlerFunc(adminHandlers.GetProjectSecrets)))
+			mux.Handle("PUT /api/admin/projects/{id}/secrets", requireAdmin(http.HandlerFunc(adminHandlers.UpdateProjectSecrets)))
 		} else {
 			mux.HandleFunc("GET /api/admin/projects", adminHandlers.ListProjects)
 			mux.HandleFunc("POST /api/admin/projects", adminHandlers.CreateProject)
@@ -626,10 +647,10 @@ func main() {
 	// Dashboard API handlers
 	dashboardHandlers := handlers_dashboard.New(srv.projectStore, srv.tabStore, handlers_dashboard.NewNullMetricsCollector())
 	if srv.authEnabled() {
-		mux.Handle("GET /api/admin/dashboard/summary", requireAuth(http.HandlerFunc(dashboardHandlers.GetSummary)))
-		mux.Handle("GET /api/admin/dashboard/metrics", requireAuth(http.HandlerFunc(dashboardHandlers.GetMetrics)))
-		mux.Handle("GET /api/admin/dashboard/errors", requireAuth(http.HandlerFunc(dashboardHandlers.GetErrors)))
-		mux.Handle("GET /api/admin/dashboard/usage", requireAuth(http.HandlerFunc(dashboardHandlers.GetUsage)))
+		mux.Handle("GET /api/admin/dashboard/summary", requireAdmin(http.HandlerFunc(dashboardHandlers.GetSummary)))
+		mux.Handle("GET /api/admin/dashboard/metrics", requireAdmin(http.HandlerFunc(dashboardHandlers.GetMetrics)))
+		mux.Handle("GET /api/admin/dashboard/errors", requireAdmin(http.HandlerFunc(dashboardHandlers.GetErrors)))
+		mux.Handle("GET /api/admin/dashboard/usage", requireAdmin(http.HandlerFunc(dashboardHandlers.GetUsage)))
 	} else {
 		mux.HandleFunc("GET /api/admin/dashboard/summary", dashboardHandlers.GetSummary)
 		mux.HandleFunc("GET /api/admin/dashboard/metrics", dashboardHandlers.GetMetrics)
@@ -640,15 +661,15 @@ func main() {
 	// Settings API handlers
 	settingsHandlers := handlers_admin.NewSettingsHandlers(settingsStore)
 	if srv.authEnabled() {
-		mux.Handle("GET /api/admin/settings", requireAuth(http.HandlerFunc(settingsHandlers.ListSettings)))
-		mux.Handle("GET /api/admin/settings/categories", requireAuth(http.HandlerFunc(settingsHandlers.GetCategories)))
-		mux.Handle("GET /api/admin/settings/history", requireAuth(http.HandlerFunc(settingsHandlers.GetAllHistory)))
-		mux.Handle("GET /api/admin/settings/{category}", requireAuth(http.HandlerFunc(settingsHandlers.ListByCategory)))
-		mux.Handle("GET /api/admin/settings/{category}/{key}", requireAuth(http.HandlerFunc(settingsHandlers.GetSetting)))
-		mux.Handle("PUT /api/admin/settings/{category}/{key}", requireAuth(http.HandlerFunc(settingsHandlers.UpdateSetting)))
-		mux.Handle("POST /api/admin/settings", requireAuth(http.HandlerFunc(settingsHandlers.CreateSetting)))
-		mux.Handle("DELETE /api/admin/settings/{category}/{key}", requireAuth(http.HandlerFunc(settingsHandlers.DeleteSetting)))
-		mux.Handle("GET /api/admin/settings/{category}/{key}/history", requireAuth(http.HandlerFunc(settingsHandlers.GetSettingHistory)))
+		mux.Handle("GET /api/admin/settings", requireAdmin(http.HandlerFunc(settingsHandlers.ListSettings)))
+		mux.Handle("GET /api/admin/settings/categories", requireAdmin(http.HandlerFunc(settingsHandlers.GetCategories)))
+		mux.Handle("GET /api/admin/settings/history", requireAdmin(http.HandlerFunc(settingsHandlers.GetAllHistory)))
+		mux.Handle("GET /api/admin/settings/{category}", requireAdmin(http.HandlerFunc(settingsHandlers.ListByCategory)))
+		mux.Handle("GET /api/admin/settings/{category}/{key}", requireAdmin(http.HandlerFunc(settingsHandlers.GetSetting)))
+		mux.Handle("PUT /api/admin/settings/{category}/{key}", requireAdmin(http.HandlerFunc(settingsHandlers.UpdateSetting)))
+		mux.Handle("POST /api/admin/settings", requireAdmin(http.HandlerFunc(settingsHandlers.CreateSetting)))
+		mux.Handle("DELETE /api/admin/settings/{category}/{key}", requireAdmin(http.HandlerFunc(settingsHandlers.DeleteSetting)))
+		mux.Handle("GET /api/admin/settings/{category}/{key}/history", requireAdmin(http.HandlerFunc(settingsHandlers.GetSettingHistory)))
 	} else {
 		mux.HandleFunc("GET /api/admin/settings", settingsHandlers.ListSettings)
 		mux.HandleFunc("GET /api/admin/settings/categories", settingsHandlers.GetCategories)
@@ -679,7 +700,7 @@ func main() {
 
 	if srv.authEnabled() {
 		// Session handlers (extracted)
-		mux.Handle("/session/logs", requireAuth(handlers_session.NewSessionLogsHandler(srv.store, srv)))
+		mux.Handle("/session/logs", requireAdmin(handlers_session.NewSessionLogsHandler(srv.store, srv)))
 
 		// Gateway WebSocket endpoints (terminal and VNC)
 		mux.Handle("/ws", requireAuth(http.HandlerFunc(srv.handleGatewayWebsocket)))
@@ -729,10 +750,11 @@ func main() {
 }
 
 type server struct {
-	cfg       config.GatewayConfig
-	store     sessions.Store
-	authStore auth.Store
-	authMgr   *auth.Manager
+	cfg         config.GatewayConfig
+	store       sessions.Store
+	authStore   auth.Store
+	authMgr     *auth.Manager
+	githubAuthz *ghauth.Authorizer
 	// Cloudflare Access SSO (AUTH_MODE=cloudflare-access)
 	accessVerifier *cfaccess.Verifier
 	accessMapper   *handlers_auth.AccessUserMapper
@@ -784,11 +806,66 @@ func (s *server) staticHandler() http.Handler {
 	})
 }
 
+// setupGitHub builds GitHub App sign-in and installs its admission rule on the
+// token manager. Bad configuration is fatal.
+func setupGitHub(cfg config.GatewayConfig, store auth.Store, mgr *auth.Manager, restricted map[string]string) (*handlers_auth.GitHubSignIn, *ghauth.Authorizer) {
+	fatal := func(msg string, err error) {
+		log.WithFields(log.Fields{"error": err.Error()}).Fatal("gateway/main: " + msg)
+	}
+	rules, err := ghauth.ParseRules(cfg.GitHubAllow)
+	if err != nil {
+		fatal("invalid AUTH_GITHUB_ALLOW", err)
+	}
+	adminTeams, err := ghauth.ParseTeams(cfg.GitHubAdminTeams)
+	if err != nil {
+		fatal("invalid AUTH_GITHUB_ADMIN_TEAMS", err)
+	}
+	client, err := ghauth.New(ghauth.Config{
+		ClientID:      cfg.GitHubClientID,
+		ClientSecret:  cfg.GitHubClientSecret,
+		PrivateKeyPEM: []byte(cfg.GitHubPrivateKey),
+	})
+	if err != nil {
+		fatal("invalid GitHub App configuration", err)
+	}
+	authz := ghauth.NewAuthorizer(client, rules, adminTeams, cfg.GitHubCacheTTL)
+	mgr.SetAdmission(handlers_auth.GitHubAdmission(authz, cfg.BreakGlassUser, restricted))
+
+	reserved := map[string]bool{}
+	if cfg.BreakGlassUser != "" {
+		reserved[cfg.BreakGlassUser] = true
+	}
+	for name := range restricted {
+		reserved[name] = true
+	}
+	log.WithFields(log.Fields{
+		"allow_rules":      len(rules),
+		"admin_teams":      cfg.GitHubAdminTeams,
+		"break_glass_user": cfg.BreakGlassUser,
+		"restricted_users": len(restricted),
+		"callback_url":     cfg.GitHubCallbackURL,
+	}).Info("gateway/main: authentication via GitHub App sign-in")
+	return &handlers_auth.GitHubSignIn{
+		Config:      cfg,
+		Manager:     mgr,
+		Store:       store,
+		Client:      client,
+		Authorizer:  authz,
+		CallbackURL: cfg.GitHubCallbackURL,
+		Reserved:    reserved,
+	}, authz
+}
+
+// passwordOrGitHub reports the modes that issue KubeTTY's own JWTs.
+func passwordOrGitHub(mode string) bool {
+	return mode == "local" || mode == handlers_auth.AuthModeGitHub
+}
+
 func (s *server) authEnabled() bool {
 	if s == nil {
 		return false
 	}
-	return (s.cfg.AuthMode == "local" && s.authMgr != nil) || s.ssoEnabled()
+	return (passwordOrGitHub(s.cfg.AuthMode) && s.authMgr != nil) || s.ssoEnabled()
 }
 
 // ssoEnabled reports Cloudflare Access SSO mode (cluster-services-1299).
@@ -823,6 +900,9 @@ func (s *server) handleGatewayWebsocket(w http.ResponseWriter, r *http.Request) 
 	}).Debug("gateway/main: WebSocket tab connection attempt")
 
 	if !s.checkTabAttach(w, tabID, clientID, forceTakeover) {
+		return
+	}
+	if projectID, ok := s.tabManager.TabProject(tabID); ok && !s.requireProjectAccess(w, r, projectID) {
 		return
 	}
 
@@ -921,6 +1001,9 @@ func (s *server) handleVNCWebsocket(w http.ResponseWriter, r *http.Request) {
 	if !s.checkTabAttach(w, tabID, clientID, forceTakeover) {
 		return
 	}
+	if projectID, ok := s.tabManager.TabProject(tabID); ok && !s.requireProjectAccess(w, r, projectID) {
+		return
+	}
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -994,6 +1077,9 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 		// terminal tab on its one project (cluster-services-1534).
 		if !handlers_auth.RestrictedTabRequestAllowed(handlers_auth.UserFromContext(r.Context()), req.ProjectID, req.GUIMode, req.OpenAction) {
 			apierrors.WriteError(w, apierrors.Forbidden("this service principal may not open that tab", ""))
+			return
+		}
+		if !s.requireProjectAccess(w, r, req.ProjectID) {
 			return
 		}
 
@@ -1611,7 +1697,12 @@ func (s *server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		log.Debug("gateway/main: projectStore is nil, checking tabManager fallback")
 		// Fall back to tabManager-only projects if no project store
 		if s.tabManager != nil {
-			tabProjects := s.tabManager.ListProjectsWithStatus()
+			var tabProjects []manager.ProjectWithStatus
+			for _, p := range s.tabManager.ListProjectsWithStatus() {
+				if ok, _ := s.canUseProject(r, p.ID, ""); ok {
+					tabProjects = append(tabProjects, p)
+				}
+			}
 			log.WithFields(log.Fields{
 				"count": len(tabProjects),
 			}).Debug("gateway/main: returning projects from tabManager (no projectStore)")
@@ -1672,6 +1763,12 @@ func (s *server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	// Build response combining DB data and health status
 	result := make([]ProjectResponse, 0, len(dbProjects))
 	for _, p := range dbProjects {
+		if ok, err := s.canUseProject(r, p.Name, p.GitHubRepo); !ok {
+			if err != nil {
+				log.WithError(err).WithField("project", p.Name).Warn("gateway/main: project access check failed; hiding project")
+			}
+			continue
+		}
 		serviceName := p.ServiceName
 		if serviceName == "" {
 			serviceName = projects.ComputeServiceName(p.Name)

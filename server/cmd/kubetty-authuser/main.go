@@ -160,7 +160,11 @@ func handleList(store auth.Store) {
 		if u.IsActive {
 			active = "active"
 		}
-		fmt.Printf("%s\t%s\t%s\n", u.ID, u.Username, active)
+		github := "-"
+		if u.GitHubLogin != "" {
+			github = "github:" + u.GitHubLogin
+		}
+		fmt.Printf("%s\t%s\t%s\t%s\n", u.ID, u.Username, active, github)
 	}
 }
 

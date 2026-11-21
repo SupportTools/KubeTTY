@@ -23,9 +23,18 @@ type fakeGateway struct {
 	restricted  bool
 	shellEvals  bool // false: the "shell" only echoes input, never runs it
 	deleteCode  int
-	sawSecret   bool
-	leftoverTab string
+	accessToken string // non-empty: a Cloudflare Access service token is required in front
+	// accessIsSession: the gateway trusts the Access token itself (cloudflare-access mode)
+	accessIsSession bool
+	loggedOut       bool
+	revokedTokens   []string
 }
+
+const (
+	fakePassword = "s3cret"
+	fakeJWT      = "jwt-abc"
+	fakeRefresh  = "refresh-xyz"
+)
 
 var printfRe = regexp.MustCompile(`printf 'KUBETTY_SMOKE_%s_%s\\n' ([0-9a-f]+) \$\(\(6\*7\)\)`)
 
@@ -33,16 +42,36 @@ func (g *fakeGateway) handler(t *testing.T) http.Handler {
 	up := websocket.Upgrader{}
 	n := 0
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("CF-Access-Client-Id") != "cid.access" || r.Header.Get("CF-Access-Client-Secret") != "s3cret" {
-			http.Redirect(w, r, "https://team.cloudflareaccess.com/cdn-cgi/access/login", http.StatusFound)
+		if g.accessToken != "" && (r.Header.Get("CF-Access-Client-Id") != "cid.access" || r.Header.Get("CF-Access-Client-Secret") != g.accessToken) {
+			http.Redirect(w, r, "https://team.example.com/login", http.StatusFound)
 			return
 		}
-		g.mu.Lock()
-		g.sawSecret = true
-		g.mu.Unlock()
+		if r.URL.Path == "/api/auth/login" && r.Method == http.MethodPost {
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req["username"] != g.username || req["password"] != fakePassword {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			http.SetCookie(w, &http.Cookie{Name: "kubetty_refresh", Value: fakeRefresh, HttpOnly: true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"id": "u1", "username": g.username}, "accessToken": fakeJWT})
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+fakeJWT && !g.accessIsSession {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		switch {
 		case r.URL.Path == "/api/auth/me":
-			_ = json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"id": "u1", "username": g.username}, "authMode": "cloudflare-access"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"id": "u1", "username": g.username}})
+		case r.URL.Path == "/api/auth/logout" && r.Method == http.MethodPost:
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			g.mu.Lock()
+			g.loggedOut = true
+			g.revokedTokens = append(g.revokedTokens, req["refreshToken"])
+			g.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
 		case r.URL.Path == "/api/projects" || strings.HasPrefix(r.URL.Path, "/api/admin/"):
 			if g.restricted {
 				w.WriteHeader(http.StatusForbidden)
@@ -116,7 +145,7 @@ func runAgainst(t *testing.T, g *fakeGateway, mod func(*config)) (string, error)
 	t.Helper()
 	srv := httptest.NewServer(g.handler(t))
 	t.Cleanup(srv.Close)
-	cfg := config{BaseURL: srv.URL, ClientID: "cid.access", ClientSecret: "s3cret", User: "kubetty-smoke", Project: "test-project", Timeout: 5 * time.Second, AttachRetry: 200 * time.Millisecond}
+	cfg := config{BaseURL: srv.URL, User: "kubetty-smoke", Password: fakePassword, Project: "test-project", Timeout: 5 * time.Second, AttachRetry: 200 * time.Millisecond}
 	if mod != nil {
 		mod(&cfg)
 	}
@@ -140,8 +169,40 @@ func TestSmokePasses(t *testing.T) {
 	if len(g.tabs) != 0 {
 		t.Fatalf("tabs left behind: %v", g.tabs)
 	}
-	if strings.Contains(out, "s3cret") {
+	if !g.loggedOut || len(g.revokedTokens) != 1 || g.revokedTokens[0] != fakeRefresh {
+		t.Fatalf("logout must revoke the login's refresh token, got %v", g.revokedTokens)
+	}
+	if strings.Contains(out, fakePassword) || strings.Contains(out, fakeJWT) {
 		t.Fatal("secret printed")
+	}
+}
+
+func TestSmokeSendsAccessServiceToken(t *testing.T) {
+	g := newFake()
+	g.accessToken = "cf-secret"
+	out, err := runAgainst(t, g, func(c *config) { c.AccessClientID = "cid.access"; c.AccessClientSecret = "cf-secret" })
+	if err != nil {
+		t.Fatalf("smoke failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "cf-secret") {
+		t.Fatal("secret printed")
+	}
+}
+
+func TestSmokeWithAccessTokenOnly(t *testing.T) {
+	g := newFake()
+	g.accessToken = "cf-secret"
+	g.accessIsSession = true
+	out, err := runAgainst(t, g, func(c *config) {
+		c.Password = ""
+		c.AccessClientID = "cid.access"
+		c.AccessClientSecret = "cf-secret"
+	})
+	if err != nil {
+		t.Fatalf("smoke failed: %v\n%s", err, out)
+	}
+	if g.loggedOut {
+		t.Fatal("without a password there is no KubeTTY session to log out of")
 	}
 }
 
@@ -151,13 +212,13 @@ func TestSmokeFailures(t *testing.T) {
 		cfg  func(*config)
 		want string
 	}{
-		"token refused (Access redirect)": {cfg: func(c *config) { c.ClientSecret = "wrong" }, want: "/api/auth/me = 302"},
-		"wrong user":                      {g: func(g *fakeGateway) { g.username = "mmattox" }, want: `user "mmattox"`},
-		"not restricted":                  {g: func(g *fakeGateway) { g.restricted = false }, want: "want 403"},
-		"shell does not run commands":     {g: func(g *fakeGateway) { g.shellEvals = false }, cfg: func(c *config) { c.Timeout = time.Second }, want: "terminal echo"},
-		"tab not closed":                  {g: func(g *fakeGateway) { g.deleteCode = http.StatusInternalServerError }, want: "want 204"},
-		"wrong project refused":           {cfg: func(c *config) { c.Project = "kubetty" }, want: "POST /api/tabs = 403"},
-		"missing config":                  {cfg: func(c *config) { c.ClientID = "" }, want: "required"},
+		"wrong password":              {cfg: func(c *config) { c.Password = "wrong" }, want: "/api/auth/login = 401"},
+		"refused in front (redirect)": {g: func(g *fakeGateway) { g.accessToken = "cf-secret" }, want: "/api/auth/login = 302"},
+		"not restricted":              {g: func(g *fakeGateway) { g.restricted = false }, want: "want 403"},
+		"shell does not run commands": {g: func(g *fakeGateway) { g.shellEvals = false }, cfg: func(c *config) { c.Timeout = time.Second }, want: "terminal echo"},
+		"tab not closed":              {g: func(g *fakeGateway) { g.deleteCode = http.StatusInternalServerError }, want: "want 204"},
+		"wrong project refused":       {cfg: func(c *config) { c.Project = "kubetty" }, want: "POST /api/tabs = 403"},
+		"missing config":              {cfg: func(c *config) { c.Password = "" }, want: "required"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -169,7 +230,7 @@ func TestSmokeFailures(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("want error containing %q, got %v\n%s", tc.want, err, out)
 			}
-			if strings.Contains(err.Error()+out, "s3cret") {
+			if strings.Contains(err.Error()+out, fakePassword) || strings.Contains(err.Error()+out, fakeJWT) {
 				t.Fatal("secret printed")
 			}
 		})

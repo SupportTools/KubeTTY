@@ -408,6 +408,17 @@ func (m *Manager) Attach(ctx context.Context, tabID, clientID string, upstream *
 // force only preempts the owner's own existing connection.
 var ErrTabNotOwned = errors.New("tab owned by another client")
 
+// TabProject returns the project ID of a live tab.
+func (m *Manager) TabProject(tabID string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.tabs[tabID]
+	if !ok {
+		return "", false
+	}
+	return e.project.ID, true
+}
+
 // CheckAttach reports whether clientID may attach to tabID without touching
 // the tab: tabs.ErrNotFound, ErrTabNotOwned, or nil. Handlers call it before
 // the WebSocket upgrade so a refusal is a plain HTTP 404/403; AttachWithOptions

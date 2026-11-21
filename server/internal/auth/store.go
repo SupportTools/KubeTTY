@@ -27,6 +27,9 @@ type User struct {
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	LastLoginAt  *time.Time
+	// GitHubID is 0 for local accounts.
+	GitHubID    int64
+	GitHubLogin string
 }
 
 // RefreshToken represents a persisted refresh token entry.
@@ -52,6 +55,9 @@ type Store interface {
 	UpdateUserPassword(ctx context.Context, id uuid.UUID, passwordHash []byte) error
 	SetUserActive(ctx context.Context, id uuid.UUID, active bool) error
 	UpdateLastLogin(ctx context.Context, id uuid.UUID, ts time.Time) error
+	GetUserByGitHubID(ctx context.Context, githubID int64) (*User, error)
+	// LinkGitHub sets the account's GitHub id and login and replaces its password hash.
+	LinkGitHub(ctx context.Context, id uuid.UUID, githubID int64, login string, passwordHash []byte) error
 
 	InsertRefreshToken(ctx context.Context, token RefreshToken) error
 	GetRefreshToken(ctx context.Context, tokenID uuid.UUID) (*RefreshToken, error)
@@ -103,7 +109,8 @@ func NewStoreFromPool(pool *pgxpool.Pool) *PGStore {
 
 func (s *PGStore) GetUser(ctx context.Context, id uuid.UUID) (*User, error) {
 	const stmt = `
-SELECT id, username, password_hash, is_active, created_at, updated_at, last_login_at
+SELECT id, username, password_hash, is_active, created_at, updated_at, last_login_at,
+       COALESCE(github_id, 0), COALESCE(github_login, '')
 FROM kubetty_users
 WHERE id=$1`
 	row := s.pool.QueryRow(ctx, stmt, id)
@@ -112,7 +119,8 @@ WHERE id=$1`
 
 func (s *PGStore) GetUserByUsername(ctx context.Context, username string) (*User, error) {
 	const stmt = `
-SELECT id, username, password_hash, is_active, created_at, updated_at, last_login_at
+SELECT id, username, password_hash, is_active, created_at, updated_at, last_login_at,
+       COALESCE(github_id, 0), COALESCE(github_login, '')
 FROM kubetty_users
 WHERE username=$1`
 	row := s.pool.QueryRow(ctx, stmt, username)
@@ -121,7 +129,8 @@ WHERE username=$1`
 
 func (s *PGStore) ListUsers(ctx context.Context) ([]User, error) {
 	const stmt = `
-SELECT id, username, password_hash, is_active, created_at, updated_at, last_login_at
+SELECT id, username, password_hash, is_active, created_at, updated_at, last_login_at,
+       COALESCE(github_id, 0), COALESCE(github_login, '')
 FROM kubetty_users
 ORDER BY username`
 	rows, err := s.pool.Query(ctx, stmt)
@@ -145,9 +154,9 @@ func (s *PGStore) CreateUser(ctx context.Context, user User) error {
 		user.ID = uuid.New()
 	}
 	const stmt = `
-INSERT INTO kubetty_users (id, username, password_hash, is_active, created_at, updated_at, last_login_at)
-VALUES ($1, $2, $3, COALESCE($4, TRUE), COALESCE($5, NOW()), COALESCE($6, NOW()), $7)`
-	if _, err := s.pool.Exec(ctx, stmt, user.ID, user.Username, user.PasswordHash, user.IsActive, nullableTime(user.CreatedAt), nullableTime(user.UpdatedAt), user.LastLoginAt); err != nil {
+INSERT INTO kubetty_users (id, username, password_hash, is_active, created_at, updated_at, last_login_at, github_id, github_login)
+VALUES ($1, $2, $3, COALESCE($4, TRUE), COALESCE($5, NOW()), COALESCE($6, NOW()), $7, $8, $9)`
+	if _, err := s.pool.Exec(ctx, stmt, user.ID, user.Username, user.PasswordHash, user.IsActive, nullableTime(user.CreatedAt), nullableTime(user.UpdatedAt), user.LastLoginAt, nullIfZero(user.GitHubID), nullIfEmpty(user.GitHubLogin)); err != nil {
 		return fmt.Errorf("create user: %w", err)
 	}
 	return nil
@@ -272,9 +281,33 @@ WHERE expires_at < $1 OR (revoked_at IS NOT NULL AND revoked_at < $1)`
 	return tag.RowsAffected(), nil
 }
 
+func (s *PGStore) GetUserByGitHubID(ctx context.Context, githubID int64) (*User, error) {
+	const stmt = `
+SELECT id, username, password_hash, is_active, created_at, updated_at, last_login_at,
+       COALESCE(github_id, 0), COALESCE(github_login, '')
+FROM kubetty_users
+WHERE github_id=$1`
+	return scanUser(s.pool.QueryRow(ctx, stmt, githubID))
+}
+
+func (s *PGStore) LinkGitHub(ctx context.Context, id uuid.UUID, githubID int64, login string, passwordHash []byte) error {
+	const stmt = `
+UPDATE kubetty_users
+SET github_id=$2, github_login=$3, password_hash=$4, updated_at=NOW()
+WHERE id=$1`
+	tag, err := s.pool.Exec(ctx, stmt, id, githubID, login, passwordHash)
+	if err != nil {
+		return fmt.Errorf("link github: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
 func scanUser(row pgx.Row) (*User, error) {
 	var user User
-	if err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.IsActive, &user.CreatedAt, &user.UpdatedAt, &user.LastLoginAt); err != nil {
+	if err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.IsActive, &user.CreatedAt, &user.UpdatedAt, &user.LastLoginAt, &user.GitHubID, &user.GitHubLogin); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrUserNotFound
 		}
@@ -288,6 +321,13 @@ func nullableTime(t time.Time) interface{} {
 		return nil
 	}
 	return t
+}
+
+func nullIfZero(v int64) interface{} {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 func nullIfEmpty(val string) interface{} {

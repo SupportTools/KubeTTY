@@ -1,6 +1,25 @@
 import { FormEvent, useState, useCallback } from "react";
-import { useAuth, AUTH_MODE_CLOUDFLARE_ACCESS } from "../contexts/AuthContext";
+import {
+  useAuth,
+  AUTH_MODE_CLOUDFLARE_ACCESS,
+  AUTH_MODE_GITHUB,
+  GITHUB_LOGIN_URL,
+  LOCAL_LOGIN_PATH
+} from "../contexts/AuthContext";
 import logo from "../assets/logo.svg";
+
+const GITHUB_ERRORS: Record<string, string> = {
+  not_allowed: "Your GitHub account is not allowed to use KubeTTY. Ask an admin to add you to an allowed org or team.",
+  github_denied: "GitHub sign-in was cancelled.",
+  github_failed: "GitHub sign-in failed. Try again in a moment.",
+  state: "The sign-in link expired. Try again."
+};
+
+function githubError(): string | null {
+  const reason = new URLSearchParams(window.location.search).get("auth_error");
+  if (!reason) return null;
+  return GITHUB_ERRORS[reason] ?? "Sign-in failed.";
+}
 
 const Login = () => {
   const { login, authMode } = useAuth();
@@ -29,11 +48,16 @@ const Login = () => {
         await login(form.username.trim(), form.password);
         // Clear form on success (component will unmount anyway)
         setForm({ username: "", password: "" });
+        if (window.location.pathname === LOCAL_LOGIN_PATH) {
+          window.history.replaceState(null, "", "/");
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         // Clean up common error messages
         if (message.includes("invalid credentials") || message.includes("401")) {
           setError("Invalid username or password");
+        } else if (message.includes("cannot sign in with a password") || message.includes("403")) {
+          setError("This account cannot sign in with a password");
         } else if (message.includes("network") || message.includes("fetch")) {
           setError("Network error. Please check your connection.");
         } else {
@@ -54,6 +78,35 @@ const Login = () => {
     },
     [error]
   );
+
+  const localForm = window.location.pathname === LOCAL_LOGIN_PATH;
+
+  if (authMode === AUTH_MODE_GITHUB && !localForm) {
+    const signInError = githubError();
+    return (
+      <div className="app-shell">
+        <header className="header">
+          <div className="brand">
+            <img src={logo} alt="KubeTTY" className="logo" />
+            <h1>KubeTTY</h1>
+          </div>
+        </header>
+        <section className="main full-width auth">
+          <div className="auth-card">
+            <h2>Sign in</h2>
+            {signInError && (
+              <p className="error" role="alert">
+                {signInError}
+              </p>
+            )}
+            <button type="button" onClick={() => window.location.assign(GITHUB_LOGIN_URL)}>
+              Sign in with GitHub
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   if (authMode === AUTH_MODE_CLOUDFLARE_ACCESS) {
     // SSO mode: there is no password. Reloading sends the browser back through

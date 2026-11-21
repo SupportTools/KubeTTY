@@ -1725,26 +1725,6 @@ ignore:
   - vulnerability: "GHSA-5cgq-3rg8-m6cv"
     package:
       name: "golang.org/x/crypto"
-      version: "v0.21.0"
-  - vulnerability: "GHSA-89gr-r52h-f8rx"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.21.0"
-  - vulnerability: "GHSA-f5wc-c3c7-36mc"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.21.0"
-  - vulnerability: "GHSA-rm3j-f69w-wqmq"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.21.0"
-  - vulnerability: "GHSA-vgwf-h737-ff37"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.21.0"
-  - vulnerability: "GHSA-5cgq-3rg8-m6cv"
-    package:
-      name: "golang.org/x/crypto"
       version: "v0.23.0"
   - vulnerability: "GHSA-89gr-r52h-f8rx"
     package:
@@ -1794,34 +1774,6 @@ ignore:
     package:
       name: "golang.org/x/crypto"
       version: "v0.40.0"
-  - vulnerability: "GHSA-5cgq-3rg8-m6cv"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.45.0"
-  - vulnerability: "GHSA-89gr-r52h-f8rx"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.45.0"
-  - vulnerability: "GHSA-f5wc-c3c7-36mc"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.45.0"
-  - vulnerability: "GHSA-jppx-rxg9-jmrx"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.45.0"
-  - vulnerability: "GHSA-rm3j-f69w-wqmq"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.45.0"
-  - vulnerability: "GHSA-vgwf-h737-ff37"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.45.0"
-  - vulnerability: "GHSA-x527-x647-q7gg"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.45.0"
   - vulnerability: "GO-2026-6612"
     package:
       name: "golang.org/x/net"
@@ -1841,19 +1793,11 @@ ignore:
   - vulnerability: "GO-2026-6612"
     package:
       name: "golang.org/x/net"
-      version: "v0.25.0"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "golang.org/x/net"
       version: "v0.38.0"
   - vulnerability: "GO-2026-6612"
     package:
       name: "golang.org/x/net"
       version: "v0.42.0"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "golang.org/x/net"
-      version: "v0.47.0"
   - vulnerability: "GO-2026-6612"
     package:
       name: "golang.org/x/net"
@@ -1877,27 +1821,11 @@ ignore:
   - vulnerability: "GHSA-p77j-4mvh-x3m3"
     package:
       name: "google.golang.org/grpc"
-      version: "v1.58.3"
-  - vulnerability: "GHSA-p77j-4mvh-x3m3"
-    package:
-      name: "google.golang.org/grpc"
       version: "v1.59.0"
   - vulnerability: "GHSA-p77j-4mvh-x3m3"
     package:
       name: "google.golang.org/grpc"
-      version: "v1.60.1"
-  - vulnerability: "GHSA-p77j-4mvh-x3m3"
-    package:
-      name: "google.golang.org/grpc"
       version: "v1.74.2"
-  - vulnerability: "GHSA-p77j-4mvh-x3m3"
-    package:
-      name: "google.golang.org/grpc"
-      version: "v1.75.0"
-  - vulnerability: "GHSA-p77j-4mvh-x3m3"
-    package:
-      name: "google.golang.org/grpc"
-      version: "v1.76.0"
   - vulnerability: "CVE-2026-115557"
     package:
       name: "python"
@@ -1905,22 +1833,6 @@ ignore:
   - vulnerability: "GO-2024-2887"
     package:
       name: "stdlib"
-      version: "go1.18"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.18"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.18"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.18"
-  - vulnerability: "GO-2024-2887"
-    package:
-      name: "stdlib"
       version: "go1.18.1"
   - vulnerability: "GO-2025-3563"
     package:
@@ -1950,50 +1862,6 @@ ignore:
     package:
       name: "stdlib"
       version: "go1.20.5"
-  - vulnerability: "GO-2024-2887"
-    package:
-      name: "stdlib"
-      version: "go1.21.10"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.21.10"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.21.10"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.21.10"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.21.11"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.21.11"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.21.11"
-  - vulnerability: "GO-2024-2887"
-    package:
-      name: "stdlib"
-      version: "go1.21.5"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.21.5"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.21.5"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.21.5"
   - vulnerability: "GO-2024-2887"
     package:
       name: "stdlib"
@@ -2033,22 +1901,6 @@ ignore:
   - vulnerability: "GO-2024-2887"
     package:
       name: "stdlib"
-      version: "go1.22.1"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.22.1"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.22.1"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.22.1"
-  - vulnerability: "GO-2024-2887"
-    package:
-      name: "stdlib"
       version: "go1.22.2"
   - vulnerability: "GO-2025-3563"
     package:
@@ -2062,18 +1914,6 @@ ignore:
     package:
       name: "stdlib"
       version: "go1.22.2"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.22.4"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.22.4"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.22.4"
   - vulnerability: "GO-2025-3563"
     package:
       name: "stdlib"
@@ -2122,18 +1962,6 @@ ignore:
     package:
       name: "stdlib"
       version: "go1.24.3"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.24.4"
-  - vulnerability: "GO-2026-6604"
-    package:
-      name: "stdlib"
-      version: "go1.24.4"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.24.4"
   - vulnerability: "GO-2026-6612"
     package:
       name: "stdlib"

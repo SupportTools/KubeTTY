@@ -1,288 +1,244 @@
-# Baseline of fixable Critical findings accepted on 2026-11-21 (taskforge-22081), from pipeline run
-# 44871898980, grype v0.117.0, DB built 2026-11-20. The image-scan gate blocks only fixable Criticals not
-# listed here. Remove entries as the image cleanup fixes them; do not add new ones without a reason.
+# Fixable Critical findings the image-scan gate accepts (taskforge-22081, taskforge-26814).
+# Each entry is one tool binary whose newest release older than 48h still has the finding.
+# Remove an entry when its reason's condition is met; add one only with a reason and a location.
 ignore:
-  - vulnerability: "GO-2026-6888"
-    package:
-      name: "github.com/andybalholm/brotli"
-      version: "v1.0.4"
-  - vulnerability: "GHSA-5q7h-w9jf-cx97"
-    package:
-      name: "github.com/chainguard-dev/kaniko"
-      version: "v1.25.15"
-  - vulnerability: "GHSA-v23v-6jw2-98fq"
-    package:
-      name: "github.com/docker/docker"
-      version: "v24.0.7+incompatible"
-  - vulnerability: "GHSA-v725-9546-7q7m"
-    package:
-      name: "github.com/go-git/go-git/v5"
-      version: "v5.11.0"
-  - vulnerability: "GHSA-q64h-39hv-4cf7"
-    package:
-      name: "github.com/hashicorp/go-getter"
-      version: "v1.7.3"
-  - vulnerability: "GHSA-6h8c-gw33-cjm2"
-    package:
-      name: "github.com/loft-sh/devspace"
-      version: "v1.1.1-0.20260422182220-7f272dcf9065+dirty"
-  - vulnerability: "GHSA-5cgq-3rg8-m6cv"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.17.0"
-  - vulnerability: "GHSA-89gr-r52h-f8rx"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.17.0"
-  - vulnerability: "GHSA-f5wc-c3c7-36mc"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.17.0"
-  - vulnerability: "GHSA-jppx-rxg9-jmrx"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.17.0"
-  - vulnerability: "GHSA-rm3j-f69w-wqmq"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.17.0"
-  - vulnerability: "GHSA-v778-237x-gjrc"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.17.0"
-  - vulnerability: "GHSA-vgwf-h737-ff37"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.17.0"
-  - vulnerability: "GHSA-x527-x647-q7gg"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.17.0"
-  - vulnerability: "GHSA-89gr-r52h-f8rx"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.23.0"
-  - vulnerability: "GHSA-f5wc-c3c7-36mc"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.23.0"
-  - vulnerability: "GHSA-jppx-rxg9-jmrx"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.23.0"
-  - vulnerability: "GHSA-rm3j-f69w-wqmq"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.23.0"
-  - vulnerability: "GHSA-vgwf-h737-ff37"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.23.0"
-  - vulnerability: "GHSA-5cgq-3rg8-m6cv"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.40.0"
-  - vulnerability: "GHSA-89gr-r52h-f8rx"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.40.0"
-  - vulnerability: "GHSA-f5wc-c3c7-36mc"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.40.0"
-  - vulnerability: "GHSA-rm3j-f69w-wqmq"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.40.0"
-  - vulnerability: "GHSA-vgwf-h737-ff37"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.40.0"
-  - vulnerability: "GHSA-x527-x647-q7gg"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.40.0"
   - vulnerability: "GO-2026-6612"
-    package:
-      name: "golang.org/x/net"
-      version: "v0.18.0"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "golang.org/x/net"
-      version: "v0.19.0"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "golang.org/x/net"
-      version: "v0.23.0"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "golang.org/x/net"
-      version: "v0.24.0"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "golang.org/x/net"
-      version: "v0.42.0"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "golang.org/x/net"
-      version: "v0.55.0"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "golang.org/x/net"
-      version: "v0.56.0"
-  - vulnerability: "GO-2026-6612"
+    reason: "ctlptl v0.9.6: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
     package:
       name: "golang.org/x/net"
       version: "v0.58.0"
+      location: "/usr/local/bin/ctlptl"
   - vulnerability: "GO-2026-6612"
+    reason: "ctlptl v0.9.6: newest release older than 48h still ships it. Remove when upstream ships Go>=1.26.9."
+    package:
+      name: "stdlib"
+      version: "go1.26.8"
+      location: "/usr/local/bin/ctlptl"
+  - vulnerability: "GHSA-6h8c-gw33-cjm2"
+    reason: "devspace v6.3.21: false match. The advisory covers devspace < 4.14.0; devspace 6's module path has no /v6 suffix, so its pseudo-version reads as v1.1.1."
+    package:
+      name: "github.com/loft-sh/devspace"
+      version: "v1.1.1-0.20260422182220-7f272dcf9065+dirty"
+      location: "/usr/local/bin/devspace"
+  - vulnerability: "GHSA-5cgq-3rg8-m6cv"
+    reason: "devspace v6.3.21: newest release older than 48h still ships it. Remove when upstream ships golang.org/x/crypto>=0.52.0."
+    package:
+      name: "golang.org/x/crypto"
+      version: "v0.40.0"
+      location: "/usr/local/bin/devspace"
+  - vulnerability: "GHSA-89gr-r52h-f8rx"
+    reason: "devspace v6.3.21: newest release older than 48h still ships it. Remove when upstream ships golang.org/x/crypto>=0.52.0."
+    package:
+      name: "golang.org/x/crypto"
+      version: "v0.40.0"
+      location: "/usr/local/bin/devspace"
+  - vulnerability: "GHSA-f5wc-c3c7-36mc"
+    reason: "devspace v6.3.21: newest release older than 48h still ships it. Remove when upstream ships golang.org/x/crypto>=0.52.0."
+    package:
+      name: "golang.org/x/crypto"
+      version: "v0.40.0"
+      location: "/usr/local/bin/devspace"
+  - vulnerability: "GHSA-rm3j-f69w-wqmq"
+    reason: "devspace v6.3.21: newest release older than 48h still ships it. Remove when upstream ships golang.org/x/crypto>=0.52.0."
+    package:
+      name: "golang.org/x/crypto"
+      version: "v0.40.0"
+      location: "/usr/local/bin/devspace"
+  - vulnerability: "GHSA-vgwf-h737-ff37"
+    reason: "devspace v6.3.21: newest release older than 48h still ships it. Remove when upstream ships golang.org/x/crypto>=0.52.0."
+    package:
+      name: "golang.org/x/crypto"
+      version: "v0.40.0"
+      location: "/usr/local/bin/devspace"
+  - vulnerability: "GHSA-x527-x647-q7gg"
+    reason: "devspace v6.3.21: newest release older than 48h still ships it. Remove when upstream ships golang.org/x/crypto>=0.52.0."
+    package:
+      name: "golang.org/x/crypto"
+      version: "v0.40.0"
+      location: "/usr/local/bin/devspace"
+  - vulnerability: "GO-2026-6612"
+    reason: "devspace v6.3.21: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
     package:
       name: "golang.org/x/net"
-      version: "v0.59.0"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "golang.org/x/net"
-      version: "v0.8.0"
+      version: "v0.42.0"
+      location: "/usr/local/bin/devspace"
   - vulnerability: "GHSA-p77j-4mvh-x3m3"
-    package:
-      name: "google.golang.org/grpc"
-      version: "v1.59.0"
-  - vulnerability: "GHSA-p77j-4mvh-x3m3"
+    reason: "devspace v6.3.21: newest release older than 48h still ships it. Remove when upstream ships google.golang.org/grpc>=1.79.3."
     package:
       name: "google.golang.org/grpc"
       version: "v1.74.2"
-  - vulnerability: "CVE-2026-115557"
-    package:
-      name: "python"
-      version: "3.14.8"
-  - vulnerability: "GO-2024-2887"
-    package:
-      name: "stdlib"
-      version: "go1.18.1"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.18.1"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.18.1"
+      location: "/usr/local/bin/devspace"
   - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.18.1"
-  - vulnerability: "GO-2024-2887"
-    package:
-      name: "stdlib"
-      version: "go1.20.5"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.20.5"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.20.5"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.20.5"
-  - vulnerability: "GO-2024-2887"
-    package:
-      name: "stdlib"
-      version: "go1.21.8"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.21.8"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.21.8"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.21.8"
-  - vulnerability: "GO-2024-2887"
-    package:
-      name: "stdlib"
-      version: "go1.22.0"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.22.0"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.22.0"
-  - vulnerability: "GO-2026-6604"
-    package:
-      name: "stdlib"
-      version: "go1.22.0"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.22.0"
-  - vulnerability: "GO-2024-2887"
-    package:
-      name: "stdlib"
-      version: "go1.22.2"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.22.2"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.22.2"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.22.2"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.22.5"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.22.5"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.22.5"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.22.6"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.22.6"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.22.6"
-  - vulnerability: "GO-2026-6612"
+    reason: "devspace v6.3.21: newest release older than 48h still ships it. Remove when upstream ships Go>=1.26.9."
     package:
       name: "stdlib"
       version: "go1.25.9"
+      location: "/usr/local/bin/devspace"
   - vulnerability: "GO-2026-6612"
+    reason: "git-lfs v3.8.1: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
+    package:
+      name: "golang.org/x/net"
+      version: "v0.57.0"
+      location: "/usr/local/bin/git-lfs"
+  - vulnerability: "GO-2026-6612"
+    reason: "k3d v5.9.0: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
+    package:
+      name: "golang.org/x/net"
+      version: "v0.55.0"
+      location: "/usr/local/bin/k3d"
+  - vulnerability: "GO-2026-6612"
+    reason: "k3d v5.9.0: newest release older than 48h still ships it. Remove when upstream ships Go>=1.26.9."
     package:
       name: "stdlib"
       version: "go1.26.3"
+      location: "/usr/local/bin/k3d"
+  - vulnerability: "GO-2026-6888"
+    reason: "k9s v0.51.0: newest release older than 48h still ships it. Remove when upstream ships github.com/andybalholm/brotli>=1.2.7."
+    package:
+      name: "github.com/andybalholm/brotli"
+      version: "v1.2.0"
+      location: "/usr/local/bin/k9s"
+  - vulnerability: "GHSA-5cgq-3rg8-m6cv"
+    reason: "k9s v0.51.0: newest release older than 48h still ships it. Remove when upstream ships golang.org/x/crypto>=0.52.0."
+    package:
+      name: "golang.org/x/crypto"
+      version: "v0.50.0"
+      location: "/usr/local/bin/k9s"
+  - vulnerability: "GHSA-89gr-r52h-f8rx"
+    reason: "k9s v0.51.0: newest release older than 48h still ships it. Remove when upstream ships golang.org/x/crypto>=0.52.0."
+    package:
+      name: "golang.org/x/crypto"
+      version: "v0.50.0"
+      location: "/usr/local/bin/k9s"
+  - vulnerability: "GHSA-f5wc-c3c7-36mc"
+    reason: "k9s v0.51.0: newest release older than 48h still ships it. Remove when upstream ships golang.org/x/crypto>=0.52.0."
+    package:
+      name: "golang.org/x/crypto"
+      version: "v0.50.0"
+      location: "/usr/local/bin/k9s"
+  - vulnerability: "GHSA-rm3j-f69w-wqmq"
+    reason: "k9s v0.51.0: newest release older than 48h still ships it. Remove when upstream ships golang.org/x/crypto>=0.52.0."
+    package:
+      name: "golang.org/x/crypto"
+      version: "v0.50.0"
+      location: "/usr/local/bin/k9s"
+  - vulnerability: "GHSA-vgwf-h737-ff37"
+    reason: "k9s v0.51.0: newest release older than 48h still ships it. Remove when upstream ships golang.org/x/crypto>=0.52.0."
+    package:
+      name: "golang.org/x/crypto"
+      version: "v0.50.0"
+      location: "/usr/local/bin/k9s"
+  - vulnerability: "GO-2026-6612"
+    reason: "k9s v0.51.0: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
+    package:
+      name: "golang.org/x/net"
+      version: "v0.53.0"
+      location: "/usr/local/bin/k9s"
+  - vulnerability: "GO-2026-6612"
+    reason: "k9s v0.51.0: newest release older than 48h still ships it. Remove when upstream ships Go>=1.26.9."
+    package:
+      name: "stdlib"
+      version: "go1.26.1"
+      location: "/usr/local/bin/k9s"
+  - vulnerability: "GO-2026-6612"
+    reason: "kind v0.33.0: newest release older than 48h still ships it. Remove when upstream ships Go>=1.26.9."
+    package:
+      name: "stdlib"
+      version: "go1.26.7"
+      location: "/usr/local/bin/kind"
+  - vulnerability: "GO-2026-6612"
+    reason: "kubectl v1.35.10: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
+    package:
+      name: "golang.org/x/net"
+      version: "v0.56.0"
+      location: "/usr/local/bin/kubectl"
+  - vulnerability: "GO-2026-6612"
+    reason: "kubectx v0.11.0: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
+    package:
+      name: "golang.org/x/net"
+      version: "v0.47.0"
+      location: "/usr/local/bin/kubectx"
+  - vulnerability: "GO-2026-6612"
+    reason: "kubectx v0.11.0: newest release older than 48h still ships it. Remove when upstream ships Go>=1.26.9."
+    package:
+      name: "stdlib"
+      version: "go1.25.8"
+      location: "/usr/local/bin/kubectx"
+  - vulnerability: "GO-2026-6612"
+    reason: "kubens v0.11.0: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
+    package:
+      name: "golang.org/x/net"
+      version: "v0.47.0"
+      location: "/usr/local/bin/kubens"
+  - vulnerability: "GO-2026-6612"
+    reason: "kubens v0.11.0: newest release older than 48h still ships it. Remove when upstream ships Go>=1.26.9."
+    package:
+      name: "stdlib"
+      version: "go1.25.8"
+      location: "/usr/local/bin/kubens"
+  - vulnerability: "GO-2026-6612"
+    reason: "minikube v1.39.0: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
+    package:
+      name: "golang.org/x/net"
+      version: "v0.58.0"
+      location: "/usr/local/bin/minikube"
   - vulnerability: "GO-2026-6604"
+    reason: "minikube v1.39.0: newest release older than 48h still ships it. Windows-only (os.Root junctions); this image is Linux. Remove when upstream ships Go>=1.26.9."
     package:
       name: "stdlib"
       version: "go1.26.5"
+      location: "/usr/local/bin/minikube"
   - vulnerability: "GO-2026-6612"
+    reason: "minikube v1.39.0: newest release older than 48h still ships it. Remove when upstream ships Go>=1.26.9."
     package:
       name: "stdlib"
       version: "go1.26.5"
-  - vulnerability: "GO-2026-6604"
+      location: "/usr/local/bin/minikube"
+  - vulnerability: "GHSA-5q7h-w9jf-cx97"
+    reason: "skaffold v2.25.0: newest release older than 48h still ships it. Remove when upstream ships github.com/chainguard-dev/kaniko>=1.25.20."
     package:
-      name: "stdlib"
-      version: "go1.27.1"
+      name: "github.com/chainguard-dev/kaniko"
+      version: "v1.25.15"
+      location: "/usr/local/bin/skaffold"
   - vulnerability: "GO-2026-6612"
+    reason: "skaffold v2.25.0: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
+    package:
+      name: "golang.org/x/net"
+      version: "v0.56.0"
+      location: "/usr/local/bin/skaffold"
+  - vulnerability: "GO-2026-6604"
+    reason: "skaffold v2.25.0: newest release older than 48h still ships it. Windows-only (os.Root junctions); this image is Linux. Remove when upstream ships Go>=1.26.9."
     package:
       name: "stdlib"
       version: "go1.27.1"
+      location: "/usr/local/bin/skaffold"
+  - vulnerability: "GO-2026-6612"
+    reason: "skaffold v2.25.0: newest release older than 48h still ships it. Remove when upstream ships Go>=1.26.9."
+    package:
+      name: "stdlib"
+      version: "go1.27.1"
+      location: "/usr/local/bin/skaffold"
+  - vulnerability: "GO-2026-6612"
+    reason: "stern v1.35.0: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
+    package:
+      name: "golang.org/x/net"
+      version: "v0.57.0"
+      location: "/usr/local/bin/stern"
+  - vulnerability: "GO-2026-6612"
+    reason: "telepresence v2.33.3: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
+    package:
+      name: "golang.org/x/net"
+      version: "v0.59.0"
+      location: "/usr/local/bin/telepresence"
+  - vulnerability: "GO-2026-6612"
+    reason: "tilt v0.37.9: newest release older than 48h still ships it. Remove when upstream ships x/net>=0.60."
+    package:
+      name: "golang.org/x/net"
+      version: "v0.59.0"
+      location: "/usr/local/bin/tilt"
+  - vulnerability: "GO-2026-6612"
+    reason: "tilt v0.37.9: newest release older than 48h still ships it. Remove when upstream ships Go>=1.26.9."
+    package:
+      name: "stdlib"
+      version: "go1.27.1"
+      location: "/usr/local/bin/tilt"

@@ -26,18 +26,6 @@ ignore:
     package:
       name: "github.com/loft-sh/devspace"
       version: "v1.1.1-0.20260422182220-7f272dcf9065+dirty"
-  - vulnerability: "CVE-2025-68121"
-    package:
-      name: "go"
-      version: "1.24.3"
-  - vulnerability: "CVE-2026-27143"
-    package:
-      name: "go"
-      version: "1.24.3"
-  - vulnerability: "CVE-2026-78663"
-    package:
-      name: "go"
-      version: "1.24.3"
   - vulnerability: "GHSA-5cgq-3rg8-m6cv"
     package:
       name: "golang.org/x/crypto"
@@ -130,10 +118,6 @@ ignore:
     package:
       name: "golang.org/x/net"
       version: "v0.24.0"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "golang.org/x/net"
-      version: "v0.38.0"
   - vulnerability: "GO-2026-6612"
     package:
       name: "golang.org/x/net"
@@ -278,14 +262,6 @@ ignore:
     package:
       name: "stdlib"
       version: "go1.22.6"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.24.3"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.24.3"
   - vulnerability: "GO-2026-6612"
     package:
       name: "stdlib"

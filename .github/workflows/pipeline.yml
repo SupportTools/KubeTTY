@@ -352,6 +352,21 @@ jobs:
       - name: Test gateway image references
         run: bash .github/scripts/test-helm-image-ref.sh
 
+      # The CI deployer may only manage these kinds (cluster-services
+      # github-actions/supporttools/ci-deployers/kubetty-rbac.yaml). A new kind fails here, not as a Forbidden in deploy-dev.
+      - name: Chart renders only kinds the CI deployer may manage
+        run: |
+          set -euo pipefail
+          allowed="ClusterRole ConfigMap Deployment Ingress Role RoleBinding Service ServiceAccount"
+          for env in dev prd; do
+            for kind in $(helm template kubetty-gateway deploy/helm-gateway/ -f "deploy/helm-gateway/values.${env}.yaml" | sed -n 's/^kind: *//p' | sort -u); do
+              if [[ " ${allowed} " != *" ${kind} "* ]]; then
+                echo "::error::values.${env}.yaml renders kind ${kind}; grant it to kubetty-ci-deployer in cluster-services kubetty-rbac.yaml first, then add it here"
+                exit 1
+              fi
+            done
+          done
+
       - name: Package Helm charts
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         run: |

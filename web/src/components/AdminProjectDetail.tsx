@@ -71,7 +71,9 @@ const AdminProjectDetail = ({
 
   // Manage Secrets modal state
   const [showSecretsModal, setShowSecretsModal] = useState(false);
-  const [secrets, setSecrets] = useState<Record<string, string>>({});
+  // null means "keep the stored value": the API returns key names only.
+  const [secrets, setSecrets] = useState<Record<string, string | null>>({});
+  const [secretsExternallyManaged, setSecretsExternallyManaged] = useState(false);
   const [loadingSecrets, setLoadingSecrets] = useState(false);
   const [savingSecrets, setSavingSecrets] = useState(false);
   const [newSecretKey, setNewSecretKey] = useState("");
@@ -321,8 +323,9 @@ const AdminProjectDetail = ({
       if (!res.ok) {
         throw new Error(await parseErrorResponse(res));
       }
-      const data = await res.json();
-      setSecrets(data.secrets || {});
+      const data: { keys?: string[]; externallyManaged?: boolean } = await res.json();
+      setSecrets(Object.fromEntries((data.keys || []).map((key) => [key, null])));
+      setSecretsExternallyManaged(Boolean(data.externallyManaged));
       setShowSecretValues({});
       setNewSecretKey("");
       setNewSecretValue("");
@@ -337,6 +340,7 @@ const AdminProjectDetail = ({
   const handleSecretsCancel = () => {
     setShowSecretsModal(false);
     setSecrets({});
+    setSecretsExternallyManaged(false);
     setShowSecretValues({});
     setNewSecretKey("");
     setNewSecretValue("");
@@ -345,6 +349,11 @@ const AdminProjectDetail = ({
 
   const handleSecretChange = (key: string, value: string) => {
     setSecrets((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleSecretKeep = (key: string) => {
+    setSecrets((prev) => ({ ...prev, [key]: null }));
+    setShowSecretValues((prev) => ({ ...prev, [key]: false }));
   };
 
   const handleSecretDelete = (key: string) => {
@@ -399,6 +408,7 @@ const AdminProjectDetail = ({
       }
       setShowSecretsModal(false);
       setSecrets({});
+      setSecretsExternallyManaged(false);
       setShowSecretValues({});
       setNewSecretKey("");
       setNewSecretValue("");
@@ -1157,10 +1167,16 @@ const AdminProjectDetail = ({
               <div className="modal-body">
                 {error && <p className="error">{error}</p>}
 
-                <div className="info-box">
-                  Environment secrets are injected as environment variables into the project pod.
-                  Saving changes will restart the project pod.
-                </div>
+                {secretsExternallyManaged ? (
+                  <div className="info-box">
+                    These secrets are managed by an ExternalSecret. Change them in Vault; KubeTTY cannot edit them.
+                  </div>
+                ) : (
+                  <div className="info-box">
+                    Environment secrets are injected as environment variables into the project pod. Stored values
+                    are never shown; type a new value to replace one. Saving changes will restart the project pod.
+                  </div>
+                )}
 
                 <div className="secrets-list">
                   <h4>Current Secrets ({Object.keys(secrets).length})</h4>
@@ -1171,41 +1187,59 @@ const AdminProjectDetail = ({
                       <thead>
                         <tr>
                           <th>Key</th>
-                          <th>Value</th>
-                          <th>Actions</th>
+                          {!secretsExternallyManaged && <th>Value</th>}
+                          {!secretsExternallyManaged && <th>Actions</th>}
                         </tr>
                       </thead>
                       <tbody>
                         {Object.entries(secrets).map(([key, value]) => (
                           <tr key={key}>
                             <td className="mono">{key}</td>
-                            <td className="secret-value-cell">
-                              <input
-                                type={showSecretValues[key] ? "text" : "password"}
-                                className="form-input secret-input"
-                                value={value}
-                                onChange={(e) => handleSecretChange(key, e.target.value)}
-                                disabled={savingSecrets}
-                              />
-                              <button
-                                type="button"
-                                className="icon-button toggle-visibility"
-                                onClick={() => toggleSecretVisibility(key)}
-                                title={showSecretValues[key] ? "Hide value" : "Show value"}
-                              >
-                                {showSecretValues[key] ? "Hide" : "Show"}
-                              </button>
-                            </td>
-                            <td>
-                              <button
-                                type="button"
-                                className="danger-small"
-                                onClick={() => handleSecretDelete(key)}
-                                disabled={savingSecrets}
-                              >
-                                Delete
-                              </button>
-                            </td>
+                            {!secretsExternallyManaged && (
+                              <td className="secret-value-cell">
+                                <input
+                                  type={showSecretValues[key] ? "text" : "password"}
+                                  className="form-input secret-input"
+                                  aria-label={`Value for ${key}`}
+                                  placeholder={value === null ? "Unchanged" : ""}
+                                  value={value ?? ""}
+                                  onChange={(e) => handleSecretChange(key, e.target.value)}
+                                  disabled={savingSecrets}
+                                />
+                                {value !== null && (
+                                  <button
+                                    type="button"
+                                    className="icon-button toggle-visibility"
+                                    onClick={() => toggleSecretVisibility(key)}
+                                    title={showSecretValues[key] ? "Hide value" : "Show value"}
+                                  >
+                                    {showSecretValues[key] ? "Hide" : "Show"}
+                                  </button>
+                                )}
+                              </td>
+                            )}
+                            {!secretsExternallyManaged && (
+                              <td>
+                                {value !== null && (
+                                  <button
+                                    type="button"
+                                    className="secondary"
+                                    onClick={() => handleSecretKeep(key)}
+                                    disabled={savingSecrets}
+                                  >
+                                    Keep stored
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className="danger-small"
+                                  onClick={() => handleSecretDelete(key)}
+                                  disabled={savingSecrets}
+                                >
+                                  Delete
+                                </button>
+                              </td>
+                            )}
                           </tr>
                         ))}
                       </tbody>
@@ -1213,6 +1247,7 @@ const AdminProjectDetail = ({
                   )}
                 </div>
 
+                {!secretsExternallyManaged && (
                 <div className="add-secret-section">
                   <h4>Add New Secret</h4>
                   <div className="add-secret-form">
@@ -1253,18 +1288,21 @@ const AdminProjectDetail = ({
                     Keys must start with a letter or underscore and contain only letters, numbers, and underscores.
                   </small>
                 </div>
+                )}
               </div>
               <div className="modal-actions">
                 <button className="secondary" onClick={handleSecretsCancel} disabled={savingSecrets}>
-                  Cancel
+                  {secretsExternallyManaged ? "Close" : "Cancel"}
                 </button>
-                <button
-                  className="primary-button"
-                  onClick={handleSecretsSave}
-                  disabled={savingSecrets}
-                >
-                  {savingSecrets ? "Saving..." : "Save Secrets"}
-                </button>
+                {!secretsExternallyManaged && (
+                  <button
+                    className="primary-button"
+                    onClick={handleSecretsSave}
+                    disabled={savingSecrets}
+                  >
+                    {savingSecrets ? "Saving..." : "Save Secrets"}
+                  </button>
+                )}
               </div>
             </div>
           </div>

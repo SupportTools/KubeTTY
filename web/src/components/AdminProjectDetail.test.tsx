@@ -145,3 +145,47 @@ describe("AdminProjectDetail image auto-follow switch", () => {
     expect(restarts).toHaveLength(0);
   });
 });
+
+describe("AdminProjectDetail secrets", () => {
+  beforeEach(() => {
+    authFetch.mockReset();
+  });
+
+  function renderWithSecrets(secretsResponse: { keys: string[]; externallyManaged: boolean }) {
+    const p = project();
+    authFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith("/status")) {
+        return okJSON({ project: p, deployment: { exists: true, replicas: 1, readyReplicas: 1, availableReplicas: 1, pods: [] } });
+      }
+      if (url.endsWith("/secrets") && (!init || !init.method || init.method === "GET")) {
+        return okJSON(secretsResponse);
+      }
+      return okJSON({});
+    });
+    render(<AdminProjectDetail project={p} onClose={() => {}} onRefresh={() => {}} onDelete={() => {}} onRestart={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Manage Secrets" }));
+  }
+
+  it("sends null for untouched keys so stored values are kept", async () => {
+    renderWithSecrets({ keys: ["ANTHROPIC_BASE_URL", "OPENAI_API_KEY"], externallyManaged: false });
+
+    const openai = await screen.findByLabelText("Value for OPENAI_API_KEY");
+    expect(openai).toHaveProperty("value", "");
+    expect(openai).toHaveProperty("placeholder", "Unchanged");
+    fireEvent.change(openai, { target: { value: "sk-new" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Secrets" }));
+
+    await waitFor(() => expect(putBodies()).toHaveLength(1));
+    expect(putBodies()[0]).toEqual({ secrets: { ANTHROPIC_BASE_URL: null, OPENAI_API_KEY: "sk-new" } });
+  });
+
+  it("shows ExternalSecret-managed secrets read-only with no save", async () => {
+    renderWithSecrets({ keys: ["OPENAI_API_KEY"], externallyManaged: true });
+
+    expect(await screen.findByText(/managed by an ExternalSecret/)).toBeTruthy();
+    expect(screen.getByText("OPENAI_API_KEY")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Save Secrets" })).toBeNull();
+    expect(screen.queryByText("Add New Secret")).toBeNull();
+    expect(screen.queryByLabelText("Value for OPENAI_API_KEY")).toBeNull();
+  });
+});

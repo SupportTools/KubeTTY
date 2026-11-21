@@ -362,6 +362,10 @@ jobs:
               | ($m | map(select(.sev == $s))) as $x
               | "| \($s) | \($x | length) | \($x | map(select(.fixed)) | length) |"' "$RUNNER_TEMP/grype.json"
             echo
+            jq -r '[.ignoredMatches[]? | select(any(.appliedIgnoreRules[]; (.vulnerability // "") != ""))
+              | "\(.vulnerability.id) \(.artifact.name) \(.artifact.version)"] | unique | length
+              | "Not counted above: \(.) finding(s) accepted in the .grype.yaml baseline."' "$RUNNER_TEMP/grype.json"
+            echo
             echo "#### Critical and High with a fix"
             echo
             echo "| severity | id | package | version | fixed in | type |"

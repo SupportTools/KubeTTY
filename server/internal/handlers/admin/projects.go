@@ -131,6 +131,8 @@ func (h *ProjectHandlers) ListProjects(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const msgNamespaceAccessUnsupported = "adminNamespaces and readNamespaces are not supported: project pods get no Kubernetes API access"
+
 // CreateProject handles POST /api/admin/projects
 func (h *ProjectHandlers) CreateProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -177,6 +179,10 @@ func (h *ProjectHandlers) CreateProject(w http.ResponseWriter, r *http.Request) 
 	if !isValidVNCPort(req.GUIVNCPort) {
 		_ = apierrors.WriteError(w, apierrors.BadRequest(
 			"guiVNCPort must be in range 5900-5999", ""))
+		return
+	}
+	if len(req.AdminNamespaces) > 0 || len(req.ReadNamespaces) > 0 {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(msgNamespaceAccessUnsupported, ""))
 		return
 	}
 
@@ -629,7 +635,7 @@ func (h *ProjectHandlers) UpgradeProject(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// GetProjectSecrets handles GET /api/admin/projects/{id}/secrets
+// GetProjectSecrets handles GET /api/admin/projects/{id}/secrets. It returns key names only.
 func (h *ProjectHandlers) GetProjectSecrets(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -657,12 +663,11 @@ func (h *ProjectHandlers) GetProjectSecrets(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
-		"secrets": secrets,
-	})
+	_ = util.WriteJSON(w, http.StatusOK, secrets)
 }
 
-// UpdateProjectSecrets handles PUT /api/admin/projects/{id}/secrets
+// UpdateProjectSecrets handles PUT /api/admin/projects/{id}/secrets.
+// The body lists every key the Secret should hold; a null value keeps that key's current value.
 func (h *ProjectHandlers) UpdateProjectSecrets(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -673,7 +678,7 @@ func (h *ProjectHandlers) UpdateProjectSecrets(w http.ResponseWriter, r *http.Re
 	}
 
 	var req struct {
-		Secrets map[string]string `json:"secrets"`
+		Secrets map[string]*string `json:"secrets"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
@@ -692,8 +697,16 @@ func (h *ProjectHandlers) UpdateProjectSecrets(w http.ResponseWriter, r *http.Re
 	}
 
 	if err := h.controller.UpdateProjectSecrets(ctx, project, req.Secrets); err != nil {
-		log.WithError(err).Error("admin/projects: failed to update project secrets")
-		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to update project secrets", ""))
+		switch {
+		case errors.Is(err, controller.ErrSecretExternallyManaged):
+			_ = apierrors.WriteError(w, apierrors.Conflict(
+				"this project's secrets are managed by an ExternalSecret; change them in Vault", ""))
+		case errors.Is(err, controller.ErrUnknownSecretKey):
+			_ = apierrors.WriteError(w, apierrors.BadRequest(err.Error(), ""))
+		default:
+			log.WithError(err).Error("admin/projects: failed to update project secrets")
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to update project secrets", ""))
+		}
 		return
 	}
 

@@ -216,14 +216,14 @@ type mockController struct {
 	restartErr       error
 	deploymentStatus *controller.DeploymentStatus
 	deploymentErr    error
-	secrets          map[string]string
+	secrets          map[string]*string
 	getSecretsErr    error
 	updateSecretsErr error
 }
 
 func newMockController() *mockController {
 	return &mockController{
-		secrets: make(map[string]string),
+		secrets: make(map[string]*string),
 	}
 }
 
@@ -245,14 +245,18 @@ func (m *mockController) GetDeploymentStatus(ctx context.Context, p *projects.Pr
 	}, nil
 }
 
-func (m *mockController) GetProjectSecrets(ctx context.Context, p *projects.Project) (map[string]string, error) {
+func (m *mockController) GetProjectSecrets(ctx context.Context, p *projects.Project) (controller.ProjectSecrets, error) {
 	if m.getSecretsErr != nil {
-		return nil, m.getSecretsErr
+		return controller.ProjectSecrets{}, m.getSecretsErr
 	}
-	return m.secrets, nil
+	keys := make([]string, 0, len(m.secrets))
+	for k := range m.secrets {
+		keys = append(keys, k)
+	}
+	return controller.ProjectSecrets{Keys: keys}, nil
 }
 
-func (m *mockController) UpdateProjectSecrets(ctx context.Context, p *projects.Project, secrets map[string]string) error {
+func (m *mockController) UpdateProjectSecrets(ctx context.Context, p *projects.Project, secrets map[string]*string) error {
 	if m.updateSecretsErr != nil {
 		return m.updateSecretsErr
 	}
@@ -264,8 +268,8 @@ func (m *mockController) UpdateProjectSecrets(ctx context.Context, p *projects.P
 type controllerInterface interface {
 	RestartProject(ctx context.Context, p *projects.Project) error
 	GetDeploymentStatus(ctx context.Context, p *projects.Project) (*controller.DeploymentStatus, error)
-	GetProjectSecrets(ctx context.Context, p *projects.Project) (map[string]string, error)
-	UpdateProjectSecrets(ctx context.Context, p *projects.Project, secrets map[string]string) error
+	GetProjectSecrets(ctx context.Context, p *projects.Project) (controller.ProjectSecrets, error)
+	UpdateProjectSecrets(ctx context.Context, p *projects.Project, secrets map[string]*string) error
 }
 
 // testableProjectHandlers wraps ProjectHandlers to use mockController

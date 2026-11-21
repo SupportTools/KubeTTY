@@ -230,7 +230,6 @@ jobs:
           # no proxy.golang.org fallthrough (cluster-services-1496). See the Dockerfile header for
           # the remaining upstream-pinned fetches.
           build-args: |
-            GO_VERSION=1.24.3
             NODE_MAJOR=20
             APT_FALLBACK=none
             NPM_FALLBACK=none

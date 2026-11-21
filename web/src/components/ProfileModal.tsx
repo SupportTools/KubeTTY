@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { useAuth, AUTH_MODE_CLOUDFLARE_ACCESS } from "../contexts/AuthContext";
+import { useAuth } from "../contexts/AuthContext";
 
 interface ProfileModalProps {
   onClose: () => void;
@@ -7,8 +7,7 @@ interface ProfileModalProps {
 }
 
 const ProfileModal = ({ onClose, onPasswordChange }: ProfileModalProps) => {
-  const { user, logout, authMode } = useAuth();
-  const sso = authMode === AUTH_MODE_CLOUDFLARE_ACCESS;
+  const { user, logout } = useAuth();
 
   const handleLogout = useCallback(async () => {
     await logout();
@@ -63,11 +62,9 @@ const ProfileModal = ({ onClose, onPasswordChange }: ProfileModalProps) => {
           </div>
         </div>
         <div className="modal-footer">
-          {!sso && (
-            <button className="secondary" onClick={handlePasswordChange}>
-              Change Password
-            </button>
-          )}
+          <button className="secondary" onClick={handlePasswordChange}>
+            Change Password
+          </button>
           <button className="danger" onClick={handleLogout}>
             Logout
           </button>

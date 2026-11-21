@@ -103,21 +103,9 @@ spec:
               value: {{ .Values.auth.cookieDomain | quote }}
             - name: AUTH_COOKIE_SECURE
               value: {{ ternary "true" "false" .Values.auth.cookieSecure | quote }}
-            {{- if eq .Values.auth.mode "cloudflare-access" }}
-            {{- $acc := .Values.auth.access | default dict }}
-            # Cloudflare Access SSO (cluster-services-1299): the gateway verifies the
-            # Cf-Access-Jwt-Assertion JWT (issuer + app AUD) and maps the email to a user.
-            - name: CF_ACCESS_TEAM_DOMAIN
-              value: {{ required "auth.access.teamDomain is required for cloudflare-access" $acc.teamDomain | quote }}
-            - name: CF_ACCESS_AUD
-              value: {{ required "auth.access.aud is required for cloudflare-access" $acc.aud | quote }}
-            - name: AUTH_ACCESS_USERS
-              value: {{ required "auth.access.users is required for cloudflare-access" $acc.users | quote }}
-            {{- with $acc.serviceTokens }}
-            # Access service tokens -> restricted users (CI smoke, cluster-services-1534). Dev only.
-            - name: AUTH_ACCESS_SERVICE_TOKENS
+            {{- with .Values.auth.restrictedUsers }}
+            - name: AUTH_RESTRICTED_USERS
               value: {{ . | quote }}
-            {{- end }}
             {{- end }}
             {{- if or .Values.catalog.inline .Values.catalog.existingConfigMap }}
             - name: PROJECT_CATALOG_PATH

@@ -5,10 +5,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -117,6 +119,22 @@ func NewSession(restConfig *rest.Config, cfg SessionConfig) (*Session, error) {
 	}, nil
 }
 
+// newExecutor prefers the WebSocket exec protocol and falls back to SPDY when the
+// upgrade is refused (older API server, missing get on pods/exec, or a proxy), like kubectl.
+func newExecutor(restConfig *rest.Config, execURL *url.URL) (remotecommand.Executor, error) {
+	spdyExec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", execURL)
+	if err != nil {
+		return nil, fmt.Errorf("spdy executor: %w", err)
+	}
+	wsExec, err := remotecommand.NewWebSocketExecutor(restConfig, "GET", execURL.String())
+	if err != nil {
+		return nil, fmt.Errorf("websocket executor: %w", err)
+	}
+	return remotecommand.NewFallbackExecutor(wsExec, spdyExec, func(err error) bool {
+		return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
+	})
+}
+
 // Start initiates the exec session and returns streams for I/O.
 // The session runs until the command exits or Close is called.
 func (s *Session) Start(ctx context.Context) error {
@@ -166,10 +184,9 @@ func (s *Session) Start(ctx context.Context) error {
 
 	log.WithFields(log.Fields{
 		"url": req.URL().String(),
-	}).Debug("gateway/exec: creating SPDY executor")
+	}).Debug("gateway/exec: creating executor")
 
-	// Create SPDY executor
-	executor, err := remotecommand.NewSPDYExecutor(s.restConfig, "POST", req.URL())
+	executor, err := newExecutor(s.restConfig, req.URL())
 	if err != nil {
 		stdinReader.Close()
 		stdoutWriter.Close()

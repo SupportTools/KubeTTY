@@ -282,23 +282,28 @@ jobs:
             echo "- linux/amd64 runtime manifest: \`${RUNTIME_DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Stage 4: Grype scan of the pushed linux/amd64 digest (taskforge-22081).
-  # REPORT-ONLY until the blocking threshold is agreed: continue-on-error and NOT in
-  # deploy-production's needs, so it cannot delay or block a release. To gate, add --fail-on
-  # to the scan and image-scan to deploy-production's needs.
+  # Stage 4: Grype scan of the pushed linux/amd64 digest (taskforge-22081). deploy-production
+  # needs it. Gate (operator decision 2026-11-20): fail on Critical findings that have a fix;
+  # report High without failing.
   # In-line, not the org reusable SupportTools/ci-runners grype-scan.yml: this public repo
   # cannot call a private repo's reusable workflow (the run fails at load time, 0 jobs).
   image-scan:
-    name: Image Scan (Grype, report-only)
+    name: Image Scan (Grype)
     runs-on: self-hosted-linux
     needs: [build]
     if: github.event_name != 'pull_request'
-    continue-on-error: true
     timeout-minutes: 30
     permissions:
       contents: read
       id-token: write          # GitHub OIDC -> Vault (the build job's Harbor robot, pull only here)
     steps:
+      - name: Checkout .grype.yaml (accepted findings, if any)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .grype.yaml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Vault login (GitHub OIDC) + Harbor robot for grype
         uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
         with:
@@ -325,9 +330,18 @@ jobs:
           set -euo pipefail
           [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::no runtime digest from the build job: '$IMAGE'"; exit 1; }
           grype version
-          start=$(date +%s)
-          grype "registry:${IMAGE}" -o json --file "$RUNNER_TEMP/grype.json"
-          echo "scan took $(( $(date +%s) - start ))s"
+          for attempt in 1 2; do
+            start=$(date +%s)
+            rm -f "$RUNNER_TEMP/grype.json"
+            if grype "registry:${IMAGE}" -o json --file "$RUNNER_TEMP/grype.json"; then
+              echo "scan took $(( $(date +%s) - start ))s"
+              exit 0
+            fi
+            echo "::warning::grype attempt ${attempt} failed after $(( $(date +%s) - start ))s (pull or DB fetch, not a finding)"
+            sleep 15
+          done
+          echo "::error::grype could not scan ${IMAGE}; this is a transport failure, not a vulnerability"
+          exit 1
 
       - name: Findings summary
         if: always()
@@ -366,6 +380,23 @@ jobs:
           path: ${{ runner.temp }}/grype.json
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Gate on fixable Critical
+        run: |
+          set -euo pipefail
+          fixable() {
+            jq -r --arg sev "$1" '[.matches[] | select(.vulnerability.severity == $sev and .vulnerability.fix.state == "fixed")
+              | "\(.vulnerability.id) \(.artifact.name) \(.artifact.version) -> \(.vulnerability.fix.versions | join(", "))"] | unique | .[]' "$RUNNER_TEMP/grype.json"
+          }
+          HIGH=$(fixable High | wc -l | tr -d ' ')
+          [[ "$HIGH" -eq 0 ]] || echo "::warning::${HIGH} High finding(s) have a fix (reported, not blocking); see the job summary"
+          CRIT=$(fixable Critical)
+          if [[ -n "$CRIT" ]]; then
+            while read -r line; do echo "::error::fixable Critical: ${line}"; done <<<"$CRIT"
+            echo "::error::production deploy is blocked until these are fixed or listed in .grype.yaml with a reason"
+            exit 1
+          fi
+          echo "no Critical finding with a fix"
 
   # Stage 5: Helm Chart Validation
   helm-validate:
@@ -689,8 +720,9 @@ jobs:
   deploy-production:
     name: Deploy to Production
     runs-on: self-hosted-linux
-    # dev must deploy, pass its health gate AND the functional smoke first (cluster-services-1534)
-    needs: [build, helm-validate, deploy-dev, smoke-dev]
+    # dev must deploy, pass its health gate AND the functional smoke first (cluster-services-1534);
+    # the image must have no Critical finding with a fix (taskforge-22081)
+    needs: [build, helm-validate, deploy-dev, smoke-dev, image-scan]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import RFB from '@novnc/novnc/lib/rfb';
+import RFB from '@novnc/novnc';
 import './GUIView.css';
 
 // Dev-mode logging helper

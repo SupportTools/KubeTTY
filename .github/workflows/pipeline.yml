@@ -578,9 +578,8 @@ jobs:
           echo "✓ dev runs ${EXPECTED_IMAGE}"
 
       # Keyless: GitHub OIDC -> Vault jwt role gha-kubetty (policy gha-kubetty-read). vault-action
-      # masks the values in the log. The Access service token is needed only until the kubetty-dev
-      # Access app is removed in cluster-services.
-      - name: Vault login (GitHub OIDC) + dev smoke credentials
+      # masks the value in the log.
+      - name: Vault login (GitHub OIDC) + dev smoke password
         uses: hashicorp/vault-action@v3
         with:
           url: https://vault.support.tools
@@ -590,9 +589,7 @@ jobs:
           jwtGithubAudience: https://github.com/SupportTools
           exportEnv: true
           secrets: |
-            secret/data/kubetty/ci-smoke-user password | KUBETTY_SMOKE_PASSWORD ;
-            secret/data/kubetty/ci-smoke-access-token client_id | CF_ACCESS_CLIENT_ID ;
-            secret/data/kubetty/ci-smoke-access-token client_secret | CF_ACCESS_CLIENT_SECRET
+            secret/data/kubetty/ci-smoke-user password | KUBETTY_SMOKE_PASSWORD
 
       # server/cmd/kubetty-smoke. Fetch tier: Go modules from Athens only (GOPROXY=goproxy.support.tools,
       # no proxy.golang.org fallthrough), same as the image build.

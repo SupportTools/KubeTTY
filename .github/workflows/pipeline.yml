@@ -23,7 +23,7 @@ jobs:
     runs-on: self-hosted-linux
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Test cross-cluster kubeconfig validation
         run: bash .github/actions/setup-kubeconfig-onprem/security-validation.test.sh
@@ -61,7 +61,7 @@ jobs:
           git diff --exit-code go.mod go.sum || (echo "ERROR: go.mod or go.sum not tidy" && exit 1)
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -77,7 +77,7 @@ jobs:
     needs: validate
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # No actions/setup-go: the self-hosted runner image (runner:v21.1-arc2+)
       # bakes Go at /usr/local/go (1.26.x, GOTOOLCHAIN=local), which satisfies
@@ -112,7 +112,7 @@ jobs:
           fi
 
       - name: Upload coverage to artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: server-coverage
           path: server/coverage.out
@@ -124,10 +124,10 @@ jobs:
     needs: validate
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -157,17 +157,17 @@ jobs:
       runtime-image-digest: ${{ steps.image-identity.outputs.runtime-digest }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           # binfmt from the Harbor Docker Hub proxy-cache (anonymous pull), pinned by tag + index
           # digest instead of docker.io/tonistiigi/binfmt:latest (cluster-services-1470).
           image: harbor.support.tools/dockerhub/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           # BuildKit from the Harbor Docker Hub proxy, pinned by index digest (cluster-services-1487)
           driver-opts: image=harbor.support.tools/dockerhub/moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
@@ -182,7 +182,7 @@ jobs:
       # repo-scoped Harbor robot (replaces org admin HARBOR_USERNAME/PASSWORD).
       - name: Vault login (GitHub OIDC) + Harbor robot
         if: github.event_name != 'pull_request'
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
         with:
           url: https://vault.support.tools
           method: jwt
@@ -196,7 +196,7 @@ jobs:
 
       - name: Log in to Harbor
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ env.HARBOR_ROBOT_USER }}
@@ -204,7 +204,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -217,7 +217,7 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64
@@ -302,7 +302,7 @@ jobs:
       # NOTE: if ever enabled, this needs a Harbor login step (image is a private
       # harbor.support.tools ref); left out while the job is disabled.
       - name: Grype scan (anchore/scan-action, informational)
-        uses: anchore/scan-action@v6
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image-digest }}
           fail-build: false
@@ -319,7 +319,7 @@ jobs:
     needs: validate
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Helm is baked into the runner image (ci-runners Dockerfile.arc2, checksum-pinned).
       # Do not download it per job: a job-time fetch from get.helm.sh failed twice on
@@ -360,7 +360,7 @@ jobs:
 
       - name: Upload Helm charts as artifact
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: helm-charts
           path: helm-packages/*.tgz
@@ -401,10 +401,10 @@ jobs:
       url: https://kubetty-dev.support.tools
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
         with:
           version: 'v1.30.3'
 
@@ -540,7 +540,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Verify baked Go
         run: |
@@ -549,7 +549,7 @@ jobs:
           go version
 
       - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
         with:
           version: 'v1.30.3'
 
@@ -581,7 +581,7 @@ jobs:
       # masks the values in the log. The Access service token is needed only until the kubetty-dev
       # Access app is removed in cluster-services.
       - name: Vault login (GitHub OIDC) + dev smoke credentials
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
         with:
           url: https://vault.support.tools
           method: jwt
@@ -664,10 +664,10 @@ jobs:
           echo "✓ Security scan passed"
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
         with:
           version: 'v1.30.3'
 

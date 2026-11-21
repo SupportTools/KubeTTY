@@ -468,7 +468,7 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.s
     && rm -f /tmp/tilt.tgz
 
 # Install Telepresence for connecting local dev to remote clusters.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/telepresence b34ec6977a4636acf5f6047fcc4b7d04e73c60332f73af957218a6a5d942c4bc https://app.getambassador.io/download/tel2oss/releases/download/v2.18.0/telepresence-linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/telepresence a2929ecbcb229830e324deef8ff55d3b48d0f230a83730e18fa895e1ada3f04e https://github.com/telepresenceio/telepresence/releases/download/v2.33.3/telepresence-linux-amd64 \
     && chmod +x /usr/local/bin/telepresence
 
 # Install kubectx and kubens for quick context/namespace switching.

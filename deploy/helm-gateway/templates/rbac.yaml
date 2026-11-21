@@ -40,8 +40,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "services"]
     verbs: ["get", "list", "watch"]
+  # WebSocket exec upgrades with GET; SPDY and the Kubernetes 1.35+ upgrade check need create.
   - apiGroups: [""]
-    resources: ["pods/exec", "pods/portforward"]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
     verbs: ["create"]
   # Gateway: read pod metrics from metrics-server
   - apiGroups: ["metrics.k8s.io"]

@@ -282,35 +282,125 @@ jobs:
             echo "- linux/amd64 runtime manifest: \`${RUNTIME_DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Stage 4: Security Scanning (disabled - image too large for CI timeout)
-  # Migrated from a per-repo Trivy job to Grype for consistency across repos, but kept
-  # opt-in/disabled: `if: false` mirrors the previous Trivy job's disabled state (KubeTTY's
-  # image is too large for Grype to scan in CI). Uses anchore/scan-action (grype engine)
-  # IN-LINE rather than the org reusable grype-scan.yml: pipeline.yml is pull_request-
-  # triggered, and a private-repo reusable `uses:` fails to resolve at workflow-LOAD time
-  # on pull_request, failing the ENTIRE run at startup (0 jobs) even with `if: false`, since
-  # resolution happens before `if` is evaluated. An in-line action has no such problem.
-  grype-scan:
-    name: Security Scan (Grype)
+  # Stage 4: Grype scan of the pushed linux/amd64 digest (taskforge-22081). deploy-production
+  # needs it. Gate (operator decision 2026-11-20): fail on Critical findings that have a fix;
+  # report High without failing.
+  # In-line, not the org reusable SupportTools/ci-runners grype-scan.yml: this public repo
+  # cannot call a private repo's reusable workflow (the run fails at load time, 0 jobs).
+  image-scan:
+    name: Image Scan (Grype)
     runs-on: self-hosted-linux
     needs: [build]
-    if: false  # Disabled - KubeTTY image too large for Grype to scan in CI (same reasoning as the prior Trivy job)
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 30
     permissions:
       contents: read
-      security-events: write
+      id-token: write          # GitHub OIDC -> Vault (the build job's Harbor robot, pull only here)
     steps:
-      # NOTE: if ever enabled, this needs a Harbor login step (image is a private
-      # harbor.support.tools ref); left out while the job is disabled.
-      - name: Grype scan (anchore/scan-action, informational)
-        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+      - name: Checkout .grype.yaml (accepted findings, if any)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image-digest }}
-          fail-build: false
-          severity-cutoff: high
-          # Pin to the grype release baked into runner:v21.1-arc2+ so the action
-          # hits the baked copy instead of downloading grype at job time
-          # (taskforge-2849). Bump together with the runner image.
-          grype-version: v0.117.0
+          sparse-checkout: .grype.yaml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Vault login (GitHub OIDC) + Harbor robot for grype
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: https://vault.support.tools
+          method: jwt
+          path: github-actions
+          role: gha-kubetty
+          jwtGithubAudience: https://github.com/SupportTools
+          exportEnv: true
+          secrets: |
+            secret/data/harbor/kubetty-ci-robot username | GRYPE_REGISTRY_AUTH_USERNAME ;
+            secret/data/harbor/kubetty-ci-robot password | GRYPE_REGISTRY_AUTH_PASSWORD
+
+      # grype v0.117.0 is baked into the runner image. The vuln DB comes from the internal mirror
+      # that Harbor's Grype scanner also uses, so CI and Harbor report the same findings.
+      - name: Grype scan
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.runtime-image-digest }}
+          GRYPE_REGISTRY_AUTH_AUTHORITY: ${{ env.REGISTRY }}
+          GRYPE_DB_UPDATE_URL: https://s3.support.tools/grype-db/v6/latest.json
+          GRYPE_DB_AUTO_UPDATE: 'true'
+          GRYPE_CHECK_FOR_APP_UPDATE: 'false'
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::no runtime digest from the build job: '$IMAGE'"; exit 1; }
+          grype version
+          for attempt in 1 2; do
+            start=$(date +%s)
+            rm -f "$RUNNER_TEMP/grype.json"
+            if grype "registry:${IMAGE}" -o json --file "$RUNNER_TEMP/grype.json"; then
+              echo "scan took $(( $(date +%s) - start ))s"
+              exit 0
+            fi
+            echo "::warning::grype attempt ${attempt} failed after $(( $(date +%s) - start ))s (pull or DB fetch, not a finding)"
+            sleep 15
+          done
+          echo "::error::grype could not scan ${IMAGE}; this is a transport failure, not a vulnerability"
+          exit 1
+
+      - name: Findings summary
+        if: always()
+        env:
+          DIGEST: ${{ needs.build.outputs.runtime-image-digest }}
+        run: |
+          set -euo pipefail
+          [[ -s "$RUNNER_TEMP/grype.json" ]] || { echo "::warning::no grype report; the scan did not finish"; exit 0; }
+          {
+            echo "### Grype: \`${DIGEST}\`"
+            echo
+            echo "| severity | findings | fix available |"
+            echo "|---|---|---|"
+            jq -r '
+              ["Critical","High","Medium","Low","Negligible","Unknown"] as $order
+              | [.matches[] | {sev: .vulnerability.severity, fixed: (.vulnerability.fix.state == "fixed"), key: "\(.vulnerability.id) \(.artifact.name)"}] | unique as $m
+              | $order[] as $s
+              | ($m | map(select(.sev == $s))) as $x
+              | "| \($s) | \($x | length) | \($x | map(select(.fixed)) | length) |"' "$RUNNER_TEMP/grype.json"
+            echo
+            jq -r '[.ignoredMatches[]? | select(any(.appliedIgnoreRules[]; (.vulnerability // "") != ""))
+              | "\(.vulnerability.id) \(.artifact.name) \(.artifact.version)"] | unique | length
+              | "Not counted above: \(.) finding(s) accepted in the .grype.yaml baseline."' "$RUNNER_TEMP/grype.json"
+            echo
+            echo "#### Critical and High with a fix"
+            echo
+            echo "| severity | id | package | version | fixed in | type |"
+            echo "|---|---|---|---|---|---|"
+            jq -r '
+              [.matches[] | select((.vulnerability.severity == "Critical" or .vulnerability.severity == "High") and .vulnerability.fix.state == "fixed")
+               | [.vulnerability.severity, .vulnerability.id, .artifact.name, .artifact.version, (.vulnerability.fix.versions | join(", ")), .artifact.type]]
+              | unique | sort_by(.[0], .[2]) | .[] | "| " + join(" | ") + " |"' "$RUNNER_TEMP/grype.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload grype report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: grype-report
+          path: ${{ runner.temp }}/grype.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Gate on fixable Critical
+        run: |
+          set -euo pipefail
+          fixable() {
+            jq -r --arg sev "$1" '[.matches[] | select(.vulnerability.severity == $sev and .vulnerability.fix.state == "fixed")
+              | "\(.vulnerability.id) \(.artifact.name) \(.artifact.version) -> \(.vulnerability.fix.versions | join(", "))"] | unique | .[]' "$RUNNER_TEMP/grype.json"
+          }
+          HIGH=$(fixable High | wc -l | tr -d ' ')
+          [[ "$HIGH" -eq 0 ]] || echo "::warning::${HIGH} High finding(s) have a fix (reported, not blocking); see the job summary"
+          CRIT=$(fixable Critical)
+          if [[ -n "$CRIT" ]]; then
+            while read -r line; do echo "::error::fixable Critical: ${line}"; done <<<"$CRIT"
+            echo "::error::production deploy is blocked until these are fixed or listed in .grype.yaml with a reason"
+            exit 1
+          fi
+          echo "no Critical finding with a fix"
 
   # Stage 5: Helm Chart Validation
   helm-validate:
@@ -638,8 +728,9 @@ jobs:
   deploy-production:
     name: Deploy to Production
     runs-on: self-hosted-linux
-    # dev must deploy, pass its health gate AND the functional smoke first
-    needs: [build, helm-validate, deploy-dev, smoke-dev]
+    # dev must deploy, pass its health gate AND the functional smoke first;
+    # the image must have no Critical finding with a fix (taskforge-22081)
+    needs: [build, helm-validate, deploy-dev, smoke-dev, image-scan]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
@@ -671,17 +762,6 @@ jobs:
             exit 1
           fi
           echo "✓ Valid semantic version: $TAG"
-
-      - name: Verify security scan passed
-        if: false  # Disabled - Grype scan is opt-in/skipped (image too large for CI)
-        run: |
-          if [ "${{ needs.grype-scan.result }}" != "success" ]; then
-            echo "ERROR: Security scan did not pass"
-            echo "Security scan result: ${{ needs.grype-scan.result }}"
-            echo "Cannot deploy to production with security issues"
-            exit 1
-          fi
-          echo "✓ Security scan passed"
 
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

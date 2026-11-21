@@ -120,7 +120,9 @@ inputs:
     description: 'Default namespace for the kubeconfig context (the deploy target).'
     required: true
   kubeconfig-path:
-    description: 'Where to write the kubeconfig. Defaults to ./kubeconfig in the workspace.'
+    description: >
+      Where to write the kubeconfig. Defaults to $RUNNER_TEMP/kubeconfig, which the runner empties
+      at the end of every job; callers still remove it in an `if: always()` step.
     required: false
     default: ''
 
@@ -174,7 +176,7 @@ runs:
         CA_SRC="${GITHUB_ACTION_PATH}/onprem-ca.crt"
         test -s "$CA_SRC" || { echo "Error: CA missing at $CA_SRC"; exit 1; }
 
-        KUBECONFIG_PATH="${KUBECONFIG_PATH_INPUT:-$GITHUB_WORKSPACE/kubeconfig}"
+        KUBECONFIG_PATH="${KUBECONFIG_PATH_INPUT:-$RUNNER_TEMP/kubeconfig}"
         mkdir -p "$(dirname "$KUBECONFIG_PATH")"
 
         if [ -z "${VAULT_TOKEN:-}" ]; then

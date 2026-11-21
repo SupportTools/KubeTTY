@@ -22,8 +22,8 @@
 #     instant, which reproduces the tree prod shipped on 2026-11-19 exactly (cluster-services-1496).
 #   - Go modules: Athens (GOPROXY=https://goproxy.support.tools, a cache we run). CI passes Athens
 #     only; the default falls through to proxy.golang.org off-network. go.sum verifies every module.
-#   - Playwright and Puppeteer browser zips: the fetch-cache /playwright/ prefix (cdn.playwright.dev;
-#     Chrome for Testing under builds/cft/), FETCH_FALLBACK=none in CI.
+#   - Playwright browser zips: the fetch-cache /playwright/ prefix (cdn.playwright.dev),
+#     FETCH_FALLBACK=none in CI.
 #   - kubectl, helm, yq: the fetch-cache /k8s/, /helm/, /github-releases/ prefixes, sha256 pinned
 #     (build/fetch.sh), FETCH_FALLBACK=none in CI.
 #   - upstream-pinned (no tier we run serves them yet; follow-up cluster-services-1496 notes): the
@@ -116,6 +116,8 @@ ENV TERM=xterm-256color
 # Browser automation environment (Playwright/Puppeteer)
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+# The image's copy of the Chrome .deb: /opt is a PVC in project pods.
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/local/share/chrome-backup/google/chrome/chrome
 WORKDIR /workspace
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -307,22 +309,24 @@ RUN set -eu; \
 # Backed up to /opt/ms-playwright-backup because /opt is mounted as PVC in project pods
 # Fetch tiers (cluster-services-1496): npm from Verdaccio (NPM_FALLBACK as in ui-builder); versions
 # pinned and transitive deps frozen with --before (see the header), which reproduces prod's
-# 2026-11-19 tree. Browser zips from the fetch-cache /playwright/ prefix: Playwright via
-# PLAYWRIGHT_DOWNLOAD_HOST, Puppeteer's Chrome for Testing via its *_DOWNLOAD_BASE_URL variables
-# (cdn.playwright.dev serves builds/cft/<version>/...). puppeteer's postinstall is skipped during
-# `npm install` and run explicitly afterwards (the same `node install.mjs`), so the browser fetch
-# has its own mirror/fallback branch. The browsers land in /root/.cache/puppeteer as before.
+# 2026-11-19 tree. Playwright's browser zip comes from the fetch-cache /playwright/ prefix via
+# PLAYWRIGHT_DOWNLOAD_HOST. Puppeteer downloads no browser and uses PUPPETEER_EXECUTABLE_PATH.
+# npm 11 replaces Node 20's bundled npm 10, whose tar 6 has a Critical CVE fixed only in tar 7.
 ARG PLAYWRIGHT_VERSION=1.65.1
 ARG PUPPETEER_VERSION=24.43.1
+ARG NPM_VERSION=11.21.3
 ARG NPM_BEFORE=2026-11-19T12:59:00Z
 ARG NPM_REGISTRY=http://verdaccio.npm-proxy.svc.a1-ops-prd.local/
 ARG NPM_FALLBACK=upstream
 RUN set -eu; \
     pkgs="playwright@${PLAYWRIGHT_VERSION} puppeteer@${PUPPETEER_VERSION}"; \
+    npm_g() { \
+      PUPPETEER_SKIP_DOWNLOAD=true npm install -g --no-audit --fund=false --before="${NPM_BEFORE}" "$@" $pkgs \
+        && npm install -g --no-audit --fund=false --before="${NPM_BEFORE}" "$@" "npm@${NPM_VERSION}"; \
+    }; \
     used=0; \
     if [ -n "${NPM_REGISTRY}" ] \
-       && PUPPETEER_SKIP_DOWNLOAD=true npm install -g --no-audit --fund=false --before="${NPM_BEFORE}" \
-            --registry="${NPM_REGISTRY}" --loglevel=http $pkgs > /tmp/npm.log 2>&1; then \
+       && npm_g --registry="${NPM_REGISTRY}" --loglevel=http > /tmp/npm.log 2>&1; then \
       hits=$(grep -c "fetch GET 200 ${NPM_REGISTRY}" /tmp/npm.log || true); \
       if [ "${hits}" -gt 0 ]; then used=1; echo "npm source: mirror ${NPM_REGISTRY} (${hits} fetches)"; \
       else echo "npm source: mirror requested but 0 fetches went to it"; fi; \
@@ -331,24 +335,19 @@ RUN set -eu; \
       [ -z "${NPM_REGISTRY}" ] || { echo "npm source: MIRROR FAILED (${NPM_REGISTRY})"; tail -20 /tmp/npm.log; }; \
       if [ "${NPM_FALLBACK}" = "none" ]; then echo "NPM_FALLBACK=none: refusing upstream" >&2; exit 1; fi; \
       echo "npm source: upstream"; \
-      PUPPETEER_SKIP_DOWNLOAD=true npm install -g --no-audit --fund=false --before="${NPM_BEFORE}" $pkgs; \
+      npm_g; \
     fi; \
+    npm --version | grep -qx "${NPM_VERSION}"; \
     rm -f /tmp/npm.log; \
     mkdir -p /opt/ms-playwright; \
-    browsers() { \
-      (cd /usr/lib/node_modules/puppeteer && node install.mjs) && npx playwright install --with-deps chromium; \
-    }; \
-    if [ -n "${FETCH_MIRROR}" ] && ( \
-         export PLAYWRIGHT_DOWNLOAD_HOST="${FETCH_MIRROR}/playwright"; \
-         export PUPPETEER_CHROME_DOWNLOAD_BASE_URL="${FETCH_MIRROR}/playwright/builds/cft"; \
-         export PUPPETEER_CHROME_HEADLESS_SHELL_DOWNLOAD_BASE_URL="${FETCH_MIRROR}/playwright/builds/cft"; \
-         browsers ); then \
+    if [ -n "${FETCH_MIRROR}" ] \
+       && PLAYWRIGHT_DOWNLOAD_HOST="${FETCH_MIRROR}/playwright" npx playwright install --with-deps chromium; then \
       echo "browser source: fetch-cache ${FETCH_MIRROR}/playwright"; \
     else \
       [ -z "${FETCH_MIRROR}" ] || echo "browser source: MIRROR FAILED (${FETCH_MIRROR}/playwright)"; \
       if [ "${FETCH_FALLBACK}" = "none" ]; then echo "FETCH_FALLBACK=none: refusing upstream" >&2; exit 1; fi; \
-      rm -rf /root/.cache/puppeteer /opt/ms-playwright/*; \
-      echo "browser source: upstream"; browsers; \
+      rm -rf /opt/ms-playwright/*; \
+      echo "browser source: upstream"; npx playwright install --with-deps chromium; \
     fi; \
     chown -R mmattox:mmattox /usr/lib/node_modules/; \
     chown -R mmattox:mmattox /opt/ms-playwright; \

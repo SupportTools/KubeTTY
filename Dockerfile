@@ -39,8 +39,8 @@ ARG RUNTIME_IMAGE=harbor.support.tools/dockerhub/library/ubuntu:22.04@sha256:9ab
 ARG GO_VERSION=1.24.3
 ARG NODE_MAJOR=20
 ARG KUBECTL_VERSION=v1.30.3
-ARG HELM_VERSION=v3.15.2
-ARG YQ_VERSION=v4.44.3
+ARG HELM_VERSION=v3.22.1
+ARG YQ_VERSION=v4.54.3
 ARG KUBETTY_VERSION=dev
 
 ###############################
@@ -164,7 +164,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fd-find \
     fzf \
     gdb \
-    gh \
     git \
     git-lfs \
     gnupg2 \
@@ -355,10 +354,6 @@ RUN set -eu; \
     cp -a /opt/ms-playwright /opt/ms-playwright-backup; \
     rm -rf /tmp/* /root/.npm
 
-# Install Docker CLI from Debian repos.
-RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
-    && rm -rf /var/lib/apt/lists/*
-
 # Last apt step: restore the image's stock Ubuntu sources.list (byte-identical to the base image's)
 # and drop the build-time retry config, so the shipped image does not depend on the fetch-cache.
 # The held NodeSource/Chrome sources go back too, so /etc/apt matches what the image always shipped.
@@ -368,19 +363,24 @@ RUN mv /etc/apt/sources.list.kubetty-orig /etc/apt/sources.list \
     && rm /etc/apt/apt.conf.d/99kubetty-build-retries \
     && grep -q '^deb http://archive.ubuntu.com/ubuntu/ jammy main' /etc/apt/sources.list
 
-# Release binaries below: build/fetch.sh, sha256 pinned to the exact files prod shipped on
-# 2026-11-19 (cluster-services-1496; the `latest`/branch-head fetches were pinned to the versions
-# prod already contained, so the image content does not change). Each call prints its source tier.
-# Install Docker Compose V2 plugin and V1 compatibility symlink
+# Release binaries below: build/fetch.sh, sha256 pinned. Each call prints its source tier.
+# Docker CLI only: dockerd runs in the privileged DinD sidecar, so this unprivileged container
+# needs no daemon, containerd or runc.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/docker.tgz 7c1ebadc65c716cdc6d35fc78759ed0e4317debf43c21dd12f066f2006999def \
+      https://download.docker.com/linux/static/stable/x86_64/docker-29.10.0.tgz \
+    && tar -C /usr/local/bin --strip-components=1 -xzf /tmp/docker.tgz docker/docker \
+    && rm -f /tmp/docker.tgz
+
+# Install Docker Compose plugin and V1 compatibility symlink
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh mkdir -p /usr/local/lib/docker/cli-plugins \
-    && sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-compose 5ea89dd65d33912a83737d8a4bf070d5de534a32b8493a21fbefc924484786a9 \
-       https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-x86_64 \
+    && sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-compose b8840f5008c447f41fce0a57ae3adeab42c89b1eb6e6012524bcabbfb4ffbaf6 \
+       https://github.com/docker/compose/releases/download/v5.8.0/docker-compose-linux-x86_64 \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
     && ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 
 # Install Docker Buildx plugin
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-buildx 43e4c928a0be38ab34e206c82957edfdd54f3e7124f1dadd7779591c3acf77ea \
-       https://github.com/docker/buildx/releases/download/v0.16.2/buildx-v0.16.2.linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-buildx 5fb31a097304fbf6dd4038649a0decf32c2b9510e4047acd7d68b9d700c46194 \
+       https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-amd64 \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
 
 # Symlink fd command.
@@ -395,17 +395,17 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.s
 
 # Install Kubernetes/Cloud tooling.
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh set -eux; \
-    sh /tmp/fetch.sh /tmp/kustomize.tgz 881c6e9007c7ea2b9ecc214d13f4cdd1f837635dcf4db49ce4479898f7d911a3 https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.2/kustomize_v5.4.2_linux_amd64.tar.gz; \
+    sh /tmp/fetch.sh /tmp/kustomize.tgz cb9e31198d3f63b44848bd0afc4c8efc56e6cfef9c93a4a39a211940e6decd61 https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.3/kustomize_v5.8.3_linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/kustomize.tgz; \
     mv /tmp/kustomize /usr/local/bin/kustomize; \
-    sh /tmp/fetch.sh /tmp/helmfile.tgz c7545124335e693fbf147c7f43447507078a6ec7db52a26bd8686c085b2cc2f0 https://github.com/helmfile/helmfile/releases/download/v0.161.0/helmfile_0.161.0_linux_amd64.tar.gz; \
+    sh /tmp/fetch.sh /tmp/helmfile.tgz 1f19ced8adb0cdf2350e94ca598cf64e390d8c21d0d9b4bdc1c9f246d4591c9d https://github.com/helmfile/helmfile/releases/download/v1.8.4/helmfile_1.8.4_linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/helmfile.tgz; \
     mv /tmp/helmfile /usr/local/bin/helmfile; \
     sh /tmp/fetch.sh /tmp/k9s.tgz d62611d9be2c35b782a765e98421500196acbf8be844cd3d9e32d4fa7846da05 https://github.com/derailed/k9s/releases/download/v0.32.4/k9s_Linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/k9s.tgz; \
     mv /tmp/k9s /usr/local/bin/k9s; \
-    sh /tmp/fetch.sh /tmp/terraform.zip bb1ee3e8314da76658002e2e584f2d8854b6def50b7f124e27b957a42ddacfea https://releases.hashicorp.com/terraform/1.8.5/terraform_1.8.5_linux_amd64.zip; \
-    unzip /tmp/terraform.zip -d /usr/local/bin; \
+    sh /tmp/fetch.sh /tmp/terraform.zip e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b https://releases.hashicorp.com/terraform/1.17.2/terraform_1.17.2_linux_amd64.zip; \
+    unzip /tmp/terraform.zip terraform -d /usr/local/bin; \
     sh /tmp/fetch.sh /tmp/awscliv2.zip f1b67518c009e9deb94152aaba5cc015e80af6b0630a7931d3662df42b5f568e https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.41.1.zip; \
     unzip /tmp/awscliv2.zip -d /tmp; \
     /tmp/aws/install --update; \
@@ -417,16 +417,22 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.s
     && chmod +x /usr/local/bin/kubectl
 
 # Install Helm.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/helm.tgz 2694b91c3e501cff57caf650e639604a274645f61af2ea4d601677b746b44fe2 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/helm.tgz 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea \
       https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz helm/helm-${HELM_VERSION}-linux-amd64.tar.gz \
     && tar -C /tmp -xzf /tmp/helm.tgz \
     && mv /tmp/linux-amd64/helm /usr/local/bin/helm \
     && rm -rf /tmp/helm.tgz /tmp/linux-amd64
 
 # Install yq.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/yq a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/yq 129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973 \
       https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64 github-releases/mikefarah/yq/${YQ_VERSION}/yq_linux_amd64 \
     && chmod +x /usr/local/bin/yq
+
+# GitHub CLI release build; Ubuntu 22.04's gh 2.4.0 is built with Go 1.18.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/gh.tgz 79e7ab5db738c48777b696e374f8b428f0647debfb424f44d2f426370407fe2f \
+      https://github.com/cli/cli/releases/download/v2.105.0/gh_2.105.0_linux_amd64.tar.gz \
+    && tar -C /usr/local/bin --strip-components=2 -xzf /tmp/gh.tgz gh_2.105.0_linux_amd64/bin/gh \
+    && rm -f /tmp/gh.tgz
 
 # Install Kind (Kubernetes in Docker) for spinning up temporary k8s clusters.
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kind b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64 \

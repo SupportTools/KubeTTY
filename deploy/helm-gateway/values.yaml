@@ -30,7 +30,7 @@ env: {}
 
 # Authentication configuration
 auth:
-  # Authentication mode: "disabled", "local" or "cloudflare-access".
+  # Authentication mode: "disabled", "local", "github" or "cloudflare-access".
   # cloudflare-access (cluster-services-1299): KubeTTY trusts only a verified
   # Cloudflare Access JWT (Cf-Access-Jwt-Assertion); local passwords are retired
   # and /api/auth/login answers 410. Requires auth.access below.
@@ -51,6 +51,27 @@ auth:
     aud: ""
     users: ""
     serviceTokens: ""
+
+  # GitHub App sign-in (mode: github). Only the client ID is here: the client
+  # secret and the App private key live in Vault and reach the Secret named by
+  # secretName (keys client-secret and private-key) through ESO.
+  # allow: comma-separated org:<org>, team:<org>/<team-slug>, user:<login>; any match admits.
+  # adminTeams: comma-separated <org>/<team-slug> whose members get the admin role.
+  # Membership is checked at sign-in and at every token refresh, cached for cacheTTL.
+  github:
+    clientId: ""
+    callbackUrl: ""
+    allow: ""
+    adminTeams: SupportTools/admins
+    cacheTTL: 1m
+    secretName: ""
+
+  # Local admin account for when GitHub is down. Its password form is at /login/local.
+  breakGlassUser: ""
+
+  # Comma-separated <username>:<project>. A listed local user may only open, use
+  # and close its own terminal tabs on that project (the CI smoke user).
+  restrictedUsers: ""
 
   # JWT secret (inline - not recommended for production)
   jwtSecret: ""

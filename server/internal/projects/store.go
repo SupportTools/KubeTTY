@@ -140,7 +140,7 @@ INSERT INTO kubetty_projects (
     dind_enabled, gui_enabled, gui_resolution, gui_vnc_port,
     env_vars,
     image_repository, image_tag,
-    status
+    status, github_repo
 )
 VALUES (
     $1, $2, $3, $4, $5,
@@ -152,7 +152,7 @@ VALUES (
     $21, $22, $23, $24,
     $25,
     $26, $27,
-    'pending'
+    'pending', $28
 )
 RETURNING id, name, display_name, description, icon,
     target_namespace, service_name, session_id, user_name,
@@ -165,7 +165,7 @@ RETURNING id, name, display_name, description, icon,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at,
-    pending_changes, drift_checked_at, image_auto_follow`
+    pending_changes, drift_checked_at, image_auto_follow, COALESCE(github_repo, '')`
 
 	row := s.pool.QueryRow(ctx, stmt,
 		id, req.Name, req.DisplayName, nullIfEmpty(req.Description), nullIfEmpty(req.Icon),
@@ -177,6 +177,7 @@ RETURNING id, name, display_name, description, icon,
 		*req.DinDEnabled, *req.GUIEnabled, req.GUIResolution, req.GUIVNCPort,
 		envVars,
 		req.ImageRepository, req.ImageTag,
+		nullIfEmpty(req.GitHubRepo),
 	)
 
 	return scanProject(row)
@@ -195,7 +196,7 @@ SELECT id, name, display_name, description, icon,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at,
-    pending_changes, drift_checked_at, image_auto_follow
+    pending_changes, drift_checked_at, image_auto_follow, COALESCE(github_repo, '')
 FROM kubetty_projects
 WHERE id = $1 AND deleted_at IS NULL`
 
@@ -216,7 +217,7 @@ SELECT id, name, display_name, description, icon,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at,
-    pending_changes, drift_checked_at, image_auto_follow
+    pending_changes, drift_checked_at, image_auto_follow, COALESCE(github_repo, '')
 FROM kubetty_projects
 WHERE name = $1 AND deleted_at IS NULL`
 
@@ -237,7 +238,7 @@ SELECT id, name, display_name, description, icon,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at,
-    pending_changes, drift_checked_at, image_auto_follow
+    pending_changes, drift_checked_at, image_auto_follow, COALESCE(github_repo, '')
 FROM kubetty_projects
 WHERE service_name = $1 AND deleted_at IS NULL`
 
@@ -258,7 +259,7 @@ SELECT id, name, display_name, description, icon,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at,
-    pending_changes, drift_checked_at, image_auto_follow
+    pending_changes, drift_checked_at, image_auto_follow, COALESCE(github_repo, '')
 FROM kubetty_projects
 WHERE 1=1`
 
@@ -338,7 +339,7 @@ SELECT id, name, display_name, description, icon,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at,
-    pending_changes, drift_checked_at, image_auto_follow
+    pending_changes, drift_checked_at, image_auto_follow, COALESCE(github_repo, '')
 FROM kubetty_projects
 WHERE status = ANY($1)`
 
@@ -464,6 +465,11 @@ func (s *PGStore) Update(ctx context.Context, id uuid.UUID, req UpdateProjectReq
 		args = append(args, *req.ImageTag)
 		argN++
 	}
+	if req.GitHubRepo != nil {
+		setClauses = append(setClauses, fmt.Sprintf("github_repo = $%d", argN))
+		args = append(args, nullIfEmpty(*req.GitHubRepo))
+		argN++
+	}
 	if req.ImageAutoFollow != nil {
 		setClauses = append(setClauses, fmt.Sprintf("image_auto_follow = $%d", argN))
 		args = append(args, *req.ImageAutoFollow)
@@ -490,7 +496,7 @@ RETURNING id, name, display_name, description, icon,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at,
-    pending_changes, drift_checked_at, image_auto_follow`,
+    pending_changes, drift_checked_at, image_auto_follow, COALESCE(github_repo, '')`,
 		joinStrings(setClauses, ", "))
 
 	row := s.pool.QueryRow(ctx, query, args...)
@@ -673,7 +679,7 @@ func scanProject(row pgx.Row) (*Project, error) {
 		&p.ImageRepository, &p.ImageTag,
 		&p.Status, &statusMessage, &p.LastHealthCheck, &p.LastActivity, &podIP, &p.Paused,
 		&p.CreatedAt, &p.UpdatedAt, &p.DeletedAt,
-		&pendingChanges, &p.DriftCheckedAt, &p.ImageAutoFollow,
+		&pendingChanges, &p.DriftCheckedAt, &p.ImageAutoFollow, &p.GitHubRepo,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -742,7 +748,7 @@ func scanProjectRows(rows pgx.Rows) (*Project, error) {
 		&p.ImageRepository, &p.ImageTag,
 		&p.Status, &statusMessage, &p.LastHealthCheck, &p.LastActivity, &podIP, &p.Paused,
 		&p.CreatedAt, &p.UpdatedAt, &p.DeletedAt,
-		&pendingChanges, &p.DriftCheckedAt, &p.ImageAutoFollow,
+		&pendingChanges, &p.DriftCheckedAt, &p.ImageAutoFollow, &p.GitHubRepo,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan project row: %w", err)
@@ -849,7 +855,7 @@ SELECT id, name, display_name, description, icon,
     image_repository, image_tag,
     status, status_message, last_health_check, last_activity, pod_ip, paused,
     created_at, updated_at, deleted_at,
-    pending_changes, drift_checked_at, image_auto_follow
+    pending_changes, drift_checked_at, image_auto_follow, COALESCE(github_repo, '')
 FROM kubetty_projects
 WHERE status = 'failed' AND updated_at >= $1 AND deleted_at IS NULL
 ORDER BY updated_at DESC

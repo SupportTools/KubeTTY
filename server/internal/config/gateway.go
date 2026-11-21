@@ -40,6 +40,16 @@ type GatewayConfig struct {
 	// AUTH_ACCESS_SERVICE_TOKENS, comma-separated <client_id>=<username>:<project>.
 	// Access service tokens mapped to restricted users (CI smoke, cluster-services-1534).
 	AccessServiceTokens string
+	// GitHub App sign-in (AUTH_MODE=github)
+	GitHubClientID     string
+	GitHubClientSecret string
+	GitHubPrivateKey   string
+	GitHubCallbackURL  string
+	GitHubAllow        string        // AUTH_GITHUB_ALLOW
+	GitHubAdminTeams   string        // AUTH_GITHUB_ADMIN_TEAMS, comma-separated org/team
+	GitHubCacheTTL     time.Duration // AUTH_GITHUB_CACHE_TTL
+	BreakGlassUser     string        // AUTH_BREAKGLASS_USER, the local admin account
+	RestrictedUsers    string        // AUTH_RESTRICTED_USERS, comma-separated <username>:<project>
 	// Metrics collection configuration
 	MetricsEnabled  bool          // Enable tab resource metrics collection (default: true)
 	MetricsInterval time.Duration // Metrics collection interval (default: 15s)
@@ -136,6 +146,15 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 		AccessAUDs:          splitCSV(os.Getenv("CF_ACCESS_AUD")),
 		AccessUsers:         os.Getenv("AUTH_ACCESS_USERS"),
 		AccessServiceTokens: os.Getenv("AUTH_ACCESS_SERVICE_TOKENS"),
+		GitHubClientID:      strings.TrimSpace(os.Getenv("AUTH_GITHUB_CLIENT_ID")),
+		GitHubClientSecret:  strings.TrimSpace(os.Getenv("AUTH_GITHUB_CLIENT_SECRET")),
+		GitHubPrivateKey:    os.Getenv("AUTH_GITHUB_PRIVATE_KEY"),
+		GitHubCallbackURL:   strings.TrimSpace(os.Getenv("AUTH_GITHUB_CALLBACK_URL")),
+		GitHubAllow:         os.Getenv("AUTH_GITHUB_ALLOW"),
+		GitHubAdminTeams:    sharedconfig.GetEnv("AUTH_GITHUB_ADMIN_TEAMS", "SupportTools/admins"),
+		GitHubCacheTTL:      sharedconfig.GetEnvDuration("AUTH_GITHUB_CACHE_TTL", time.Minute),
+		BreakGlassUser:      strings.TrimSpace(os.Getenv("AUTH_BREAKGLASS_USER")),
+		RestrictedUsers:     os.Getenv("AUTH_RESTRICTED_USERS"),
 		MetricsEnabled:      sharedconfig.GetEnvBool("METRICS_ENABLED", true),
 		MetricsInterval:     sharedconfig.GetEnvDuration("METRICS_INTERVAL", 15*time.Second),
 		Controller: ControllerConfig{
@@ -192,6 +211,12 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 		AccessTeamDomain: cfg.AccessTeamDomain,
 		AccessAUDs:       cfg.AccessAUDs,
 		AccessUsers:      cfg.AccessUsers,
+
+		GitHubClientID:     cfg.GitHubClientID,
+		GitHubClientSecret: cfg.GitHubClientSecret,
+		GitHubPrivateKey:   cfg.GitHubPrivateKey,
+		GitHubCallbackURL:  cfg.GitHubCallbackURL,
+		GitHubAllow:        cfg.GitHubAllow,
 	}
 	if err := sharedconfig.ValidateAuth(authCfg); err != nil {
 		return cfg, err

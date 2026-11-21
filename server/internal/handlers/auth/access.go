@@ -158,7 +158,7 @@ func (m *AccessUserMapper) LookupServiceToken(ctx context.Context, clientID stri
 	if err != nil {
 		return nil, err
 	}
-	return &User{ID: u.ID, Username: u.Username, Restricted: true, AllowedProject: p.Project}, nil
+	return &User{ID: u.ID, Username: u.Username, Role: auth.RoleUser, Restricted: true, AllowedProject: p.Project}, nil
 }
 
 // Lookup returns the KubeTTY user for email.
@@ -201,7 +201,7 @@ func (m *AccessUserMapper) loadOrCreate(ctx context.Context, key, username strin
 		return nil, ErrAccessUserNotAllowed
 	}
 	_ = m.store.UpdateLastLogin(ctx, u.ID, m.now())
-	out := &User{ID: u.ID, Username: u.Username}
+	out := &User{ID: u.ID, Username: u.Username, Role: auth.RoleAdmin}
 	m.mu.Lock()
 	m.cached[key] = accessCacheEntry{user: out, at: m.now()}
 	m.mu.Unlock()
@@ -277,37 +277,6 @@ func AuthenticateAccess(r *http.Request, v *cfaccess.Verifier, m *AccessUserMapp
 	return user, 0, nil
 }
 
-// RestrictedRouteAllowed is the complete list of what a restricted service
-// principal (the CI smoke token, cluster-services-1534) may do: read who it
-// is, list/open its own terminal tabs, attach to one, and close one. The
-// handlers still enforce tab ownership and the allowed project; everything
-// else (admin API, settings, project list, events, VNC, session logs,
-// force-takeover) is refused here.
-func RestrictedRouteAllowed(r *http.Request) bool {
-	p := r.URL.Path
-	switch {
-	case r.Method == http.MethodGet && (p == "/api/auth/me" || p == "/api/auth/refresh"):
-		return true
-	case p == "/api/tabs" && (r.Method == http.MethodGet || r.Method == http.MethodPost):
-		return true
-	case r.Method == http.MethodDelete && strings.HasPrefix(p, "/api/tabs/"):
-		id := strings.TrimPrefix(p, "/api/tabs/")
-		return id != "" && !strings.Contains(id, "/") && id != "reorder" && id != "events"
-	case r.Method == http.MethodGet && p == "/ws":
-		return r.URL.Query().Get("force") == ""
-	}
-	return false
-}
-
-// RestrictedTabRequestAllowed checks a POST /api/tabs body for a restricted
-// principal: a terminal (not GUI) tab on its one project, created new.
-func RestrictedTabRequestAllowed(u *User, projectID string, guiMode bool, openAction string) bool {
-	if u == nil || !u.Restricted {
-		return true
-	}
-	return u.AllowedProject != "" && projectID == u.AllowedProject && !guiMode && (openAction == "" || openAction == "create_new")
-}
-
 // WriteAccessFailure writes the JSON error for a refused request.
 func WriteAccessFailure(w http.ResponseWriter, status int) {
 	msg := "authentication required: sign in through Cloudflare Access"
@@ -372,17 +341,5 @@ func NewPasswordsRetiredHandler() http.HandlerFunc {
 			"error":    "local passwords are retired; sign in through Cloudflare Access",
 			"authMode": AuthModeCloudflareAccess,
 		})
-	}
-}
-
-// NewAuthConfigHandler is the public /api/auth/config endpoint the UI reads
-// to choose between the password form and the Access sign-in screen.
-func NewAuthConfigHandler(mode string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		body := map[string]any{"authMode": mode}
-		if mode == AuthModeCloudflareAccess {
-			body["logoutUrl"] = AccessLogoutURL
-		}
-		_ = util.WriteJSON(w, http.StatusOK, body)
 	}
 }

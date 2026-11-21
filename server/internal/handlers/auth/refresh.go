@@ -117,20 +117,25 @@ func NewAuthRefreshHandler(cfg AuthConfig, authMgr *auth.Manager) http.HandlerFu
 				"client_ip": r.RemoteAddr,
 			}).Warn("auth/refresh: refresh failed")
 
-			// Clear auth cookies on refresh failure to remove stale tokens
-			ClearAuthCookies(w, cfg)
-
 			switch {
 			case errors.Is(err, auth.ErrTokenExpired):
+				ClearAuthCookies(w, cfg)
 				_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token expired", ""))
 			case errors.Is(err, auth.ErrTokenRevoked):
+				ClearAuthCookies(w, cfg)
 				_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token revoked", ""))
-			case errors.Is(err, auth.ErrRefreshTokenNotFound):
+			case errors.Is(err, auth.ErrRefreshTokenNotFound), errors.Is(err, auth.ErrTokenMalformed):
+				ClearAuthCookies(w, cfg)
 				_ = apierrors.WriteError(w, apierrors.Unauthorized("refresh token invalid", ""))
 			case errors.Is(err, auth.ErrInvalidCredentials):
+				ClearAuthCookies(w, cfg)
 				_ = apierrors.WriteError(w, apierrors.Unauthorized("account disabled", ""))
+			case errors.Is(err, auth.ErrNotAdmitted):
+				ClearAuthCookies(w, cfg)
+				_ = apierrors.WriteError(w, apierrors.Unauthorized("account no longer allowed", ""))
 			default:
-				_ = apierrors.WriteError(w, apierrors.InternalServerError("token refresh failed", ""))
+				// Keep the cookies: a database or GitHub outage should not sign people out.
+				_ = apierrors.WriteError(w, apierrors.ServiceUnavailable("token refresh failed, try again", ""))
 			}
 			return
 		}

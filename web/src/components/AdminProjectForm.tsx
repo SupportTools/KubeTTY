@@ -2,6 +2,7 @@ import { useState, useCallback, FormEvent } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { CreateProjectRequest } from "../types";
 import { parseErrorResponse } from "../utils/errorParser";
+import { isValidGitHubRepo } from "../utils/githubRepo";
 
 interface Props {
   onClose: () => void;
@@ -73,6 +74,10 @@ const AdminProjectForm = ({ onClose, onSuccess }: Props) => {
       }
       if (!form.userName.trim()) {
         setError("Username is required");
+        return;
+      }
+      if (!isValidGitHubRepo((form.githubRepo || "").trim())) {
+        setError("GitHub repository must be owner/name");
         return;
       }
 
@@ -158,6 +163,19 @@ const AdminProjectForm = ({ onClose, onSuccess }: Props) => {
                   onChange={(e) => updateField("userName", e.target.value)}
                 />
                 <span className="field-hint">The user who will own this project</span>
+              </div>
+              <div className="form-field">
+                <label>GitHub repository</label>
+                <input
+                  type="text"
+                  value={form.githubRepo || ""}
+                  placeholder="owner/name"
+                  disabled={submitting}
+                  onChange={(e) => updateField("githubRepo", e.target.value)}
+                />
+                <span className="field-hint">
+                  With GitHub sign-in, people with write access to this repository can open the terminal. Empty means admins only.
+                </span>
               </div>
               <div className="form-field">
                 <label>Description</label>

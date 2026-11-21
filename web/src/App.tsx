@@ -54,7 +54,7 @@ const playBellSound = () => {
 };
 
 const App = () => {
-  const { authState, user: authUser, authFetch } = useAuth();
+  const { authState, user: authUser, authFetch, isAdmin } = useAuth();
 
   const [toast, setToast] = useState<string | null>(null);
   const [gatewayState, setGatewayState] = useState<GatewayState>("unknown");
@@ -397,7 +397,7 @@ const App = () => {
       </div>
       {authenticated && (
         <div className="session-info">
-          {showGatewayUI && (
+          {showGatewayUI && isAdmin && (
             <>
               <button className="admin-link" onClick={() => setDashboardOpen(true)}>
                 Dashboard

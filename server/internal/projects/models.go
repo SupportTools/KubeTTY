@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -113,6 +114,10 @@ type Project struct {
 	// (cluster-services-1376). False pins the project on ImageTag.
 	ImageAutoFollow bool `json:"imageAutoFollow"`
 
+	// GitHubRepo ("owner/name"): with AUTH_MODE=github, users with write or higher
+	// on this repo may open the project's terminal. Empty means admins only.
+	GitHubRepo string `json:"githubRepo,omitempty"`
+
 	// Status tracking
 	Status          ProjectStatus `json:"status"`
 	StatusMessage   string        `json:"statusMessage,omitempty"`
@@ -215,6 +220,8 @@ type CreateProjectRequest struct {
 	// Image configuration
 	ImageRepository string `json:"imageRepository,omitempty"`
 	ImageTag        string `json:"imageTag,omitempty"`
+
+	GitHubRepo string `json:"githubRepo,omitempty"`
 }
 
 // UpdateProjectRequest represents a request to update an existing project.
@@ -260,6 +267,9 @@ type UpdateProjectRequest struct {
 	// ImageAutoFollow sets the per-project auto-follow opt-out
 	// (cluster-services-1376). It is a setting only and never rolls the pod.
 	ImageAutoFollow *bool `json:"imageAutoFollow,omitempty"`
+
+	// GitHubRepo replaces the project's repo; "" clears it.
+	GitHubRepo *string `json:"githubRepo,omitempty"`
 
 	// ApplyMode is not stored. It tells the admin handler whether to roll the
 	// pod now ("now", the default) or leave it for the next restart
@@ -382,4 +392,11 @@ func (r *CreateProjectRequest) ApplyDefaults() {
 	if r.EnvVars == nil {
 		r.EnvVars = map[string]string{}
 	}
+}
+
+var githubRepoPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$`)
+
+// ValidGitHubRepo reports whether repo is empty or an "owner/name" GitHub repository.
+func ValidGitHubRepo(repo string) bool {
+	return repo == "" || githubRepoPattern.MatchString(repo)
 }

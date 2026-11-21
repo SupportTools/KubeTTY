@@ -162,6 +162,7 @@ export interface AdminProject {
   targetNamespace: string;
   sessionId: string;
   userName: string;
+  githubRepo?: string;
   cpuRequest: string;
   cpuLimit: string;
   memoryRequest: string;
@@ -211,6 +212,7 @@ export interface CreateProjectRequest {
   description?: string;
   icon?: string;
   userName: string;
+  githubRepo?: string;
   cpuRequest?: string;
   cpuLimit?: string;
   memoryRequest?: string;
@@ -240,6 +242,7 @@ export interface CreateProjectRequest {
 }
 
 export interface UpdateProjectRequest {
+  githubRepo?: string;
   displayName?: string;
   description?: string;
   icon?: string;

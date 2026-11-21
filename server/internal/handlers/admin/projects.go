@@ -28,6 +28,8 @@ type ProjectHandlers struct {
 }
 
 // NewProjectHandlers creates a new ProjectHandlers instance.
+const githubRepoError = "githubRepo must be empty or owner/name"
+
 func NewProjectHandlers(store projects.Store, ctrl *controller.Controller, recommendedImageTag string) *ProjectHandlers {
 	return &ProjectHandlers{
 		store:               store,
@@ -164,6 +166,11 @@ func (h *ProjectHandlers) CreateProject(w http.ResponseWriter, r *http.Request) 
 		_ = apierrors.WriteError(w, apierrors.BadRequest("userName is required", ""))
 		return
 	}
+	req.GitHubRepo = strings.TrimSpace(req.GitHubRepo)
+	if !projects.ValidGitHubRepo(req.GitHubRepo) {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(githubRepoError, ""))
+		return
+	}
 	if req.SessionMode != "" && !req.SessionMode.IsValid() {
 		_ = apierrors.WriteError(w, apierrors.BadRequest(
 			"sessionMode must be one of: exclusive_takeover, shared_concurrent, independent_shells", ""))
@@ -261,6 +268,14 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
 		return
+	}
+	if req.GitHubRepo != nil {
+		repo := strings.TrimSpace(*req.GitHubRepo)
+		if !projects.ValidGitHubRepo(repo) {
+			_ = apierrors.WriteError(w, apierrors.BadRequest(githubRepoError, ""))
+			return
+		}
+		req.GitHubRepo = &repo
 	}
 	if req.SessionMode != nil && !req.SessionMode.IsValid() {
 		_ = apierrors.WriteError(w, apierrors.BadRequest(

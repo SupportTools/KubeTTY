@@ -115,6 +115,11 @@ func NewAuthLoginHandler(cfg AuthConfig, authMgr *auth.Manager, authStore auth.S
 
 		meta := TokenMetadataFromRequest(r)
 		tokens, err := authMgr.IssueTokenPair(r.Context(), user, meta)
+		if errors.Is(err, auth.ErrNotAdmitted) {
+			log.WithField("username", user.Username).Warn("auth/login: password sign-in refused for this account")
+			_ = apierrors.WriteError(w, apierrors.Forbidden("this account cannot sign in with a password", ""))
+			return
+		}
 		if err != nil {
 			_ = apierrors.WriteError(w, apierrors.InternalServerError("token generation failed", ""))
 			return

@@ -64,6 +64,13 @@ type AuthConfig struct {
 	AccessTeamDomain string
 	AccessAUDs       []string
 	AccessUsers      string
+
+	// GitHub App sign-in (Mode "github", gateway only).
+	GitHubClientID     string
+	GitHubClientSecret string
+	GitHubPrivateKey   string
+	GitHubCallbackURL  string
+	GitHubAllow        string
 }
 
 // IsEnabled returns true if authentication is enabled (mode is not "" or "disabled").

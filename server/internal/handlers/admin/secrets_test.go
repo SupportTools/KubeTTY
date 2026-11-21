@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func secretsHandlers(t *testing.T, data map[string]string, esoOwned bool) (*ProjectHandlers, *projects.Project) {
+func secretsHandlers(t *testing.T, data map[string]string, esoManaged bool) (*ProjectHandlers, *projects.Project) {
 	t.Helper()
 	store := newMockProjectStore()
 	p := runningProject()
@@ -28,8 +28,8 @@ func secretsHandlers(t *testing.T, data map[string]string, esoOwned bool) (*Proj
 	for k, v := range data {
 		secret.Data[k] = []byte(v)
 	}
-	if esoOwned {
-		secret.OwnerReferences = []metav1.OwnerReference{{APIVersion: "external-secrets.io/v1", Kind: "ExternalSecret", Name: secret.Name, UID: "eso-uid"}}
+	if esoManaged {
+		secret.Labels = map[string]string{"reconcile.external-secrets.io/managed": "true"}
 	}
 
 	client := fake.NewSimpleClientset(secret)
@@ -61,7 +61,7 @@ func TestGetProjectSecrets_ReturnsKeyNamesOnly(t *testing.T) {
 	}
 }
 
-func TestUpdateProjectSecrets_ExternalSecretOwnedIs409(t *testing.T) {
+func TestUpdateProjectSecrets_ESOManagedIs409(t *testing.T) {
 	h, p := secretsHandlers(t, map[string]string{"OPENAI_API_KEY": "from-vault"}, true)
 
 	rec := callSecrets(h, p, http.MethodPut, `{"secrets": {"OPENAI_API_KEY": "hand-edit"}}`)

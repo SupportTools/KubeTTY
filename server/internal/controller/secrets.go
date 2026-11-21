@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/sirupsen/logrus"
 	"github.com/supporttools/KubeTTY/server/internal/projects"
@@ -14,8 +13,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// ErrSecretExternallyManaged means an ExternalSecret owns the project env Secret, so KubeTTY must not write it.
-var ErrSecretExternallyManaged = errors.New("project env secret is owned by an ExternalSecret")
+// ErrSecretExternallyManaged means ESO manages the project env Secret, so KubeTTY must not write it.
+var ErrSecretExternallyManaged = errors.New("project env secret is managed by an ExternalSecret")
 
 // ErrUnknownSecretKey means a request asked to keep a value the Secret does not have.
 var ErrUnknownSecretKey = errors.New("no existing value to keep")
@@ -26,13 +25,11 @@ type ProjectSecrets struct {
 	ExternallyManaged bool     `json:"externallyManaged"`
 }
 
-func ownedByExternalSecret(s *corev1.Secret) bool {
-	for _, ref := range s.OwnerReferences {
-		if ref.Kind == "ExternalSecret" && strings.HasPrefix(ref.APIVersion, "external-secrets.io/") {
-			return true
-		}
-	}
-	return false
+// ESO labels every Secret it manages, but leaves it unowned while the Vault entry is empty.
+const esoManagedLabel = "reconcile.external-secrets.io/managed"
+
+func managedByExternalSecret(s *corev1.Secret) bool {
+	return s.Labels[esoManagedLabel] == "true"
 }
 
 // GetProjectSecrets returns the key names of the project env Secret, never its values.
@@ -51,7 +48,7 @@ func (c *Controller) GetProjectSecrets(ctx context.Context, p *projects.Project)
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	return ProjectSecrets{Keys: keys, ExternallyManaged: ownedByExternalSecret(secret)}, nil
+	return ProjectSecrets{Keys: keys, ExternallyManaged: managedByExternalSecret(secret)}, nil
 }
 
 // UpdateProjectSecrets makes the env Secret hold exactly the given keys, then restarts the project.
@@ -66,7 +63,7 @@ func (c *Controller) UpdateProjectSecrets(ctx context.Context, p *projects.Proje
 		return fmt.Errorf("failed to get secret: %w", err)
 	}
 	found := err == nil
-	if found && ownedByExternalSecret(existing) {
+	if found && managedByExternalSecret(existing) {
 		return ErrSecretExternallyManaged
 	}
 
@@ -105,7 +102,7 @@ func (c *Controller) UpdateProjectSecrets(ctx context.Context, p *projects.Proje
 	return c.RestartProject(ctx, p)
 }
 
-// deleteEnvSecret deletes the project env Secret unless an ExternalSecret owns it.
+// deleteEnvSecret deletes the project env Secret unless ESO manages it; removing its ExternalSecret is ESO's job.
 func (c *Controller) deleteEnvSecret(ctx context.Context, p *projects.Project, logger *logrus.Entry) {
 	cfg := c.cfg.ResourceConfig
 	client := c.clientset.CoreV1().Secrets(cfg.Namespace)
@@ -118,8 +115,8 @@ func (c *Controller) deleteEnvSecret(ctx context.Context, p *projects.Project, l
 	case err != nil:
 		logger.WithError(err).Warn("Failed to get env secret; not deleting it")
 		return
-	case ownedByExternalSecret(secret):
-		logger.Info("Keeping env secret: its ExternalSecret owns it")
+	case managedByExternalSecret(secret):
+		logger.Info("Keeping env secret: an ExternalSecret manages it")
 		return
 	}
 

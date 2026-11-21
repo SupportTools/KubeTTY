@@ -50,14 +50,25 @@ func (f secretsFixture) envSecret(t *testing.T) *corev1.Secret {
 	return s
 }
 
-func (f secretsFixture) setEnvSecret(t *testing.T, data map[string]string, esoOwned bool) {
+type esoState int
+
+const (
+	notESO    esoState = iota
+	esoSynced          // Vault has data: ESO sets the label and an ownerRef
+	esoEmpty           // Vault entry is empty: ESO sets the label only (seen live on kubetty-project-test-env)
+)
+
+func (f secretsFixture) setEnvSecret(t *testing.T, data map[string]string, eso esoState) {
 	t.Helper()
 	s := f.envSecret(t)
 	s.Data = map[string][]byte{}
 	for k, v := range data {
 		s.Data[k] = []byte(v)
 	}
-	if esoOwned {
+	if eso != notESO {
+		s.Labels[esoManagedLabel] = "true"
+	}
+	if eso == esoSynced {
 		controller := true
 		s.OwnerReferences = []metav1.OwnerReference{{
 			APIVersion: "external-secrets.io/v1",
@@ -94,7 +105,7 @@ func strPtr(s string) *string { return &s }
 
 func TestGetProjectSecrets_ReturnsSortedKeyNamesWithoutValues(t *testing.T) {
 	f := newSecretsFixture(t, "secrets-get")
-	f.setEnvSecret(t, map[string]string{"OPENAI_API_KEY": "sk-value-one", "ANTHROPIC_BASE_URL": "http://value-two"}, false)
+	f.setEnvSecret(t, map[string]string{"OPENAI_API_KEY": "sk-value-one", "ANTHROPIC_BASE_URL": "http://value-two"}, notESO)
 
 	got, err := f.ctrl.GetProjectSecrets(context.Background(), f.project)
 	if err != nil {
@@ -130,22 +141,34 @@ func TestGetProjectSecrets_MissingSecretIsEmptyList(t *testing.T) {
 	}
 }
 
-func TestGetProjectSecrets_ReportsExternalSecretOwnership(t *testing.T) {
-	f := newSecretsFixture(t, "secrets-eso-get")
-	f.setEnvSecret(t, map[string]string{"OPENAI_API_KEY": "from-vault"}, true)
+func TestGetProjectSecrets_ReportsESOManagement(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		eso  esoState
+		data map[string]string
+		want ProjectSecrets
+	}{
+		{"synced", esoSynced, map[string]string{"OPENAI_API_KEY": "from-vault"}, ProjectSecrets{Keys: []string{"OPENAI_API_KEY"}, ExternallyManaged: true}},
+		{"empty Vault entry", esoEmpty, nil, ProjectSecrets{Keys: []string{}, ExternallyManaged: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSecretsFixture(t, "secrets-eso-get")
+			f.setEnvSecret(t, tc.data, tc.eso)
 
-	got, err := f.ctrl.GetProjectSecrets(context.Background(), f.project)
-	if err != nil {
-		t.Fatalf("GetProjectSecrets: %v", err)
-	}
-	if !got.ExternallyManaged || !reflect.DeepEqual(got.Keys, []string{"OPENAI_API_KEY"}) {
-		t.Errorf("GetProjectSecrets = %+v, want externally managed with key OPENAI_API_KEY", got)
+			got, err := f.ctrl.GetProjectSecrets(context.Background(), f.project)
+			if err != nil {
+				t.Fatalf("GetProjectSecrets: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("GetProjectSecrets = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 
 func TestUpdateProjectSecrets_KeepsReplacesAddsAndDropsKeys(t *testing.T) {
 	f := newSecretsFixture(t, "secrets-update")
-	f.setEnvSecret(t, map[string]string{"KEEP": "kept", "CHANGE": "old", "DROP": "gone"}, false)
+	f.setEnvSecret(t, map[string]string{"KEEP": "kept", "CHANGE": "old", "DROP": "gone"}, notESO)
 
 	err := f.ctrl.UpdateProjectSecrets(context.Background(), f.project, map[string]*string{
 		"KEEP":   nil,
@@ -186,7 +209,7 @@ func TestUpdateProjectSecrets_CreatesMissingSecret(t *testing.T) {
 
 func TestUpdateProjectSecrets_KeepingAnUnknownKeyFails(t *testing.T) {
 	f := newSecretsFixture(t, "secrets-unknown")
-	f.setEnvSecret(t, map[string]string{"KEEP": "kept"}, false)
+	f.setEnvSecret(t, map[string]string{"KEEP": "kept"}, notESO)
 
 	err := f.ctrl.UpdateProjectSecrets(context.Background(), f.project, map[string]*string{"KEEP": nil, "TYPO": nil})
 	if !errors.Is(err, ErrUnknownSecretKey) || !strings.Contains(err.Error(), "TYPO") {
@@ -197,34 +220,46 @@ func TestUpdateProjectSecrets_KeepingAnUnknownKeyFails(t *testing.T) {
 	}
 }
 
-func TestUpdateProjectSecrets_RefusesExternalSecretOwnedSecret(t *testing.T) {
-	f := newSecretsFixture(t, "secrets-eso-put")
-	f.setEnvSecret(t, map[string]string{"OPENAI_API_KEY": "from-vault"}, true)
+func TestUpdateProjectSecrets_RefusesESOManagedSecret(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		eso  esoState
+		data map[string]string
+	}{
+		{"synced", esoSynced, map[string]string{"OPENAI_API_KEY": "from-vault"}},
+		{"empty Vault entry", esoEmpty, map[string]string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSecretsFixture(t, "secrets-eso-put")
+			f.setEnvSecret(t, tc.data, tc.eso)
 
-	err := f.ctrl.UpdateProjectSecrets(context.Background(), f.project, map[string]*string{"OPENAI_API_KEY": strPtr("hand-edit")})
-	if !errors.Is(err, ErrSecretExternallyManaged) {
-		t.Fatalf("err = %v, want ErrSecretExternallyManaged", err)
-	}
-	if got := dataOf(f.envSecret(t)); got["OPENAI_API_KEY"] != "from-vault" {
-		t.Errorf("ESO-owned secret was modified: %v", got)
-	}
-	if f.restarted(t) {
-		t.Error("project restarted although the update was refused")
+			err := f.ctrl.UpdateProjectSecrets(context.Background(), f.project, map[string]*string{"OPENAI_API_KEY": strPtr("hand-edit")})
+			if !errors.Is(err, ErrSecretExternallyManaged) {
+				t.Fatalf("err = %v, want ErrSecretExternallyManaged", err)
+			}
+			if got := dataOf(f.envSecret(t)); !reflect.DeepEqual(got, tc.data) {
+				t.Errorf("ESO-managed secret was modified: %v, want %v", got, tc.data)
+			}
+			if f.restarted(t) {
+				t.Error("project restarted although the update was refused")
+			}
+		})
 	}
 }
 
-func TestHandleDeleting_EnvSecretOwnership(t *testing.T) {
+func TestHandleDeleting_KeepsESOManagedEnvSecret(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		esoOwned bool
+		eso      esoState
 		wantKept bool
 	}{
-		{name: "plain secret is deleted", esoOwned: false, wantKept: false},
-		{name: "ExternalSecret-owned secret is kept", esoOwned: true, wantKept: true},
+		{name: "plain secret is deleted", eso: notESO, wantKept: false},
+		{name: "synced ESO secret is kept", eso: esoSynced, wantKept: true},
+		{name: "empty-Vault ESO secret is kept", eso: esoEmpty, wantKept: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSecretsFixture(t, "secrets-delete")
-			f.setEnvSecret(t, map[string]string{"K": "v"}, tc.esoOwned)
+			f.setEnvSecret(t, map[string]string{"K": "v"}, tc.eso)
 
 			f.project.Status = projects.StatusDeleting
 			if err := f.ctrl.handleDeleting(context.Background(), f.project); err != nil {

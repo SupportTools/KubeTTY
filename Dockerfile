@@ -233,7 +233,6 @@ RUN apt-get update && apt-get install -y --only-upgrade --no-install-recommends 
 # - x11vnc: VNC server exposing Xvfb display
 # - xfce4: Lightweight desktop environment
 # - dbus-x11: D-Bus for desktop integration
-# - firefox: Mozilla Firefox browser
 # - imagemagick: For wallpaper generation with project info
 RUN apt-get update && apt-get install -y --no-install-recommends \
     supervisor \
@@ -244,7 +243,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     thunar \
     dbus-x11 \
     fonts-dejavu-core \
-    firefox \
     imagemagick \
     && rm -rf /var/lib/apt/lists/*
 

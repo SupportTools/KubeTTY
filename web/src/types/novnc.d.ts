@@ -5,7 +5,7 @@
  * The RFB class is the main interface for connecting to VNC servers.
  */
 
-declare module '@novnc/novnc/lib/rfb' {
+declare module '@novnc/novnc' {
   /**
    * Options for RFB constructor
    */

@@ -189,3 +189,30 @@ describe("AdminProjectDetail secrets", () => {
     expect(screen.queryByLabelText("Value for OPENAI_API_KEY")).toBeNull();
   });
 });
+
+describe("AdminProjectDetail secrets keep button", () => {
+  beforeEach(() => {
+    authFetch.mockReset();
+  });
+
+  it("offers Keep stored only for keys that already have a stored value", async () => {
+    const p = project();
+    authFetch.mockImplementation((url: string) =>
+      url.endsWith("/secrets")
+        ? okJSON({ keys: ["OPENAI_API_KEY"], externallyManaged: false })
+        : okJSON({ project: p, deployment: { exists: true, replicas: 1, readyReplicas: 1, availableReplicas: 1, pods: [] } })
+    );
+    render(<AdminProjectDetail project={p} onClose={() => {}} onRefresh={() => {}} onDelete={() => {}} onRestart={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Manage Secrets" }));
+
+    fireEvent.change(await screen.findByLabelText("Value for OPENAI_API_KEY"), { target: { value: "sk-new" } });
+    fireEvent.change(screen.getByLabelText("Key:"), { target: { value: "NEW_KEY" } });
+    fireEvent.change(screen.getByLabelText("Value:"), { target: { value: "v" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add Secret" }));
+
+    expect(await screen.findByLabelText("Value for NEW_KEY")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Keep stored" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Keep stored" }));
+    expect(screen.getByLabelText("Value for OPENAI_API_KEY")).toHaveProperty("placeholder", "Unchanged");
+  });
+});

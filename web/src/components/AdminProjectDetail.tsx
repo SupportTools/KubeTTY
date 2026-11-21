@@ -73,6 +73,7 @@ const AdminProjectDetail = ({
   const [showSecretsModal, setShowSecretsModal] = useState(false);
   // null means "keep the stored value": the API returns key names only.
   const [secrets, setSecrets] = useState<Record<string, string | null>>({});
+  const [storedSecretKeys, setStoredSecretKeys] = useState<string[]>([]);
   const [secretsExternallyManaged, setSecretsExternallyManaged] = useState(false);
   const [loadingSecrets, setLoadingSecrets] = useState(false);
   const [savingSecrets, setSavingSecrets] = useState(false);
@@ -325,6 +326,7 @@ const AdminProjectDetail = ({
       }
       const data: { keys?: string[]; externallyManaged?: boolean } = await res.json();
       setSecrets(Object.fromEntries((data.keys || []).map((key) => [key, null])));
+      setStoredSecretKeys(data.keys || []);
       setSecretsExternallyManaged(Boolean(data.externallyManaged));
       setShowSecretValues({});
       setNewSecretKey("");
@@ -1220,7 +1222,7 @@ const AdminProjectDetail = ({
                             )}
                             {!secretsExternallyManaged && (
                               <td>
-                                {value !== null && (
+                                {value !== null && storedSecretKeys.includes(key) && (
                                   <button
                                     type="button"
                                     className="secondary"

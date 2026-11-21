@@ -401,7 +401,7 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh set -eux; \
     mv /tmp/k9s /usr/local/bin/k9s; \
     sh /tmp/fetch.sh /tmp/terraform.zip e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b https://releases.hashicorp.com/terraform/1.17.2/terraform_1.17.2_linux_amd64.zip; \
     unzip /tmp/terraform.zip terraform -d /usr/local/bin; \
-    sh /tmp/fetch.sh /tmp/awscliv2.zip f1b67518c009e9deb94152aaba5cc015e80af6b0630a7931d3662df42b5f568e https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.41.1.zip; \
+    sh /tmp/fetch.sh /tmp/awscliv2.zip 2db6f80635cf554a506f3b3c1d070937b87526193fb37e0ac80c8705398219da https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.41.2.zip; \
     unzip /tmp/awscliv2.zip -d /tmp; \
     /tmp/aws/install --update; \
     rm -rf /tmp/kustomize.tgz /tmp/helmfile.tgz /tmp/k9s.tgz /tmp/terraform.zip /tmp/awscliv2.zip /tmp/aws

@@ -527,6 +527,10 @@ jobs:
             echo "Rolled dev back to revision ${PREV}"
           fi
 
+      - name: Remove kubeconfig
+        if: always()
+        run: rm -f "${KUBECONFIG:-$RUNNER_TEMP/kubeconfig}"
+
   # Stage 6a2: functional smoke against DEV (cluster-services-1534, operator decision 2026-11-19
   # "Automated smoke test before prod"). The dev health gate only proves the database answers;
   # this proves a real Access-authenticated session works end to end, through Cloudflare exactly
@@ -629,6 +633,10 @@ jobs:
             helm rollback kubetty-gateway "$PREV" -n "$DEV_NAMESPACE" --wait --timeout="${DEPLOY_TIMEOUT}"
             echo "Rolled dev back to revision ${PREV}; production deploy is skipped"
           fi
+
+      - name: Remove kubeconfig
+        if: always()
+        run: rm -f "${KUBECONFIG:-$RUNNER_TEMP/kubeconfig}"
 
   # Stage 6b: Deploy to Production
   deploy-production:
@@ -952,3 +960,7 @@ jobs:
           echo ""
           echo "=== Recent Events ==="
           kubectl get events -n kubetty-gateway-prd --sort-by='.lastTimestamp' | tail -30
+
+      - name: Remove kubeconfig
+        if: always()
+        run: rm -f "${KUBECONFIG:-$RUNNER_TEMP/kubeconfig}"

@@ -189,7 +189,10 @@ auth:
   issuer: "kubetty"
   accessTTL: 15m
   refreshTTL: 7d
+  restrictedUsers: ""   # <username>:<project>,... (dev: kubetty-smoke:test-project)
 ```
+
+Create users and set passwords with `kubetty-authuser` inside the gateway pod (see README, "Creating Users").
 
 ### Gateway Mode Configuration
 

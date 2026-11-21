@@ -36,7 +36,7 @@ ARG NODE_IMAGE=harbor.support.tools/dockerhub/library/node:20-bullseye@sha256:c0
 ARG GO_IMAGE=harbor.support.tools/dockerhub/library/golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0
 ARG RUNTIME_IMAGE=harbor.support.tools/dockerhub/library/ubuntu:22.04@sha256:9abcaffc92a5279fff3a6a41635c0800ea33e528425fb389658806476e7defde
 
-ARG GO_VERSION=1.24.3
+ARG GO_VERSION=1.26.11
 ARG NODE_MAJOR=20
 ARG KUBECTL_VERSION=v1.35.10
 ARG HELM_VERSION=v3.22.1
@@ -382,8 +382,8 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.s
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
 
 # Install Go toolchain for on-cluster development.
-# sha256 = go.dev's published checksum for go1.24.3.linux-amd64.tar.gz (GO_VERSION and this move together).
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/go.tgz 3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8 \
+# sha256 = go.dev's published checksum for go1.26.11.linux-amd64.tar.gz (GO_VERSION and this move together).
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/go.tgz 9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec \
       https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm /tmp/go.tgz

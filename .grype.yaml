@@ -1722,10 +1722,6 @@ ignore:
     package:
       name: "golang.org/x/crypto"
       version: "v0.17.0"
-  - vulnerability: "GHSA-5cgq-3rg8-m6cv"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.23.0"
   - vulnerability: "GHSA-89gr-r52h-f8rx"
     package:
       name: "golang.org/x/crypto"
@@ -1743,10 +1739,6 @@ ignore:
       name: "golang.org/x/crypto"
       version: "v0.23.0"
   - vulnerability: "GHSA-vgwf-h737-ff37"
-    package:
-      name: "golang.org/x/crypto"
-      version: "v0.23.0"
-  - vulnerability: "GHSA-x527-x647-q7gg"
     package:
       name: "golang.org/x/crypto"
       version: "v0.23.0"
@@ -1938,22 +1930,6 @@ ignore:
     package:
       name: "stdlib"
       version: "go1.22.6"
-  - vulnerability: "GO-2025-3563"
-    package:
-      name: "stdlib"
-      version: "go1.23.1"
-  - vulnerability: "GO-2026-4337"
-    package:
-      name: "stdlib"
-      version: "go1.23.1"
-  - vulnerability: "GO-2026-6604"
-    package:
-      name: "stdlib"
-      version: "go1.23.1"
-  - vulnerability: "GO-2026-6612"
-    package:
-      name: "stdlib"
-      version: "go1.23.1"
   - vulnerability: "GO-2026-4337"
     package:
       name: "stdlib"

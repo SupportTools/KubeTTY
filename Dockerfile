@@ -38,7 +38,7 @@ ARG RUNTIME_IMAGE=harbor.support.tools/dockerhub/library/ubuntu:22.04@sha256:9ab
 
 ARG GO_VERSION=1.24.3
 ARG NODE_MAJOR=20
-ARG KUBECTL_VERSION=v1.30.3
+ARG KUBECTL_VERSION=v1.35.10
 ARG HELM_VERSION=v3.22.1
 ARG YQ_VERSION=v4.54.3
 ARG KUBETTY_VERSION=dev
@@ -165,7 +165,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fzf \
     gdb \
     git \
-    git-lfs \
     gnupg2 \
     htop \
     httpie \
@@ -217,7 +216,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Browser automation dependencies (fonts for proper rendering)
     fonts-liberation \
     fonts-noto-color-emoji \
-    && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
 # USN-8944-1: ca-certificates 20260816ubuntu0.22.04.1 drops the compromised eMudhra emSign
@@ -401,7 +399,7 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh set -eux; \
     sh /tmp/fetch.sh /tmp/helmfile.tgz 1f19ced8adb0cdf2350e94ca598cf64e390d8c21d0d9b4bdc1c9f246d4591c9d https://github.com/helmfile/helmfile/releases/download/v1.8.4/helmfile_1.8.4_linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/helmfile.tgz; \
     mv /tmp/helmfile /usr/local/bin/helmfile; \
-    sh /tmp/fetch.sh /tmp/k9s.tgz d62611d9be2c35b782a765e98421500196acbf8be844cd3d9e32d4fa7846da05 https://github.com/derailed/k9s/releases/download/v0.32.4/k9s_Linux_amd64.tar.gz; \
+    sh /tmp/fetch.sh /tmp/k9s.tgz c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7 https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/k9s.tgz; \
     mv /tmp/k9s /usr/local/bin/k9s; \
     sh /tmp/fetch.sh /tmp/terraform.zip e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b https://releases.hashicorp.com/terraform/1.17.2/terraform_1.17.2_linux_amd64.zip; \
@@ -412,7 +410,7 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh set -eux; \
     rm -rf /tmp/kustomize.tgz /tmp/helmfile.tgz /tmp/k9s.tgz /tmp/terraform.zip /tmp/awscliv2.zip /tmp/aws
 
 # Install kubectl.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kubectl abd83816bd236b266c3643e6c852b446f068fe260f3296af1a25b550854ec7e5 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kubectl c49a28f1f4efc4d475ed05f47f2ce8e563bf7bef69ed77fe1b924ea6d83b6327 \
       https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl k8s/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl \
     && chmod +x /usr/local/bin/kubectl
 
@@ -434,8 +432,15 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.s
     && tar -C /usr/local/bin --strip-components=2 -xzf /tmp/gh.tgz gh_2.105.0_linux_amd64/bin/gh \
     && rm -f /tmp/gh.tgz
 
+# Git LFS release build; Ubuntu 22.04's git-lfs 3.0.2 is built with Go 1.18.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/git-lfs.tgz e72cf723a4a660438862282e8aecf3885fc8123e88bfcad534cf6b941a354b75 \
+      https://github.com/git-lfs/git-lfs/releases/download/v3.8.1/git-lfs-linux-amd64-v3.8.1.tar.gz \
+    && tar -C /usr/local/bin --strip-components=1 -xzf /tmp/git-lfs.tgz git-lfs-3.8.1/git-lfs \
+    && rm -f /tmp/git-lfs.tgz \
+    && git lfs install --system
+
 # Install Kind (Kubernetes in Docker) for spinning up temporary k8s clusters.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kind b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kind aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 \
     && chmod +x /usr/local/bin/kind
 
 # Install k3d (k3s in Docker) for lightweight temporary k8s clusters.
@@ -467,14 +472,14 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.s
     && chmod +x /usr/local/bin/telepresence
 
 # Install kubectx and kubens for quick context/namespace switching.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/kubectx.tgz a2247ffd23e79f89abdd0e8173379d7172511f02a3f63c9936d3824e0dd60648 https://github.com/ahmetb/kubectx/releases/download/v0.9.5/kubectx_v0.9.5_linux_x86_64.tar.gz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/kubectx.tgz 08e031c54fbffb3f100e904e4eae94bba2730fedf4869921fda79e4d7a8f5d4c https://github.com/ahmetb/kubectx/releases/download/v0.11.0/kubectx_v0.11.0_linux_x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/kubectx.tgz kubectx \
-    && sh /tmp/fetch.sh /tmp/kubens.tgz acc1a9c7f6b722fbe5fad25dd0e784a7335d18436b9c414ab996629e82702cba https://github.com/ahmetb/kubectx/releases/download/v0.9.5/kubens_v0.9.5_linux_x86_64.tar.gz \
+    && sh /tmp/fetch.sh /tmp/kubens.tgz 326c021c7b35468ed9a187b361198d0f22ae32828139c65eb6670c0d8301cc09 https://github.com/ahmetb/kubectx/releases/download/v0.11.0/kubens_v0.11.0_linux_x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/kubens.tgz kubens \
     && rm -f /tmp/kubectx.tgz /tmp/kubens.tgz
 
 # Install stern for multi-pod log tailing.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/stern.tgz ea1bf1f1dddf1fd4b9971148582e88c637884ac1592dcba71838a6a42277708b https://github.com/stern/stern/releases/download/v1.30.0/stern_1.30.0_linux_amd64.tar.gz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/stern.tgz 03729b01a8fcfab25f6ea53389bd38bc37400ff86d90cd2dcda541f248cf843e https://github.com/stern/stern/releases/download/v1.35.0/stern_1.35.0_linux_amd64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/stern.tgz stern \
     && rm -f /tmp/stern.tgz
 
@@ -484,7 +489,7 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.s
     && chmod +x /usr/local/bin/devspace
 
 # Install ctlptl for declarative local cluster management.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/ctlptl.tgz 98a55d8bfd61ab95b72e2e81d21e540d704065ce90d7972cd4ed8600dd091905 https://github.com/tilt-dev/ctlptl/releases/download/v0.8.28/ctlptl.0.8.28.linux.x86_64.tar.gz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/ctlptl.tgz a83ad620d04a526fd4186adfab9e757e8d59b9becf9b1244a9416dfaabec610f https://github.com/tilt-dev/ctlptl/releases/download/v0.9.6/ctlptl.0.9.6.linux.x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/ctlptl.tgz ctlptl \
     && rm -f /tmp/ctlptl.tgz
 

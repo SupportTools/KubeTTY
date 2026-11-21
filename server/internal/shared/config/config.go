@@ -33,10 +33,9 @@ func (c DatabaseConfig) ConnString() string {
 // AuthConfig contains authentication and JWT token settings.
 // These settings control user authentication, token generation, and cookie behavior.
 type AuthConfig struct {
-	// Mode specifies the authentication mode: "disabled", "local", "cloudflare-access"
+	// Mode specifies the authentication mode: "disabled", "local"
 	// - "disabled" or "": No authentication required
 	// - "local": Username/password authentication with JWT tokens
-	// - "cloudflare-access": trust only a verified Cloudflare Access JWT (no passwords)
 	Mode string
 
 	// JWTSecret is the secret key used to sign JWT tokens
@@ -56,14 +55,6 @@ type AuthConfig struct {
 	// CookieSecure controls whether cookies require HTTPS
 	// Should be true in production, false for local development
 	CookieSecure bool
-
-	// Cloudflare Access SSO (Mode "cloudflare-access", gateway only, cluster-services-1299).
-	// AccessTeamDomain is https://<team>.cloudflareaccess.com (the JWT issuer),
-	// AccessAUDs the Access application AUD tag(s) for this environment, and
-	// AccessUsers the raw AUTH_ACCESS_USERS email=username allowlist.
-	AccessTeamDomain string
-	AccessAUDs       []string
-	AccessUsers      string
 }
 
 // IsEnabled returns true if authentication is enabled (mode is not "" or "disabled").

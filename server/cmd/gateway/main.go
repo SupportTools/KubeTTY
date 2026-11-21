@@ -31,7 +31,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
-	"github.com/supporttools/KubeTTY/server/internal/auth/cfaccess"
 	"github.com/supporttools/KubeTTY/server/internal/config"
 	"github.com/supporttools/KubeTTY/server/internal/controller"
 	gatewayconfig "github.com/supporttools/KubeTTY/server/internal/gateway/config"
@@ -94,7 +93,7 @@ func main() {
 	}
 
 	// Security warning when authentication is disabled
-	if cfg.AuthMode != "local" && cfg.AuthMode != handlers_auth.AuthModeCloudflareAccess {
+	if cfg.AuthMode != "local" {
 		log.WithFields(log.Fields{
 			"auth_mode": cfg.AuthMode,
 		}).Warn("gateway/main: SECURITY WARNING - authentication is DISABLED, all routes are unprotected")
@@ -123,12 +122,10 @@ func main() {
 	defer store.Close()
 
 	var (
-		authStore      *auth.PGStore
-		authManager    *auth.Manager
-		accessVerifier *cfaccess.Verifier
-		accessMapper   *handlers_auth.AccessUserMapper
+		authStore   *auth.PGStore
+		authManager *auth.Manager
 	)
-	if cfg.AuthMode == "local" || cfg.AuthMode == handlers_auth.AuthModeCloudflareAccess {
+	if cfg.AuthMode == "local" {
 		authPoolConfig, err := cfg.ConnConfig()
 		if err != nil {
 			log.WithFields(log.Fields{
@@ -141,8 +138,6 @@ func main() {
 				"error": err.Error(),
 			}).Fatal("gateway/main: failed to connect to auth store")
 		}
-	}
-	if cfg.AuthMode == "local" {
 		authManager, err = auth.NewManager(authStore, cfg.AuthJWTSecret, cfg.AuthIssuer, cfg.AuthAccessTTL, cfg.AuthRefreshTTL)
 		if err != nil {
 			log.WithFields(log.Fields{
@@ -152,32 +147,9 @@ func main() {
 			}).Fatal("gateway/main: failed to initialize auth manager")
 		}
 	}
-	if cfg.AuthMode == handlers_auth.AuthModeCloudflareAccess {
-		// Cloudflare Access SSO (cluster-services-1299): every protected route
-		// requires a verified Cf-Access-Jwt-Assertion JWT; local passwords are retired.
-		users, err := handlers_auth.ParseAccessUsers(cfg.AccessUsers)
-		if err != nil {
-			log.WithFields(log.Fields{"error": err.Error()}).Fatal("gateway/main: invalid AUTH_ACCESS_USERS")
-		}
-		accessVerifier, err = cfaccess.New(cfaccess.Config{TeamDomain: cfg.AccessTeamDomain, Audiences: cfg.AccessAUDs})
-		if err != nil {
-			log.WithFields(log.Fields{"error": err.Error()}).Fatal("gateway/main: invalid Cloudflare Access configuration")
-		}
-		if err := accessVerifier.Prefetch(ctx); err != nil {
-			// Not fatal: Verify refetches on demand. Requests fail closed (503) until it succeeds.
-			log.WithFields(log.Fields{"error": err.Error(), "certs_url": accessVerifier.CertsURL()}).Warn("gateway/main: could not prefetch Cloudflare Access signing keys")
-		}
-		services, err := handlers_auth.ParseAccessServiceTokens(cfg.AccessServiceTokens, users)
-		if err != nil {
-			log.WithFields(log.Fields{"error": err.Error()}).Fatal("gateway/main: invalid AUTH_ACCESS_SERVICE_TOKENS")
-		}
-		accessMapper = handlers_auth.NewAccessUserMapper(authStore, users).WithServiceTokens(services)
-		log.WithFields(log.Fields{
-			"team_domain":    cfg.AccessTeamDomain,
-			"audiences":      len(cfg.AccessAUDs),
-			"users":          len(users),
-			"service_tokens": len(services),
-		}).Info("gateway/main: authentication via Cloudflare Access JWT (local passwords retired)")
+	restrictedUsers, err := handlers_auth.ParseRestrictedUsers(cfg.AuthRestrictedUsers)
+	if err != nil {
+		log.WithFields(log.Fields{"error": err.Error()}).Fatal("gateway/main: invalid AUTH_RESTRICTED_USERS")
 	}
 	if authStore != nil {
 		defer authStore.Close()
@@ -519,15 +491,13 @@ func main() {
 	appMetrics := metrics.NewAppMetrics()
 
 	srv := &server{
-		cfg:            cfg,
-		store:          store,
-		authStore:      authStore,
-		authMgr:        authManager,
-		accessVerifier: accessVerifier,
-		accessMapper:   accessMapper,
-		projectStore:   projectStore,
-		projCtrl:       projCtrl,
-		leaderElector:  leaderElector,
+		cfg:           cfg,
+		store:         store,
+		authStore:     authStore,
+		authMgr:       authManager,
+		projectStore:  projectStore,
+		projCtrl:      projCtrl,
+		leaderElector: leaderElector,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -571,12 +541,9 @@ func main() {
 	mux.HandleFunc("/api/version", handleVersion)
 
 	// Auth middleware
-	requireAuth := handlers_auth.RequireAuth(srv.cfg, srv.authMgr)
-	if srv.ssoEnabled() {
-		requireAuth = handlers_auth.RequireAccess(srv.accessVerifier, srv.accessMapper)
-	}
-	// Public: tells the UI whether to show the password form or the Access sign-in screen.
-	mux.Handle("/api/auth/config", handlers_auth.NewAuthConfigHandler(cfg.AuthMode))
+	authenticate := handlers_auth.RequireAuth(srv.cfg, srv.authMgr)
+	restrict := handlers_auth.RestrictUsers(restrictedUsers)
+	requireAuth := func(next http.Handler) http.Handler { return authenticate(restrict(next)) }
 
 	// Admin API handlers for project management (requires auth when enabled)
 	if srv.projectStore != nil && srv.projCtrl != nil {
@@ -661,23 +628,13 @@ func main() {
 		mux.HandleFunc("GET /api/admin/settings/{category}/{key}/history", settingsHandlers.GetSettingHistory)
 	}
 
-	if srv.ssoEnabled() {
-		// Cloudflare Access SSO: the Access JWT is the session. me/refresh report the
-		// verified user; the local-password endpoints are retired (410).
-		mux.Handle("/api/auth/me", requireAuth(handlers_auth.NewAccessSessionHandler()))
-		mux.Handle("/api/auth/refresh", requireAuth(handlers_auth.NewAccessSessionHandler()))
-		mux.Handle("/api/auth/logout", handlers_auth.NewAccessLogoutHandler())
-		mux.Handle("/api/auth/login", handlers_auth.NewPasswordsRetiredHandler())
-		mux.Handle("/api/auth/password", handlers_auth.NewPasswordsRetiredHandler())
-	} else if srv.authEnabled() {
+	if srv.authEnabled() {
 		mux.Handle("/api/auth/login", handlers_auth.NewAuthLoginHandler(srv.cfg, srv.authMgr, srv.authStore))
 		mux.Handle("/api/auth/refresh", handlers_auth.NewAuthRefreshHandler(srv.cfg, srv.authMgr))
 		mux.Handle("/api/auth/logout", requireAuth(handlers_auth.NewAuthLogoutHandler(srv.cfg, srv.authMgr, srv.authStore)))
 		mux.Handle("/api/auth/me", requireAuth(handlers_auth.NewAuthMeHandler()))
 		mux.Handle("/api/auth/password", requireAuth(handlers_auth.NewAuthPasswordChangeHandler(srv.cfg, srv.authMgr)))
-	}
 
-	if srv.authEnabled() {
 		// Session handlers (extracted)
 		mux.Handle("/session/logs", requireAuth(handlers_session.NewSessionLogsHandler(srv.store, srv)))
 
@@ -729,24 +686,21 @@ func main() {
 }
 
 type server struct {
-	cfg       config.GatewayConfig
-	store     sessions.Store
-	authStore auth.Store
-	authMgr   *auth.Manager
-	// Cloudflare Access SSO (AUTH_MODE=cloudflare-access)
-	accessVerifier *cfaccess.Verifier
-	accessMapper   *handlers_auth.AccessUserMapper
-	projectStore   *projects.PGStore
-	projCtrl       *controller.Controller
-	leaderElector  *leaderelection.LeaderElector
-	upgrader       websocket.Upgrader
-	uiFS           fs.FS
-	appMetrics     *metrics.AppMetrics
-	tabManager     *manager.Manager
-	tabStore       tabs.Store
-	tabSubsMu      sync.Mutex
-	tabSubs        map[string]map[chan []byte]struct{}
-	shutdownCtx    context.Context // Context cancelled on graceful shutdown
+	cfg           config.GatewayConfig
+	store         sessions.Store
+	authStore     auth.Store
+	authMgr       *auth.Manager
+	projectStore  *projects.PGStore
+	projCtrl      *controller.Controller
+	leaderElector *leaderelection.LeaderElector
+	upgrader      websocket.Upgrader
+	uiFS          fs.FS
+	appMetrics    *metrics.AppMetrics
+	tabManager    *manager.Manager
+	tabStore      tabs.Store
+	tabSubsMu     sync.Mutex
+	tabSubs       map[string]map[chan []byte]struct{}
+	shutdownCtx   context.Context // Context cancelled on graceful shutdown
 }
 
 type contextKey string
@@ -785,15 +739,7 @@ func (s *server) staticHandler() http.Handler {
 }
 
 func (s *server) authEnabled() bool {
-	if s == nil {
-		return false
-	}
-	return (s.cfg.AuthMode == "local" && s.authMgr != nil) || s.ssoEnabled()
-}
-
-// ssoEnabled reports Cloudflare Access SSO mode (cluster-services-1299).
-func (s *server) ssoEnabled() bool {
-	return s != nil && s.cfg.AuthMode == handlers_auth.AuthModeCloudflareAccess && s.accessVerifier != nil && s.accessMapper != nil
+	return s != nil && s.cfg.AuthMode == "local" && s.authMgr != nil
 }
 
 // ObserveStore implements handlers_session.StoreMetricsObserver interface
@@ -990,10 +936,8 @@ func (s *server) handleTabs(w http.ResponseWriter, r *http.Request) {
 			apierrors.WriteError(w, apierrors.BadRequest("projectId is required", ""))
 			return
 		}
-		// A restricted service principal (CI smoke token) may only open a new
-		// terminal tab on its one project (cluster-services-1534).
 		if !handlers_auth.RestrictedTabRequestAllowed(handlers_auth.UserFromContext(r.Context()), req.ProjectID, req.GUIMode, req.OpenAction) {
-			apierrors.WriteError(w, apierrors.Forbidden("this service principal may not open that tab", ""))
+			apierrors.WriteError(w, apierrors.Forbidden("this user may not open that tab", ""))
 			return
 		}
 

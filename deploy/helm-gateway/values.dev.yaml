@@ -17,19 +17,11 @@ env:
   # Use semantic version for recommended upgrades (not floating tags like "dev")
   RECOMMENDED_IMAGE_TAG: "v0.8.0"
 
-# Authentication - Cloudflare Access SSO (cluster-services-1299), dev's own
-# Access app "owner (google): kubetty-dev.support.tools" (separate AUD from prod).
+# Authentication - enabled for dev testing
 auth:
-  mode: cloudflare-access
-  access:
-    teamDomain: https://supporttools.cloudflareaccess.com
-    aud: 58a946efbe8d7ae906c73b639b039600469a4f6fdd41d4562ff747c669cf48a8
-    users: mmattox@mattoxengineering.com=mmattox
-    # CI smoke (cluster-services-1534): the kubetty-dev-only Access service token (cluster-services
-    # network/cloudflare-tunnels/terraform access.tf kubetty_dev_smoke; secret in Vault
-    # secret/kubetty/ci-smoke-access-token) maps to the restricted user kubetty-smoke, which may only
-    # open/close its own terminal tab on test-project. <client_id>=<username>:<project>. Never in prd.
-    serviceTokens: 74db6234cffb8c621b7e6616192f810d.access=kubetty-smoke:test-project
+  mode: local
+  # CI smoke user; its password is in Vault secret/kubetty/ci-smoke-user.
+  restrictedUsers: kubetty-smoke:test-project
   jwtSecretSecret:
     name: "kubetty-gateway-dev-auth"
     key: jwt-secret
@@ -37,7 +29,7 @@ auth:
   accessTTL: 1h
   refreshTTL: 720h
   cookieDomain: ""
-  cookieSecure: false
+  cookieSecure: true   # public over HTTPS
 
 # Dev project catalog - empty for dev (uses dynamic projects only)
 catalog:

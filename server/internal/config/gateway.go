@@ -33,13 +33,8 @@ type GatewayConfig struct {
 	AuthIssuer         string
 	AuthCookieDomain   string
 	AuthCookieSecure   bool
-	// Cloudflare Access SSO (AUTH_MODE=cloudflare-access, cluster-services-1299)
-	AccessTeamDomain string   // CF_ACCESS_TEAM_DOMAIN, e.g. https://supporttools.cloudflareaccess.com
-	AccessAUDs       []string // CF_ACCESS_AUD, comma-separated Access application AUD tag(s)
-	AccessUsers      string   // AUTH_ACCESS_USERS, comma-separated email=username allowlist
-	// AUTH_ACCESS_SERVICE_TOKENS, comma-separated <client_id>=<username>:<project>.
-	// Access service tokens mapped to restricted users (CI smoke, cluster-services-1534).
-	AccessServiceTokens string
+	// AUTH_RESTRICTED_USERS, comma-separated <username>:<project>
+	AuthRestrictedUsers string
 	// Metrics collection configuration
 	MetricsEnabled  bool          // Enable tab resource metrics collection (default: true)
 	MetricsInterval time.Duration // Metrics collection interval (default: 15s)
@@ -132,10 +127,7 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 		AuthIssuer:          sharedconfig.GetEnv("AUTH_ISSUER", "kubetty"),
 		AuthCookieDomain:    os.Getenv("AUTH_COOKIE_DOMAIN"),
 		AuthCookieSecure:    sharedconfig.GetEnvBool("AUTH_COOKIE_SECURE", true),
-		AccessTeamDomain:    strings.TrimRight(strings.TrimSpace(os.Getenv("CF_ACCESS_TEAM_DOMAIN")), "/"),
-		AccessAUDs:          splitCSV(os.Getenv("CF_ACCESS_AUD")),
-		AccessUsers:         os.Getenv("AUTH_ACCESS_USERS"),
-		AccessServiceTokens: os.Getenv("AUTH_ACCESS_SERVICE_TOKENS"),
+		AuthRestrictedUsers: os.Getenv("AUTH_RESTRICTED_USERS"),
 		MetricsEnabled:      sharedconfig.GetEnvBool("METRICS_ENABLED", true),
 		MetricsInterval:     sharedconfig.GetEnvDuration("METRICS_INTERVAL", 15*time.Second),
 		Controller: ControllerConfig{
@@ -188,10 +180,6 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 		RefreshTTL:   cfg.AuthRefreshTTL,
 		CookieDomain: cfg.AuthCookieDomain,
 		CookieSecure: cfg.AuthCookieSecure,
-
-		AccessTeamDomain: cfg.AccessTeamDomain,
-		AccessAUDs:       cfg.AccessAUDs,
-		AccessUsers:      cfg.AccessUsers,
 	}
 	if err := sharedconfig.ValidateAuth(authCfg); err != nil {
 		return cfg, err
@@ -254,15 +242,4 @@ func parseExecMode(s string) ExecModeType {
 	default:
 		return ExecModeWebSocket
 	}
-}
-
-// splitCSV splits a comma-separated list, dropping empty items.
-func splitCSV(v string) []string {
-	var out []string
-	for _, item := range strings.Split(v, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			out = append(out, item)
-		}
-	}
-	return out
 }

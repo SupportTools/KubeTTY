@@ -12,12 +12,6 @@ import { parseErrorResponse } from "../utils/errorParser";
 export type AuthState = "checking" | "authenticated" | "unauthenticated";
 export type AuthUser = { id: string; username: string } | null;
 
-// Server auth mode. "cloudflare-access" (cluster-services-1299): identity comes
-// from the Cloudflare Access JWT; there is no password form and logout goes to
-// Cloudflare's /cdn-cgi/access/logout.
-export const AUTH_MODE_CLOUDFLARE_ACCESS = "cloudflare-access";
-export const ACCESS_LOGOUT_URL = "/cdn-cgi/access/logout";
-
 interface AuthContextType {
   authState: AuthState;
   user: AuthUser;
@@ -25,7 +19,6 @@ interface AuthContextType {
   logout: () => Promise<void>;
   authFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   refreshToken: () => Promise<boolean>;
-  authMode?: string | null;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -57,7 +50,6 @@ const authLog = (message: string, ...args: unknown[]) => {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [user, setUser] = useState<AuthUser>(null);
-  const [authMode, setAuthMode] = useState<string | null>(null);
   const refreshTimerRef = useRef<number | null>(null);
   const isRefreshingRef = useRef(false);
   const lastVisibilityRefreshRef = useRef<number>(0);
@@ -197,11 +189,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Logout function
   const logout = useCallback(async (): Promise<void> => {
     clearRefreshTimer();
-    if (authMode === AUTH_MODE_CLOUDFLARE_ACCESS) {
-      // The Access session is the login: end it at Cloudflare.
-      window.location.assign(ACCESS_LOGOUT_URL);
-      return;
-    }
     try {
       await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
     } catch {
@@ -209,7 +196,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     setAuthState("unauthenticated");
     setUser(null);
-  }, [clearRefreshTimer, authMode]);
+  }, [clearRefreshTimer]);
 
   // Initial auth check on mount
   useEffect(() => {
@@ -220,10 +207,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const res = await fetch("/api/auth/me", { credentials: "include" });
         authLog(`probeAuth: /api/auth/me returned status=${res.status}`);
-        const headerMode = res.headers?.get?.("X-Kubetty-Auth-Mode");
-        if (headerMode && !cancelled) {
-          setAuthMode(headerMode);
-        }
 
         // If auth endpoints don't exist, assume authenticated (disabled auth mode)
         if (res.status === 404 || res.status === 405) {
@@ -260,9 +243,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const data = await res.json();
         authLog(`probeAuth: authenticated as ${data.user?.username}`);
         if (!cancelled) {
-          if (typeof data.authMode === "string") {
-            setAuthMode(data.authMode);
-          }
           setAuthState("authenticated");
           setUser(data.user);
 
@@ -321,8 +301,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         login,
         logout,
         authFetch,
-        refreshToken,
-        authMode
+        refreshToken
       }}
     >
       {children}

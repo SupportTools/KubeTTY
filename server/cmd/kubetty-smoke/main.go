@@ -1,23 +1,22 @@
 // Command kubetty-smoke is the functional gate between the dev and production
-// deploys (cluster-services-1534, operator decision 2026-11-19 "Automated
-// smoke test before prod"). It goes through Cloudflare Access with the dev-only
-// CI service token, exactly like a browser goes through Access with Google:
+// deploys. It logs in with a local KubeTTY password, like a browser does:
 //
-//  1. GET /api/auth/me is 200 as the expected smoke user (cloudflare-access mode);
+//  1. POST /api/auth/login, then GET /api/auth/me is 200 as the smoke user;
 //  2. the smoke user is really restricted (/api/projects and the admin API are 403);
 //  3. it opens a throwaway terminal tab on its project, attaches to /ws, runs
 //     printf with shell arithmetic and waits for the evaluated output (proves a
 //     live shell answers, not just an echo of the input);
-//  4. it closes the tab (DELETE 204) and checks it is gone.
+//  4. it closes the tab (DELETE 204), checks it is gone, and logs out.
 //
 // Configuration (environment):
 //
 //	KUBETTY_SMOKE_URL        base URL, e.g. https://kubetty-dev.support.tools
-//	CF_ACCESS_CLIENT_ID      Access service token client ID
-//	CF_ACCESS_CLIENT_SECRET  Access service token client secret
-//	KUBETTY_SMOKE_USER       expected username (default kubetty-smoke)
+//	KUBETTY_SMOKE_USER       username (default kubetty-smoke)
+//	KUBETTY_SMOKE_PASSWORD   password
 //	KUBETTY_SMOKE_PROJECT    project to open the tab on (default test-project)
 //	KUBETTY_SMOKE_TIMEOUT    overall timeout (default 3m)
+//	CF_ACCESS_CLIENT_ID      optional Cloudflare Access service token, sent only
+//	CF_ACCESS_CLIENT_SECRET  while Access still fronts the site
 //
 // Exit status 0 only if every check passed. Secrets are never printed.
 package main
@@ -41,25 +40,27 @@ import (
 )
 
 type config struct {
-	BaseURL      string
-	ClientID     string
-	ClientSecret string
-	User         string
-	Project      string
-	Timeout      time.Duration
+	BaseURL            string
+	User               string
+	Password           string
+	Project            string
+	AccessClientID     string
+	AccessClientSecret string
+	Timeout            time.Duration
 	// AttachRetry is how long to wait for shell output before resending the command.
 	AttachRetry time.Duration
 }
 
 func main() {
 	cfg := config{
-		BaseURL:      strings.TrimRight(os.Getenv("KUBETTY_SMOKE_URL"), "/"),
-		ClientID:     os.Getenv("CF_ACCESS_CLIENT_ID"),
-		ClientSecret: os.Getenv("CF_ACCESS_CLIENT_SECRET"),
-		User:         envOr("KUBETTY_SMOKE_USER", "kubetty-smoke"),
-		Project:      envOr("KUBETTY_SMOKE_PROJECT", "test-project"),
-		Timeout:      3 * time.Minute,
-		AttachRetry:  15 * time.Second,
+		BaseURL:            strings.TrimRight(os.Getenv("KUBETTY_SMOKE_URL"), "/"),
+		User:               envOr("KUBETTY_SMOKE_USER", "kubetty-smoke"),
+		Password:           os.Getenv("KUBETTY_SMOKE_PASSWORD"),
+		Project:            envOr("KUBETTY_SMOKE_PROJECT", "test-project"),
+		AccessClientID:     os.Getenv("CF_ACCESS_CLIENT_ID"),
+		AccessClientSecret: os.Getenv("CF_ACCESS_CLIENT_SECRET"),
+		Timeout:            3 * time.Minute,
+		AttachRetry:        15 * time.Second,
 	}
 	if v := os.Getenv("KUBETTY_SMOKE_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -87,29 +88,38 @@ func fail(err error) {
 	os.Exit(1)
 }
 
+const refreshCookieName = "kubetty_refresh"
+
 type client struct {
-	cfg  config
-	http *http.Client
+	cfg          config
+	http         *http.Client
+	accessToken  string
+	refreshToken string
 }
 
 func (c *client) headers(h http.Header) {
-	h.Set("CF-Access-Client-Id", c.cfg.ClientID)
-	h.Set("CF-Access-Client-Secret", c.cfg.ClientSecret)
-	h.Set("User-Agent", "kubetty-smoke/1 (cluster-services-1534)")
+	if c.cfg.AccessClientID != "" {
+		h.Set("CF-Access-Client-Id", c.cfg.AccessClientID)
+		h.Set("CF-Access-Client-Secret", c.cfg.AccessClientSecret)
+	}
+	if c.accessToken != "" {
+		h.Set("Authorization", "Bearer "+c.accessToken)
+	}
+	h.Set("User-Agent", "kubetty-smoke/2")
 }
 
-func (c *client) do(ctx context.Context, method, path string, body any) (int, []byte, error) {
+func (c *client) send(ctx context.Context, method, path string, body any) (*http.Response, []byte, error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return 0, nil, err
+			return nil, nil, err
 		}
 		rdr = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.cfg.BaseURL+path, rdr)
 	if err != nil {
-		return 0, nil, err
+		return nil, nil, err
 	}
 	c.headers(req.Header)
 	if body != nil {
@@ -117,28 +127,87 @@ func (c *client) do(ctx context.Context, method, path string, body any) (int, []
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%s %s: %w", method, path, err)
+		return nil, nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp, b, nil
+}
+
+func (c *client) do(ctx context.Context, method, path string, body any) (int, []byte, error) {
+	resp, b, err := c.send(ctx, method, path, body)
+	if err != nil {
+		return 0, nil, err
+	}
 	return resp.StatusCode, b, nil
 }
 
-func run(ctx context.Context, cfg config, out io.Writer) error {
-	if cfg.BaseURL == "" || cfg.ClientID == "" || cfg.ClientSecret == "" {
-		return errors.New("KUBETTY_SMOKE_URL, CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET are required")
+func (c *client) login(ctx context.Context) error {
+	resp, body, err := c.send(ctx, http.MethodPost, "/api/auth/login", map[string]string{"username": c.cfg.User, "password": c.cfg.Password})
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("POST /api/auth/login = %d (want 200): %s", resp.StatusCode, snippet(body))
+	}
+	var l struct {
+		AccessToken string `json:"accessToken"`
+	}
+	if err := json.Unmarshal(body, &l); err != nil || l.AccessToken == "" {
+		return errors.New("POST /api/auth/login: no access token in the response")
+	}
+	c.accessToken = l.AccessToken
+	for _, ck := range resp.Cookies() {
+		if ck.Name == refreshCookieName {
+			c.refreshToken = ck.Value
+		}
+	}
+	return nil
+}
+
+func (c *client) logout(ctx context.Context) error {
+	code, body, err := c.do(ctx, http.MethodPost, "/api/auth/logout", map[string]string{"refreshToken": c.refreshToken})
+	if err != nil {
+		return err
+	}
+	if code != http.StatusNoContent {
+		return fmt.Errorf("POST /api/auth/logout = %d (want 204): %s", code, snippet(body))
+	}
+	return nil
+}
+
+func run(ctx context.Context, cfg config, out io.Writer) (err error) {
+	if cfg.BaseURL == "" || cfg.User == "" || cfg.Password == "" {
+		return errors.New("KUBETTY_SMOKE_URL, KUBETTY_SMOKE_USER and KUBETTY_SMOKE_PASSWORD are required")
 	}
 	u, err := url.Parse(cfg.BaseURL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		return fmt.Errorf("bad KUBETTY_SMOKE_URL %q", cfg.BaseURL)
 	}
-	// Never follow redirects: a 302 to the Access login page means the token was refused.
+	// Never follow redirects: a 302 means something in front of KubeTTY refused the request.
 	c := &client{cfg: cfg, http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}}
 	say := func(format string, a ...any) { fmt.Fprintf(out, "kubetty-smoke: "+format+"\n", a...) }
 
-	// 1. Identity.
+	// 1. Log in and check the identity.
+	if err := c.login(ctx); err != nil {
+		return err
+	}
+	defer func() {
+		outCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		lerr := c.logout(outCtx)
+		if lerr == nil {
+			say("PASS logged out (refresh token revoked)")
+		}
+		if err == nil {
+			err = lerr
+		}
+		if err == nil {
+			say("ALL CHECKS PASSED against %s", cfg.BaseURL)
+		}
+	}()
 	code, body, err := c.do(ctx, http.MethodGet, "/api/auth/me", nil)
 	if err != nil {
 		return err
@@ -151,24 +220,23 @@ func run(ctx context.Context, cfg config, out io.Writer) error {
 			ID       string `json:"id"`
 			Username string `json:"username"`
 		} `json:"user"`
-		AuthMode string `json:"authMode"`
 	}
 	if err := json.Unmarshal(body, &me); err != nil {
 		return fmt.Errorf("GET /api/auth/me: bad JSON: %w", err)
 	}
-	if me.User.Username != cfg.User || me.AuthMode != "cloudflare-access" {
-		return fmt.Errorf("GET /api/auth/me: user %q mode %q (want %q, cloudflare-access)", me.User.Username, me.AuthMode, cfg.User)
+	if me.User.Username != cfg.User {
+		return fmt.Errorf("GET /api/auth/me: user %q (want %q)", me.User.Username, cfg.User)
 	}
-	say("PASS /api/auth/me = 200 as %s (authMode cloudflare-access)", me.User.Username)
+	say("PASS logged in; /api/auth/me = 200 as %s", me.User.Username)
 
-	// 2. The smoke principal is restricted.
+	// 2. The smoke user is restricted.
 	for _, p := range []string{"/api/projects", "/api/admin/projects"} {
 		code, body, err := c.do(ctx, http.MethodGet, p, nil)
 		if err != nil {
 			return err
 		}
 		if code != http.StatusForbidden {
-			return fmt.Errorf("GET %s = %d (want 403: the smoke principal must be restricted): %s", p, code, snippet(body))
+			return fmt.Errorf("GET %s = %d (want 403: the smoke user must be restricted): %s", p, code, snippet(body))
 		}
 	}
 	say("PASS restricted: /api/projects and /api/admin/projects = 403")
@@ -217,7 +285,6 @@ func run(ctx context.Context, cfg config, out io.Writer) error {
 		return fmt.Errorf("tab %s still listed after DELETE", tabID)
 	}
 	say("PASS closed tab %s (DELETE 204, no longer listed)", tabID)
-	say("ALL CHECKS PASSED against %s", cfg.BaseURL)
 	return nil
 }
 

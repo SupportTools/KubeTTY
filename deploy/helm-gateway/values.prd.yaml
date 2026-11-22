@@ -38,16 +38,19 @@ catalog:
   inline: |
     projects: []
 
-# Authentication - Cloudflare Access SSO (cluster-services-1299, operator decision
-# 2026-11-19 "Switch to SSO"). The gateway verifies the Access JWT for app
-# "owner (google): kubetty.support.tools"; local passwords are retired.
-# Rollback: set mode back to local (the JWT secret below is kept for that).
+# Authentication - GitHub App sign-in (TaskForge 26815). The App's client secret
+# and private key come from Vault secret/kubetty/github-app through ESO
+# (cluster-services kubetty/a1-ops-prd/gateway-secrets/github-app-prd.yaml).
 auth:
-  mode: cloudflare-access
-  access:
-    teamDomain: https://supporttools.cloudflareaccess.com
-    aud: e3ddb5534fca439d42f9279ac9ec43d8e6e1421fe036a1def5d92c6b8eb9988b
-    users: mmattox@mattoxengineering.com=mmattox
+  mode: github
+  github:
+    clientId: Iv23liM4XZDQoxB1Ml1S
+    callbackUrl: https://kubetty.support.tools/api/auth/github/callback
+    allow: org:SupportTools
+    adminTeams: SupportTools/admins
+    secretName: kubetty-gateway-github
+  # Local admin for GitHub outages; password form at /login/local.
+  breakGlassUser: breakglass
   jwtSecretSecret:
     name: "kubetty-gateway-auth"
     key: jwt-secret

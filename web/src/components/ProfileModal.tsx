@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { useAuth, AUTH_MODE_CLOUDFLARE_ACCESS } from "../contexts/AuthContext";
+import { useAuth } from "../contexts/AuthContext";
 
 interface ProfileModalProps {
   onClose: () => void;
@@ -7,8 +7,8 @@ interface ProfileModalProps {
 }
 
 const ProfileModal = ({ onClose, onPasswordChange }: ProfileModalProps) => {
-  const { user, logout, authMode } = useAuth();
-  const sso = authMode === AUTH_MODE_CLOUDFLARE_ACCESS || Boolean(user?.githubLogin);
+  const { user, logout } = useAuth();
+  const sso = Boolean(user?.githubLogin);
 
   const handleLogout = useCallback(async () => {
     await logout();

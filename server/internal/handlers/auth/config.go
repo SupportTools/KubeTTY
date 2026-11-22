@@ -17,10 +17,7 @@ const GitHubLoginPath = "/api/auth/github/login"
 func NewAuthConfigHandler(mode string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body := map[string]any{"authMode": mode}
-		switch mode {
-		case AuthModeCloudflareAccess:
-			body["logoutUrl"] = AccessLogoutURL
-		case AuthModeGitHub:
+		if mode == AuthModeGitHub {
 			body["githubLoginUrl"] = GitHubLoginPath
 		}
 		_ = util.WriteJSON(w, http.StatusOK, body)

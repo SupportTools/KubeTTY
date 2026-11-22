@@ -517,7 +517,7 @@ RUN chmod +x /etc/profile.d/claude.sh
 # Copy compiled server binaries.
 COPY --from=go-builder /workspace/kubetty-gateway /usr/local/bin/kubetty-gateway
 COPY --from=go-builder /workspace/kubetty-project /usr/local/bin/kubetty-project
-# Account admin CLI (create/list/set-active/scramble-passwords). Run it in the gateway pod, which has the
+# Account admin CLI (create/update-password/list/set-active). Run it in the gateway pod, which has the
 # CNPG_* environment: kubectl exec deploy/gateway -- kubetty-authuser list (cluster-services-1534).
 COPY --from=go-builder /workspace/kubetty-authuser /usr/local/bin/kubetty-authuser
 

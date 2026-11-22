@@ -92,12 +92,12 @@ func RequireAdmin(enabled bool) func(http.Handler) http.Handler {
 }
 
 // RestrictedRouteAllowed is everything a restricted user may do: read who it
-// is, refresh, log out, list/open its own terminal tabs, attach to one, and
-// close one. The handlers still enforce tab ownership and the allowed project.
+// is, log out, list/open its own terminal tabs, attach to one, and close one.
+// The handlers still enforce tab ownership and the allowed project.
 func RestrictedRouteAllowed(r *http.Request) bool {
 	p := r.URL.Path
 	switch {
-	case r.Method == http.MethodGet && (p == "/api/auth/me" || p == "/api/auth/refresh"):
+	case r.Method == http.MethodGet && p == "/api/auth/me":
 		return true
 	case r.Method == http.MethodPost && p == "/api/auth/logout":
 		return true

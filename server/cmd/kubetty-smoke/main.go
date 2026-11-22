@@ -1,8 +1,7 @@
 // Command kubetty-smoke is the functional gate between the dev and production
 // deploys. It signs in as a restricted smoke user, like a browser does:
 //
-//  1. with a password, POST /api/auth/login; then GET /api/auth/me is 200 as
-//     the smoke user (without a password the Access service token is the session);
+//  1. POST /api/auth/login, then GET /api/auth/me is 200 as the smoke user;
 //  2. the smoke user is really restricted (/api/projects and the admin API are 403);
 //  3. it opens a throwaway terminal tab on its project, attaches to /ws, runs
 //     printf with shell arithmetic and waits for the evaluated output (proves a
@@ -178,8 +177,8 @@ func (c *client) logout(ctx context.Context) error {
 }
 
 func run(ctx context.Context, cfg config, out io.Writer) (err error) {
-	if cfg.BaseURL == "" || cfg.User == "" || (cfg.Password == "" && cfg.AccessClientID == "") {
-		return errors.New("KUBETTY_SMOKE_URL, KUBETTY_SMOKE_USER and KUBETTY_SMOKE_PASSWORD (or CF_ACCESS_CLIENT_ID/SECRET) are required")
+	if cfg.BaseURL == "" || cfg.User == "" || cfg.Password == "" {
+		return errors.New("KUBETTY_SMOKE_URL, KUBETTY_SMOKE_USER and KUBETTY_SMOKE_PASSWORD are required")
 	}
 	u, err := url.Parse(cfg.BaseURL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
@@ -192,22 +191,18 @@ func run(ctx context.Context, cfg config, out io.Writer) (err error) {
 	say := func(format string, a ...any) { fmt.Fprintf(out, "kubetty-smoke: "+format+"\n", a...) }
 
 	// 1. Log in and check the identity.
-	if cfg.Password != "" {
-		if err := c.login(ctx); err != nil {
-			return err
-		}
+	if err := c.login(ctx); err != nil {
+		return err
 	}
 	defer func() {
-		if cfg.Password != "" {
-			outCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			lerr := c.logout(outCtx)
-			if lerr == nil {
-				say("PASS logged out (refresh token revoked)")
-			}
-			if err == nil {
-				err = lerr
-			}
+		outCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		lerr := c.logout(outCtx)
+		if lerr == nil {
+			say("PASS logged out (refresh token revoked)")
+		}
+		if err == nil {
+			err = lerr
 		}
 		if err == nil {
 			say("ALL CHECKS PASSED against %s", cfg.BaseURL)

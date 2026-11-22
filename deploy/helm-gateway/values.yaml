@@ -30,27 +30,8 @@ env: {}
 
 # Authentication configuration
 auth:
-  # Authentication mode: "disabled", "local", "github" or "cloudflare-access".
-  # cloudflare-access (cluster-services-1299): KubeTTY trusts only a verified
-  # Cloudflare Access JWT (Cf-Access-Jwt-Assertion); local passwords are retired
-  # and /api/auth/login answers 410. Requires auth.access below.
+  # Authentication mode: "disabled", "local" or "github".
   mode: local
-
-  # Cloudflare Access SSO settings (used when mode is cloudflare-access).
-  # aud: the AUD tag of THIS environment's Access application (not secret; every
-  #   Access JWT carries it). Terraform: cluster-services
-  #   network/cloudflare-tunnels/terraform (outputs kubetty_access_aud / kubetty_dev_access_aud).
-  # users: comma-separated email=username allowlist. An email maps to the existing
-  #   KubeTTY account with that username (keeping its tabs); an allowlisted email
-  #   with no account gets an SSO-only account on first login. Others get 403.
-  # serviceTokens: comma-separated <client_id>.access=<username>:<project> entries mapping an
-  #   Access service token to a RESTRICTED user (own tabs on that one project, nothing else).
-  #   Empty = every service token gets 403. Used only by the dev CI smoke (cluster-services-1534).
-  access:
-    teamDomain: https://supporttools.cloudflareaccess.com
-    aud: ""
-    users: ""
-    serviceTokens: ""
 
   # GitHub App sign-in (mode: github). Only the client ID is here: the client
   # secret and the App private key live in Vault and reach the Secret named by

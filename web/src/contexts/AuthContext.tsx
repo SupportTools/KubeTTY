@@ -12,11 +12,6 @@ import { parseErrorResponse } from "../utils/errorParser";
 export type AuthState = "checking" | "authenticated" | "unauthenticated";
 export type AuthUser = { id: string; username: string; role?: string; githubLogin?: string } | null;
 
-// Server auth mode. "cloudflare-access" (cluster-services-1299): identity comes
-// from the Cloudflare Access JWT; there is no password form and logout goes to
-// Cloudflare's /cdn-cgi/access/logout.
-export const AUTH_MODE_CLOUDFLARE_ACCESS = "cloudflare-access";
-export const ACCESS_LOGOUT_URL = "/cdn-cgi/access/logout";
 export const AUTH_MODE_GITHUB = "github";
 export const GITHUB_LOGIN_URL = "/api/auth/github/login";
 // The break-glass password form is served only at this path in GitHub mode.
@@ -209,11 +204,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Logout function
   const logout = useCallback(async (): Promise<void> => {
     clearRefreshTimer();
-    if (authMode === AUTH_MODE_CLOUDFLARE_ACCESS) {
-      // The Access session is the login: end it at Cloudflare.
-      window.location.assign(ACCESS_LOGOUT_URL);
-      return;
-    }
     try {
       await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
     } catch {
@@ -221,7 +211,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     setAuthState("unauthenticated");
     setUser(null);
-  }, [clearRefreshTimer, authMode]);
+  }, [clearRefreshTimer]);
 
   // Initial auth check on mount
   useEffect(() => {
@@ -240,11 +230,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const res = await fetch("/api/auth/me", { credentials: "include" });
         authLog(`probeAuth: /api/auth/me returned status=${res.status}`);
-        const headerMode = res.headers?.get?.("X-Kubetty-Auth-Mode");
-        if (headerMode && !cancelled) {
-          setAuthMode(headerMode);
-        }
-
         // If auth endpoints don't exist, assume authenticated (disabled auth mode)
         if (res.status === 404 || res.status === 405) {
           authLog(`probeAuth: auth disabled (404/405), setting authenticated`);

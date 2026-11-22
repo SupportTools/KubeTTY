@@ -229,12 +229,13 @@ jobs:
           # Verdaccio; browser zips, every release binary, the Chrome .deb and NodeSource apt ->
           # fetch-cache (cluster-services-1499: build/fetch.sh refuses any fetch without a cache
           # path); Go modules -> Athens only, no proxy.golang.org fallthrough (cluster-services-1496).
-          # pip (PyPI, --require-hashes) is the one upstream-pinned fetch left (Dockerfile header).
+          # pip (--require-hashes) -> the devpi PyPI cache (cluster-services-1551).
           build-args: |
             NODE_MAJOR=20
             APT_FALLBACK=none
             NPM_FALLBACK=none
             FETCH_FALLBACK=none
+            PIP_FALLBACK=none
             GOPROXY=https://goproxy.support.tools
 
       - name: Record pushed image identity

@@ -1,7 +1,6 @@
 import { FormEvent, useState, useCallback } from "react";
 import {
   useAuth,
-  AUTH_MODE_CLOUDFLARE_ACCESS,
   AUTH_MODE_GITHUB,
   GITHUB_LOGIN_URL,
   LOCAL_LOGIN_PATH
@@ -101,33 +100,6 @@ const Login = () => {
             )}
             <button type="button" onClick={() => window.location.assign(GITHUB_LOGIN_URL)}>
               Sign in with GitHub
-            </button>
-          </div>
-        </section>
-      </div>
-    );
-  }
-
-  if (authMode === AUTH_MODE_CLOUDFLARE_ACCESS) {
-    // SSO mode: there is no password. Reloading sends the browser back through
-    // Cloudflare Access, which signs in (Google) and returns here with a JWT.
-    return (
-      <div className="app-shell">
-        <header className="header">
-          <div className="brand">
-            <img src={logo} alt="KubeTTY" className="logo" />
-            <h1>KubeTTY</h1>
-          </div>
-        </header>
-        <section className="main full-width auth">
-          <div className="auth-card">
-            <h2>Sign in</h2>
-            <p>
-              KubeTTY uses Cloudflare Access single sign-on. Your Access session has ended, or this
-              request did not come through Cloudflare.
-            </p>
-            <button type="button" onClick={() => window.location.reload()}>
-              Sign in with Cloudflare Access
             </button>
           </div>
         </section>

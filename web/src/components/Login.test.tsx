@@ -379,41 +379,6 @@ describe('Login', () => {
       expect(alert).toHaveClass('error');
     });
   });
-  describe('Cloudflare Access SSO mode', () => {
-    beforeEach(() => {
-      vi.spyOn(AuthContext, 'useAuth').mockReturnValue({
-        authState: 'unauthenticated',
-        user: null,
-        login: mockLogin,
-        logout: vi.fn(),
-        authFetch: vi.fn(),
-        refreshToken: vi.fn(),
-        authMode: 'cloudflare-access',
-        isAdmin: true
-      });
-    });
-
-    it('shows the Access sign-in screen and no password form', () => {
-      renderWithAuth(<Login />);
-      expect(screen.getByRole('button', { name: 'Sign in with Cloudflare Access' })).toBeInTheDocument();
-      expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument();
-      expect(screen.queryByLabelText(/username/i)).not.toBeInTheDocument();
-    });
-
-    it('reloads the page through Cloudflare Access instead of posting a password', async () => {
-      const reload = vi.fn();
-      const original = window.location;
-      Object.defineProperty(window, 'location', { configurable: true, value: { ...original, reload } });
-      try {
-        renderWithAuth(<Login />);
-        await userEvent.click(screen.getByRole('button', { name: 'Sign in with Cloudflare Access' }));
-        expect(reload).toHaveBeenCalled();
-        expect(mockLogin).not.toHaveBeenCalled();
-      } finally {
-        Object.defineProperty(window, 'location', { configurable: true, value: original });
-      }
-    });
-  });
   describe('GitHub sign-in mode', () => {
     beforeEach(() => {
       window.history.pushState(null, '', '/');

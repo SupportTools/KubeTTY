@@ -42,28 +42,8 @@ func ValidateAuth(cfg AuthConfig) error {
 		}
 		return nil
 
-	case "cloudflare-access":
-		// Cloudflare Access SSO: the gateway verifies the Cf-Access-Jwt-Assertion
-		// JWT itself, so it needs the issuer, the app AUD and the user allowlist.
-		if !strings.HasPrefix(cfg.AccessTeamDomain, "https://") {
-			return fmt.Errorf("CF_ACCESS_TEAM_DOMAIN (https://<team>.cloudflareaccess.com) is required when auth mode is 'cloudflare-access'")
-		}
-		hasAUD := false
-		for _, a := range cfg.AccessAUDs {
-			if strings.TrimSpace(a) != "" {
-				hasAUD = true
-			}
-		}
-		if !hasAUD {
-			return fmt.Errorf("CF_ACCESS_AUD is required when auth mode is 'cloudflare-access'")
-		}
-		if strings.TrimSpace(cfg.AccessUsers) == "" {
-			return fmt.Errorf("AUTH_ACCESS_USERS (email=username,...) is required when auth mode is 'cloudflare-access'")
-		}
-		return nil
-
 	default:
-		return fmt.Errorf("unsupported auth mode: %q (valid options: \"disabled\", \"local\", \"github\", \"cloudflare-access\")", cfg.Mode)
+		return fmt.Errorf("unsupported auth mode: %q (valid options: \"disabled\", \"local\", \"github\")", cfg.Mode)
 	}
 }
 

@@ -223,44 +223,6 @@ func TestLoadGatewayConfig(t *testing.T) {
 			errMsg:  "unsupported auth mode",
 		},
 		{
-			name: "cloudflare-access mode requires the AUD",
-			envVars: map[string]string{
-				"SESSION_ID":            "test-session",
-				"CNPG_HOST":             "localhost",
-				"CNPG_DATABASE":         "kubetty",
-				"CNPG_USER":             "user",
-				"CNPG_PASSWORD":         "pass",
-				"AUTH_MODE":             "cloudflare-access",
-				"CF_ACCESS_TEAM_DOMAIN": "https://supporttools.cloudflareaccess.com",
-				"AUTH_ACCESS_USERS":     "a@b.com=alice",
-			},
-			wantErr: true,
-			errMsg:  "CF_ACCESS_AUD is required",
-		},
-		{
-			name: "cloudflare-access mode loads issuer, AUDs and users",
-			envVars: map[string]string{
-				"SESSION_ID":            "test-session",
-				"CNPG_HOST":             "localhost",
-				"CNPG_DATABASE":         "kubetty",
-				"CNPG_USER":             "user",
-				"CNPG_PASSWORD":         "pass",
-				"AUTH_MODE":             "cloudflare-access",
-				"CF_ACCESS_TEAM_DOMAIN": "https://supporttools.cloudflareaccess.com/",
-				"CF_ACCESS_AUD":         " aud1 , aud2 ",
-				"AUTH_ACCESS_USERS":     "a@b.com=alice",
-			},
-			wantErr: false,
-			validate: func(t *testing.T, cfg GatewayConfig) {
-				if cfg.AccessTeamDomain != "https://supporttools.cloudflareaccess.com" {
-					t.Errorf("AccessTeamDomain = %q", cfg.AccessTeamDomain)
-				}
-				if len(cfg.AccessAUDs) != 2 || cfg.AccessAUDs[0] != "aud1" || cfg.AccessAUDs[1] != "aud2" {
-					t.Errorf("AccessAUDs = %q", cfg.AccessAUDs)
-				}
-			},
-		},
-		{
 			name: "github mode requires the callback URL",
 			envVars: map[string]string{
 				"SESSION_ID":                "test-session",

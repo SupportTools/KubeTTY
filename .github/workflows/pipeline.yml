@@ -445,7 +445,7 @@ jobs:
       - name: Smoke user is dev-only
         run: |
           set -euo pipefail
-          if helm template gateway deploy/helm-gateway/ -f deploy/helm-gateway/values.prd.yaml | grep -qE 'AUTH_ACCESS_SERVICE_TOKENS|AUTH_RESTRICTED_USERS'; then
+          if helm template gateway deploy/helm-gateway/ -f deploy/helm-gateway/values.prd.yaml | grep -q 'AUTH_RESTRICTED_USERS'; then
             echo "::error::values.prd.yaml maps a CI smoke identity; it is dev-only"
             exit 1
           fi

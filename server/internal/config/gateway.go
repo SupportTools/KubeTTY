@@ -33,13 +33,6 @@ type GatewayConfig struct {
 	AuthIssuer         string
 	AuthCookieDomain   string
 	AuthCookieSecure   bool
-	// Cloudflare Access SSO (AUTH_MODE=cloudflare-access, cluster-services-1299)
-	AccessTeamDomain string   // CF_ACCESS_TEAM_DOMAIN, e.g. https://supporttools.cloudflareaccess.com
-	AccessAUDs       []string // CF_ACCESS_AUD, comma-separated Access application AUD tag(s)
-	AccessUsers      string   // AUTH_ACCESS_USERS, comma-separated email=username allowlist
-	// AUTH_ACCESS_SERVICE_TOKENS, comma-separated <client_id>=<username>:<project>.
-	// Access service tokens mapped to restricted users (CI smoke, cluster-services-1534).
-	AccessServiceTokens string
 	// GitHub App sign-in (AUTH_MODE=github)
 	GitHubClientID     string
 	GitHubClientSecret string
@@ -132,31 +125,27 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 	}
 
 	cfg := GatewayConfig{
-		CommonConfig:        common,
-		ProjectCatalogPath:  os.Getenv("PROJECT_CATALOG_PATH"),
-		TabIdleTimeout:      sharedconfig.GetEnvDuration("TAB_IDLE_TIMEOUT", 2*time.Hour),
-		AuthMode:            sharedconfig.GetEnv("AUTH_MODE", "disabled"),
-		AuthJWTSecret:       os.Getenv("AUTH_JWT_SECRET"),
-		AuthAccessTTL:       sharedconfig.GetEnvDuration("AUTH_ACCESS_TTL", 15*time.Minute),
-		AuthRefreshTTL:      sharedconfig.GetEnvDuration("AUTH_REFRESH_TTL", 30*24*time.Hour),
-		AuthIssuer:          sharedconfig.GetEnv("AUTH_ISSUER", "kubetty"),
-		AuthCookieDomain:    os.Getenv("AUTH_COOKIE_DOMAIN"),
-		AuthCookieSecure:    sharedconfig.GetEnvBool("AUTH_COOKIE_SECURE", true),
-		AccessTeamDomain:    strings.TrimRight(strings.TrimSpace(os.Getenv("CF_ACCESS_TEAM_DOMAIN")), "/"),
-		AccessAUDs:          splitCSV(os.Getenv("CF_ACCESS_AUD")),
-		AccessUsers:         os.Getenv("AUTH_ACCESS_USERS"),
-		AccessServiceTokens: os.Getenv("AUTH_ACCESS_SERVICE_TOKENS"),
-		GitHubClientID:      strings.TrimSpace(os.Getenv("AUTH_GITHUB_CLIENT_ID")),
-		GitHubClientSecret:  strings.TrimSpace(os.Getenv("AUTH_GITHUB_CLIENT_SECRET")),
-		GitHubPrivateKey:    os.Getenv("AUTH_GITHUB_PRIVATE_KEY"),
-		GitHubCallbackURL:   strings.TrimSpace(os.Getenv("AUTH_GITHUB_CALLBACK_URL")),
-		GitHubAllow:         os.Getenv("AUTH_GITHUB_ALLOW"),
-		GitHubAdminTeams:    sharedconfig.GetEnv("AUTH_GITHUB_ADMIN_TEAMS", "SupportTools/admins"),
-		GitHubCacheTTL:      sharedconfig.GetEnvDuration("AUTH_GITHUB_CACHE_TTL", time.Minute),
-		BreakGlassUser:      strings.TrimSpace(os.Getenv("AUTH_BREAKGLASS_USER")),
-		RestrictedUsers:     os.Getenv("AUTH_RESTRICTED_USERS"),
-		MetricsEnabled:      sharedconfig.GetEnvBool("METRICS_ENABLED", true),
-		MetricsInterval:     sharedconfig.GetEnvDuration("METRICS_INTERVAL", 15*time.Second),
+		CommonConfig:       common,
+		ProjectCatalogPath: os.Getenv("PROJECT_CATALOG_PATH"),
+		TabIdleTimeout:     sharedconfig.GetEnvDuration("TAB_IDLE_TIMEOUT", 2*time.Hour),
+		AuthMode:           sharedconfig.GetEnv("AUTH_MODE", "disabled"),
+		AuthJWTSecret:      os.Getenv("AUTH_JWT_SECRET"),
+		AuthAccessTTL:      sharedconfig.GetEnvDuration("AUTH_ACCESS_TTL", 15*time.Minute),
+		AuthRefreshTTL:     sharedconfig.GetEnvDuration("AUTH_REFRESH_TTL", 30*24*time.Hour),
+		AuthIssuer:         sharedconfig.GetEnv("AUTH_ISSUER", "kubetty"),
+		AuthCookieDomain:   os.Getenv("AUTH_COOKIE_DOMAIN"),
+		AuthCookieSecure:   sharedconfig.GetEnvBool("AUTH_COOKIE_SECURE", true),
+		GitHubClientID:     strings.TrimSpace(os.Getenv("AUTH_GITHUB_CLIENT_ID")),
+		GitHubClientSecret: strings.TrimSpace(os.Getenv("AUTH_GITHUB_CLIENT_SECRET")),
+		GitHubPrivateKey:   os.Getenv("AUTH_GITHUB_PRIVATE_KEY"),
+		GitHubCallbackURL:  strings.TrimSpace(os.Getenv("AUTH_GITHUB_CALLBACK_URL")),
+		GitHubAllow:        os.Getenv("AUTH_GITHUB_ALLOW"),
+		GitHubAdminTeams:   sharedconfig.GetEnv("AUTH_GITHUB_ADMIN_TEAMS", "SupportTools/admins"),
+		GitHubCacheTTL:     sharedconfig.GetEnvDuration("AUTH_GITHUB_CACHE_TTL", time.Minute),
+		BreakGlassUser:     strings.TrimSpace(os.Getenv("AUTH_BREAKGLASS_USER")),
+		RestrictedUsers:    os.Getenv("AUTH_RESTRICTED_USERS"),
+		MetricsEnabled:     sharedconfig.GetEnvBool("METRICS_ENABLED", true),
+		MetricsInterval:    sharedconfig.GetEnvDuration("METRICS_INTERVAL", 15*time.Second),
 		Controller: ControllerConfig{
 			Enabled:                sharedconfig.GetEnvBool("CONTROLLER_ENABLED", false),
 			ProjectsNamespace:      os.Getenv("PROJECTS_NAMESPACE"),
@@ -207,10 +196,6 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 		RefreshTTL:   cfg.AuthRefreshTTL,
 		CookieDomain: cfg.AuthCookieDomain,
 		CookieSecure: cfg.AuthCookieSecure,
-
-		AccessTeamDomain: cfg.AccessTeamDomain,
-		AccessAUDs:       cfg.AccessAUDs,
-		AccessUsers:      cfg.AccessUsers,
 
 		GitHubClientID:     cfg.GitHubClientID,
 		GitHubClientSecret: cfg.GitHubClientSecret,
@@ -279,15 +264,4 @@ func parseExecMode(s string) ExecModeType {
 	default:
 		return ExecModeWebSocket
 	}
-}
-
-// splitCSV splits a comma-separated list, dropping empty items.
-func splitCSV(v string) []string {
-	var out []string
-	for _, item := range strings.Split(v, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			out = append(out, item)
-		}
-	}
-	return out
 }

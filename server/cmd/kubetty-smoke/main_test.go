@@ -17,17 +17,15 @@ import (
 
 // fakeGateway mimics the parts of the KubeTTY gateway the smoke uses.
 type fakeGateway struct {
-	mu          sync.Mutex
-	tabs        map[string]bool
-	username    string
-	restricted  bool
-	shellEvals  bool // false: the "shell" only echoes input, never runs it
-	deleteCode  int
-	accessToken string // non-empty: a Cloudflare Access service token is required in front
-	// accessIsSession: the gateway trusts the Access token itself (cloudflare-access mode)
-	accessIsSession bool
-	loggedOut       bool
-	revokedTokens   []string
+	mu            sync.Mutex
+	tabs          map[string]bool
+	username      string
+	restricted    bool
+	shellEvals    bool // false: the "shell" only echoes input, never runs it
+	deleteCode    int
+	accessToken   string // non-empty: a Cloudflare Access service token is required in front
+	loggedOut     bool
+	revokedTokens []string
 }
 
 const (
@@ -57,7 +55,7 @@ func (g *fakeGateway) handler(t *testing.T) http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"id": "u1", "username": g.username}, "accessToken": fakeJWT})
 			return
 		}
-		if r.Header.Get("Authorization") != "Bearer "+fakeJWT && !g.accessIsSession {
+		if r.Header.Get("Authorization") != "Bearer "+fakeJWT {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -186,23 +184,6 @@ func TestSmokeSendsAccessServiceToken(t *testing.T) {
 	}
 	if strings.Contains(out, "cf-secret") {
 		t.Fatal("secret printed")
-	}
-}
-
-func TestSmokeWithAccessTokenOnly(t *testing.T) {
-	g := newFake()
-	g.accessToken = "cf-secret"
-	g.accessIsSession = true
-	out, err := runAgainst(t, g, func(c *config) {
-		c.Password = ""
-		c.AccessClientID = "cid.access"
-		c.AccessClientSecret = "cf-secret"
-	})
-	if err != nil {
-		t.Fatalf("smoke failed: %v\n%s", err, out)
-	}
-	if g.loggedOut {
-		t.Fatal("without a password there is no KubeTTY session to log out of")
 	}
 }
 

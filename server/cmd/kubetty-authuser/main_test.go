@@ -7,20 +7,19 @@ import (
 	"testing"
 )
 
-// In the gateway pod AUTH_MODE=cloudflare-access and the CF_ACCESS_* values are
+// In the gateway pod AUTH_MODE=github and the AUTH_GITHUB_* values are
 // gateway-only settings. The CLI must still get past config loading (it then
 // stops at the usage text: no subcommand is given and the pool connects lazily).
-func TestRunsInSSOGatewayEnvironment(t *testing.T) {
+func TestRunsInGitHubGatewayEnvironment(t *testing.T) {
 	if os.Getenv("KUBETTY_AUTHUSER_CHILD") == "1" {
 		main()
 		return
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestRunsInSSOGatewayEnvironment")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunsInGitHubGatewayEnvironment")
 	cmd.Env = append(os.Environ(),
 		"KUBETTY_AUTHUSER_CHILD=1",
-		"AUTH_MODE=cloudflare-access",
-		"CF_ACCESS_TEAM_DOMAIN=https://supporttools.cloudflareaccess.com",
-		"CF_ACCESS_AUD=aud",
+		"AUTH_MODE=github",
+		"AUTH_GITHUB_CLIENT_ID=Iv1.test",
 		"CNPG_HOST=127.0.0.1", "CNPG_PORT=1", "CNPG_DATABASE=kubetty", "CNPG_USER=u", "CNPG_PASSWORD=p",
 	)
 	out, _ := cmd.CombinedOutput()

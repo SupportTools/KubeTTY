@@ -56,8 +56,8 @@ type User struct {
 	Username    string
 	Role        string
 	GitHubLogin string
-	// Restricted users (an Access service token or AUTH_RESTRICTED_USERS) may
-	// only use RestrictedRouteAllowed and open terminal tabs on AllowedProject.
+	// Restricted users (AUTH_RESTRICTED_USERS) may only use RestrictedRouteAllowed
+	// and open terminal tabs on AllowedProject.
 	Restricted     bool
 	AllowedProject string
 }

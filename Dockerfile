@@ -22,8 +22,8 @@
 #     instant, which reproduces the tree prod shipped on 2026-11-19 exactly (cluster-services-1496).
 #   - Go modules: Athens (GOPROXY=https://goproxy.support.tools, a cache we run). CI passes Athens
 #     only; the default falls through to proxy.golang.org off-network. go.sum verifies every module.
-#   - Playwright and Puppeteer browser zips: the fetch-cache /playwright/ prefix (cdn.playwright.dev;
-#     Chrome for Testing under builds/cft/), FETCH_FALLBACK=none in CI.
+#   - Playwright browser zips: the fetch-cache /playwright/ prefix (cdn.playwright.dev),
+#     FETCH_FALLBACK=none in CI.
 #   - kubectl, helm, yq: the fetch-cache /k8s/, /helm/, /github-releases/ prefixes, sha256 pinned
 #     (build/fetch.sh), FETCH_FALLBACK=none in CI.
 #   - upstream-pinned (no tier we run serves them yet; follow-up cluster-services-1496 notes): the
@@ -36,11 +36,11 @@ ARG NODE_IMAGE=harbor.support.tools/dockerhub/library/node:20-bullseye@sha256:c0
 ARG GO_IMAGE=harbor.support.tools/dockerhub/library/golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0
 ARG RUNTIME_IMAGE=harbor.support.tools/dockerhub/library/ubuntu:22.04@sha256:9abcaffc92a5279fff3a6a41635c0800ea33e528425fb389658806476e7defde
 
-ARG GO_VERSION=1.24.3
+ARG GO_VERSION=1.26.11
 ARG NODE_MAJOR=20
-ARG KUBECTL_VERSION=v1.30.3
-ARG HELM_VERSION=v3.15.2
-ARG YQ_VERSION=v4.44.3
+ARG KUBECTL_VERSION=v1.35.10
+ARG HELM_VERSION=v3.22.1
+ARG YQ_VERSION=v4.54.3
 ARG KUBETTY_VERSION=dev
 
 ###############################
@@ -116,6 +116,8 @@ ENV TERM=xterm-256color
 # Browser automation environment (Playwright/Puppeteer)
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+# The image's copy of the Chrome .deb: /opt is a PVC in project pods.
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/local/share/chrome-backup/google/chrome/chrome
 WORKDIR /workspace
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -164,9 +166,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fd-find \
     fzf \
     gdb \
-    gh \
     git \
-    git-lfs \
     gnupg2 \
     htop \
     httpie \
@@ -218,7 +218,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Browser automation dependencies (fonts for proper rendering)
     fonts-liberation \
     fonts-noto-color-emoji \
-    && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
 # USN-8944-1: ca-certificates 20260816ubuntu0.22.04.1 drops the compromised eMudhra emSign
@@ -233,7 +232,6 @@ RUN apt-get update && apt-get install -y --only-upgrade --no-install-recommends 
 # - x11vnc: VNC server exposing Xvfb display
 # - xfce4: Lightweight desktop environment
 # - dbus-x11: D-Bus for desktop integration
-# - firefox: Mozilla Firefox browser
 # - imagemagick: For wallpaper generation with project info
 RUN apt-get update && apt-get install -y --no-install-recommends \
     supervisor \
@@ -244,7 +242,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     thunar \
     dbus-x11 \
     fonts-dejavu-core \
-    firefox \
     imagemagick \
     && rm -rf /var/lib/apt/lists/*
 
@@ -307,22 +304,24 @@ RUN set -eu; \
 # Backed up to /opt/ms-playwright-backup because /opt is mounted as PVC in project pods
 # Fetch tiers (cluster-services-1496): npm from Verdaccio (NPM_FALLBACK as in ui-builder); versions
 # pinned and transitive deps frozen with --before (see the header), which reproduces prod's
-# 2026-11-19 tree. Browser zips from the fetch-cache /playwright/ prefix: Playwright via
-# PLAYWRIGHT_DOWNLOAD_HOST, Puppeteer's Chrome for Testing via its *_DOWNLOAD_BASE_URL variables
-# (cdn.playwright.dev serves builds/cft/<version>/...). puppeteer's postinstall is skipped during
-# `npm install` and run explicitly afterwards (the same `node install.mjs`), so the browser fetch
-# has its own mirror/fallback branch. The browsers land in /root/.cache/puppeteer as before.
+# 2026-11-19 tree. Playwright's browser zip comes from the fetch-cache /playwright/ prefix via
+# PLAYWRIGHT_DOWNLOAD_HOST. Puppeteer downloads no browser and uses PUPPETEER_EXECUTABLE_PATH.
+# npm 11 replaces Node 20's bundled npm 10, whose tar 6 has a Critical CVE fixed only in tar 7.
 ARG PLAYWRIGHT_VERSION=1.65.1
 ARG PUPPETEER_VERSION=24.43.1
+ARG NPM_VERSION=11.21.3
 ARG NPM_BEFORE=2026-11-19T12:59:00Z
 ARG NPM_REGISTRY=http://verdaccio.npm-proxy.svc.a1-ops-prd.local/
 ARG NPM_FALLBACK=upstream
 RUN set -eu; \
     pkgs="playwright@${PLAYWRIGHT_VERSION} puppeteer@${PUPPETEER_VERSION}"; \
+    npm_g() { \
+      PUPPETEER_SKIP_DOWNLOAD=true npm install -g --no-audit --fund=false --before="${NPM_BEFORE}" "$@" $pkgs \
+        && npm install -g --no-audit --fund=false --before="${NPM_BEFORE}" "$@" "npm@${NPM_VERSION}"; \
+    }; \
     used=0; \
     if [ -n "${NPM_REGISTRY}" ] \
-       && PUPPETEER_SKIP_DOWNLOAD=true npm install -g --no-audit --fund=false --before="${NPM_BEFORE}" \
-            --registry="${NPM_REGISTRY}" --loglevel=http $pkgs > /tmp/npm.log 2>&1; then \
+       && npm_g --registry="${NPM_REGISTRY}" --loglevel=http > /tmp/npm.log 2>&1; then \
       hits=$(grep -c "fetch GET 200 ${NPM_REGISTRY}" /tmp/npm.log || true); \
       if [ "${hits}" -gt 0 ]; then used=1; echo "npm source: mirror ${NPM_REGISTRY} (${hits} fetches)"; \
       else echo "npm source: mirror requested but 0 fetches went to it"; fi; \
@@ -331,33 +330,24 @@ RUN set -eu; \
       [ -z "${NPM_REGISTRY}" ] || { echo "npm source: MIRROR FAILED (${NPM_REGISTRY})"; tail -20 /tmp/npm.log; }; \
       if [ "${NPM_FALLBACK}" = "none" ]; then echo "NPM_FALLBACK=none: refusing upstream" >&2; exit 1; fi; \
       echo "npm source: upstream"; \
-      PUPPETEER_SKIP_DOWNLOAD=true npm install -g --no-audit --fund=false --before="${NPM_BEFORE}" $pkgs; \
+      npm_g; \
     fi; \
+    npm --version | grep -qx "${NPM_VERSION}"; \
     rm -f /tmp/npm.log; \
     mkdir -p /opt/ms-playwright; \
-    browsers() { \
-      (cd /usr/lib/node_modules/puppeteer && node install.mjs) && npx playwright install --with-deps chromium; \
-    }; \
-    if [ -n "${FETCH_MIRROR}" ] && ( \
-         export PLAYWRIGHT_DOWNLOAD_HOST="${FETCH_MIRROR}/playwright"; \
-         export PUPPETEER_CHROME_DOWNLOAD_BASE_URL="${FETCH_MIRROR}/playwright/builds/cft"; \
-         export PUPPETEER_CHROME_HEADLESS_SHELL_DOWNLOAD_BASE_URL="${FETCH_MIRROR}/playwright/builds/cft"; \
-         browsers ); then \
+    if [ -n "${FETCH_MIRROR}" ] \
+       && PLAYWRIGHT_DOWNLOAD_HOST="${FETCH_MIRROR}/playwright" npx playwright install --with-deps chromium; then \
       echo "browser source: fetch-cache ${FETCH_MIRROR}/playwright"; \
     else \
       [ -z "${FETCH_MIRROR}" ] || echo "browser source: MIRROR FAILED (${FETCH_MIRROR}/playwright)"; \
       if [ "${FETCH_FALLBACK}" = "none" ]; then echo "FETCH_FALLBACK=none: refusing upstream" >&2; exit 1; fi; \
-      rm -rf /root/.cache/puppeteer /opt/ms-playwright/*; \
-      echo "browser source: upstream"; browsers; \
+      rm -rf /opt/ms-playwright/*; \
+      echo "browser source: upstream"; npx playwright install --with-deps chromium; \
     fi; \
     chown -R mmattox:mmattox /usr/lib/node_modules/; \
     chown -R mmattox:mmattox /opt/ms-playwright; \
     cp -a /opt/ms-playwright /opt/ms-playwright-backup; \
     rm -rf /tmp/* /root/.npm
-
-# Install Docker CLI from Debian repos.
-RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
-    && rm -rf /var/lib/apt/lists/*
 
 # Last apt step: restore the image's stock Ubuntu sources.list (byte-identical to the base image's)
 # and drop the build-time retry config, so the shipped image does not depend on the fetch-cache.
@@ -368,68 +358,86 @@ RUN mv /etc/apt/sources.list.kubetty-orig /etc/apt/sources.list \
     && rm /etc/apt/apt.conf.d/99kubetty-build-retries \
     && grep -q '^deb http://archive.ubuntu.com/ubuntu/ jammy main' /etc/apt/sources.list
 
-# Release binaries below: build/fetch.sh, sha256 pinned to the exact files prod shipped on
-# 2026-11-19 (cluster-services-1496; the `latest`/branch-head fetches were pinned to the versions
-# prod already contained, so the image content does not change). Each call prints its source tier.
-# Install Docker Compose V2 plugin and V1 compatibility symlink
+# Release binaries below: build/fetch.sh, sha256 pinned. Each call prints its source tier.
+# Docker CLI only: dockerd runs in the privileged DinD sidecar, so this unprivileged container
+# needs no daemon, containerd or runc.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/docker.tgz 7c1ebadc65c716cdc6d35fc78759ed0e4317debf43c21dd12f066f2006999def \
+      https://download.docker.com/linux/static/stable/x86_64/docker-29.10.0.tgz \
+    && tar -C /usr/local/bin --strip-components=1 -xzf /tmp/docker.tgz docker/docker \
+    && rm -f /tmp/docker.tgz
+
+# Install Docker Compose plugin and V1 compatibility symlink
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh mkdir -p /usr/local/lib/docker/cli-plugins \
-    && sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-compose 5ea89dd65d33912a83737d8a4bf070d5de534a32b8493a21fbefc924484786a9 \
-       https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-x86_64 \
+    && sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-compose b8840f5008c447f41fce0a57ae3adeab42c89b1eb6e6012524bcabbfb4ffbaf6 \
+       https://github.com/docker/compose/releases/download/v5.8.0/docker-compose-linux-x86_64 \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
     && ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 
 # Install Docker Buildx plugin
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-buildx 43e4c928a0be38ab34e206c82957edfdd54f3e7124f1dadd7779591c3acf77ea \
-       https://github.com/docker/buildx/releases/download/v0.16.2/buildx-v0.16.2.linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-buildx 5fb31a097304fbf6dd4038649a0decf32c2b9510e4047acd7d68b9d700c46194 \
+       https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-amd64 \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
 
 # Symlink fd command.
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
 
 # Install Go toolchain for on-cluster development.
-# sha256 = go.dev's published checksum for go1.24.3.linux-amd64.tar.gz (GO_VERSION and this move together).
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/go.tgz 3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8 \
+# sha256 = go.dev's published checksum for go1.26.11.linux-amd64.tar.gz (GO_VERSION and this move together).
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/go.tgz 9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec \
       https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm /tmp/go.tgz
 
 # Install Kubernetes/Cloud tooling.
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh set -eux; \
-    sh /tmp/fetch.sh /tmp/kustomize.tgz 881c6e9007c7ea2b9ecc214d13f4cdd1f837635dcf4db49ce4479898f7d911a3 https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.2/kustomize_v5.4.2_linux_amd64.tar.gz; \
+    sh /tmp/fetch.sh /tmp/kustomize.tgz cb9e31198d3f63b44848bd0afc4c8efc56e6cfef9c93a4a39a211940e6decd61 https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.3/kustomize_v5.8.3_linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/kustomize.tgz; \
     mv /tmp/kustomize /usr/local/bin/kustomize; \
-    sh /tmp/fetch.sh /tmp/helmfile.tgz c7545124335e693fbf147c7f43447507078a6ec7db52a26bd8686c085b2cc2f0 https://github.com/helmfile/helmfile/releases/download/v0.161.0/helmfile_0.161.0_linux_amd64.tar.gz; \
+    sh /tmp/fetch.sh /tmp/helmfile.tgz 1f19ced8adb0cdf2350e94ca598cf64e390d8c21d0d9b4bdc1c9f246d4591c9d https://github.com/helmfile/helmfile/releases/download/v1.8.4/helmfile_1.8.4_linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/helmfile.tgz; \
     mv /tmp/helmfile /usr/local/bin/helmfile; \
-    sh /tmp/fetch.sh /tmp/k9s.tgz d62611d9be2c35b782a765e98421500196acbf8be844cd3d9e32d4fa7846da05 https://github.com/derailed/k9s/releases/download/v0.32.4/k9s_Linux_amd64.tar.gz; \
+    sh /tmp/fetch.sh /tmp/k9s.tgz c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7 https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/k9s.tgz; \
     mv /tmp/k9s /usr/local/bin/k9s; \
-    sh /tmp/fetch.sh /tmp/terraform.zip bb1ee3e8314da76658002e2e584f2d8854b6def50b7f124e27b957a42ddacfea https://releases.hashicorp.com/terraform/1.8.5/terraform_1.8.5_linux_amd64.zip; \
-    unzip /tmp/terraform.zip -d /usr/local/bin; \
-    sh /tmp/fetch.sh /tmp/awscliv2.zip f1b67518c009e9deb94152aaba5cc015e80af6b0630a7931d3662df42b5f568e https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.41.1.zip; \
+    sh /tmp/fetch.sh /tmp/terraform.zip e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b https://releases.hashicorp.com/terraform/1.17.2/terraform_1.17.2_linux_amd64.zip; \
+    unzip /tmp/terraform.zip terraform -d /usr/local/bin; \
+    sh /tmp/fetch.sh /tmp/awscliv2.zip 2db6f80635cf554a506f3b3c1d070937b87526193fb37e0ac80c8705398219da https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.41.2.zip; \
     unzip /tmp/awscliv2.zip -d /tmp; \
     /tmp/aws/install --update; \
     rm -rf /tmp/kustomize.tgz /tmp/helmfile.tgz /tmp/k9s.tgz /tmp/terraform.zip /tmp/awscliv2.zip /tmp/aws
 
 # Install kubectl.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kubectl abd83816bd236b266c3643e6c852b446f068fe260f3296af1a25b550854ec7e5 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kubectl c49a28f1f4efc4d475ed05f47f2ce8e563bf7bef69ed77fe1b924ea6d83b6327 \
       https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl k8s/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl \
     && chmod +x /usr/local/bin/kubectl
 
 # Install Helm.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/helm.tgz 2694b91c3e501cff57caf650e639604a274645f61af2ea4d601677b746b44fe2 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/helm.tgz 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea \
       https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz helm/helm-${HELM_VERSION}-linux-amd64.tar.gz \
     && tar -C /tmp -xzf /tmp/helm.tgz \
     && mv /tmp/linux-amd64/helm /usr/local/bin/helm \
     && rm -rf /tmp/helm.tgz /tmp/linux-amd64
 
 # Install yq.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/yq a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/yq 129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973 \
       https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64 github-releases/mikefarah/yq/${YQ_VERSION}/yq_linux_amd64 \
     && chmod +x /usr/local/bin/yq
 
+# GitHub CLI release build; Ubuntu 22.04's gh 2.4.0 is built with Go 1.18.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/gh.tgz 79e7ab5db738c48777b696e374f8b428f0647debfb424f44d2f426370407fe2f \
+      https://github.com/cli/cli/releases/download/v2.105.0/gh_2.105.0_linux_amd64.tar.gz \
+    && tar -C /usr/local/bin --strip-components=2 -xzf /tmp/gh.tgz gh_2.105.0_linux_amd64/bin/gh \
+    && rm -f /tmp/gh.tgz
+
+# Git LFS release build; Ubuntu 22.04's git-lfs 3.0.2 is built with Go 1.18.
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/git-lfs.tgz e72cf723a4a660438862282e8aecf3885fc8123e88bfcad534cf6b941a354b75 \
+      https://github.com/git-lfs/git-lfs/releases/download/v3.8.1/git-lfs-linux-amd64-v3.8.1.tar.gz \
+    && tar -C /usr/local/bin --strip-components=1 -xzf /tmp/git-lfs.tgz git-lfs-3.8.1/git-lfs \
+    && rm -f /tmp/git-lfs.tgz \
+    && git lfs install --system
+
 # Install Kind (Kubernetes in Docker) for spinning up temporary k8s clusters.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kind b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kind aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 \
     && chmod +x /usr/local/bin/kind
 
 # Install k3d (k3s in Docker) for lightweight temporary k8s clusters.
@@ -457,18 +465,18 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.s
     && rm -f /tmp/tilt.tgz
 
 # Install Telepresence for connecting local dev to remote clusters.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/telepresence b34ec6977a4636acf5f6047fcc4b7d04e73c60332f73af957218a6a5d942c4bc https://app.getambassador.io/download/tel2oss/releases/download/v2.18.0/telepresence-linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/telepresence a2929ecbcb229830e324deef8ff55d3b48d0f230a83730e18fa895e1ada3f04e https://github.com/telepresenceio/telepresence/releases/download/v2.33.3/telepresence-linux-amd64 \
     && chmod +x /usr/local/bin/telepresence
 
 # Install kubectx and kubens for quick context/namespace switching.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/kubectx.tgz a2247ffd23e79f89abdd0e8173379d7172511f02a3f63c9936d3824e0dd60648 https://github.com/ahmetb/kubectx/releases/download/v0.9.5/kubectx_v0.9.5_linux_x86_64.tar.gz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/kubectx.tgz 08e031c54fbffb3f100e904e4eae94bba2730fedf4869921fda79e4d7a8f5d4c https://github.com/ahmetb/kubectx/releases/download/v0.11.0/kubectx_v0.11.0_linux_x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/kubectx.tgz kubectx \
-    && sh /tmp/fetch.sh /tmp/kubens.tgz acc1a9c7f6b722fbe5fad25dd0e784a7335d18436b9c414ab996629e82702cba https://github.com/ahmetb/kubectx/releases/download/v0.9.5/kubens_v0.9.5_linux_x86_64.tar.gz \
+    && sh /tmp/fetch.sh /tmp/kubens.tgz 326c021c7b35468ed9a187b361198d0f22ae32828139c65eb6670c0d8301cc09 https://github.com/ahmetb/kubectx/releases/download/v0.11.0/kubens_v0.11.0_linux_x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/kubens.tgz kubens \
     && rm -f /tmp/kubectx.tgz /tmp/kubens.tgz
 
 # Install stern for multi-pod log tailing.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/stern.tgz ea1bf1f1dddf1fd4b9971148582e88c637884ac1592dcba71838a6a42277708b https://github.com/stern/stern/releases/download/v1.30.0/stern_1.30.0_linux_amd64.tar.gz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/stern.tgz 03729b01a8fcfab25f6ea53389bd38bc37400ff86d90cd2dcda541f248cf843e https://github.com/stern/stern/releases/download/v1.35.0/stern_1.35.0_linux_amd64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/stern.tgz stern \
     && rm -f /tmp/stern.tgz
 
@@ -478,7 +486,7 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.s
     && chmod +x /usr/local/bin/devspace
 
 # Install ctlptl for declarative local cluster management.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/ctlptl.tgz 98a55d8bfd61ab95b72e2e81d21e540d704065ce90d7972cd4ed8600dd091905 https://github.com/tilt-dev/ctlptl/releases/download/v0.8.28/ctlptl.0.8.28.linux.x86_64.tar.gz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/ctlptl.tgz a83ad620d04a526fd4186adfab9e757e8d59b9becf9b1244a9416dfaabec610f https://github.com/tilt-dev/ctlptl/releases/download/v0.9.6/ctlptl.0.9.6.linux.x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/ctlptl.tgz ctlptl \
     && rm -f /tmp/ctlptl.tgz
 

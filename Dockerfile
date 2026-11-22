@@ -34,9 +34,12 @@
 #     the dl.google.com pool no longer breaks a build that ran within that window.
 #   - NodeSource nodejs (apt, GPG-verified against the vendored build/nodesource.gpg): the
 #     fetch-cache /nodesource/ prefix, APT_FALLBACK=none in CI.
-#   - upstream-pinned (no tier we run serves it yet): pip (PyPI, --require-hashes on
-#     build/requirements-ai.txt), pinned to the exact set prod shipped on 2026-11-19. No PyPI
-#     mirror runs in the org; tracked as cluster-services-1551.
+#   - pip (build/requirements-ai.txt, --require-hashes, the exact set prod shipped on 2026-11-19):
+#     the org devpi PyPI cache (cluster-services pypi-proxy/, ns pypi-proxy, cluster-services-1551),
+#     a cache we run, in-cluster name. devpi rewrites the simple-index file links to its own +f/
+#     paths, so the wheel downloads also come from it (the build log shows "Downloading
+#     http://devpi..."), and the hashes are still PyPI's. PIP_FALLBACK=none in CI refuses
+#     pypi.org; PIP_INDEX= skips the cache (off-network builds).
 ARG NODE_IMAGE=harbor.support.tools/dockerhub/library/node:20-bullseye@sha256:c0122351f25f04facee976f9db7214789eabadb489f4e4aea9cd00a0d6af77c4
 ARG GO_IMAGE=harbor.support.tools/dockerhub/library/golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0
 ARG RUNTIME_IMAGE=harbor.support.tools/dockerhub/library/ubuntu:22.04@sha256:9abcaffc92a5279fff3a6a41635c0800ea33e528425fb389658806476e7defde
@@ -516,11 +519,36 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.s
 # Install python-based helpers for LLM tooling (placeholders for Claude/Codex/Gemini CLIs).
 # certifi >= 2026.10.19 drops the eMudhra emSign roots (USN-8944-1).
 # Exact pins of the set prod shipped on 2026-11-19, every file hash-checked (cluster-services-1496).
-# Tier: upstream-pinned (PyPI); no PyPI mirror runs in the org yet. To change the set, re-resolve
-# the four top-level packages and regenerate build/requirements-ai.txt with all PyPI hashes.
+# To change the set, re-resolve the four top-level packages and regenerate
+# build/requirements-ai.txt with all PyPI hashes.
+# Tier: the org devpi PyPI cache (see the header). Same rules as apt/npm: if the cache does not
+# answer, PIP_FALLBACK=none (CI) fails the build, otherwise pip goes to pypi.org and says so. When
+# the cache is used, every file must come from it: the step fails if pip downloaded anything
+# from another host. The settings are build-time only (env on this RUN), nothing is left in the image.
+ARG PIP_INDEX=http://devpi.pypi-proxy.svc.a1-ops-prd.local/root/pypi/+simple/
+ARG PIP_FALLBACK=upstream
 RUN --mount=type=bind,source=build/requirements-ai.txt,target=/tmp/requirements-ai.txt \
-    echo "pip source: upstream-pinned https://pypi.org (--require-hashes)" \
-    && pip3 install --no-cache-dir --require-hashes -r /tmp/requirements-ai.txt
+    set -eu; \
+    if [ -n "${PIP_INDEX}" ] && python3 -c "import sys, urllib.request; urllib.request.urlopen(sys.argv[1] + 'pip/', timeout=15)" "${PIP_INDEX}"; then \
+      host="$(echo "${PIP_INDEX}" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')"; \
+      export PIP_INDEX_URL="${PIP_INDEX}" PIP_TRUSTED_HOST="${host}"; \
+      echo "pip source: devpi ${PIP_INDEX} (--require-hashes)"; \
+    else \
+      [ -z "${PIP_INDEX}" ] || echo "pip source: MIRROR FAILED (${PIP_INDEX})"; \
+      if [ "${PIP_FALLBACK}" = "none" ]; then echo "PIP_FALLBACK=none: refusing upstream" >&2; exit 1; fi; \
+      host=""; \
+      echo "pip source: upstream https://pypi.org (--require-hashes)"; \
+    fi; \
+    pip3 install --no-cache-dir --disable-pip-version-check --require-hashes -r /tmp/requirements-ai.txt > /tmp/pip.log 2>&1 \
+      || { cat /tmp/pip.log; exit 1; }; \
+    cat /tmp/pip.log; \
+    if [ -n "${host}" ]; then \
+      n="$(grep -c "Downloading http://${host}/" /tmp/pip.log || true)"; \
+      other="$(grep -E '^ *Downloading ' /tmp/pip.log | grep -vc "Downloading http://${host}/" || true)"; \
+      echo "pip downloads: ${n} from ${host}, ${other} from anywhere else"; \
+      [ "${other}" = "0" ] && [ "${n}" -gt 0 ] || { echo "pip fetched outside the cache" >&2; exit 1; }; \
+    fi; \
+    rm -f /tmp/pip.log
 
 # Create directory for optional proprietary CLI binaries (installed at runtime).
 RUN mkdir -p /opt/ai/bin && chmod 755 /opt/ai/bin

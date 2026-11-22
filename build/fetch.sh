@@ -9,7 +9,8 @@
 #     ${FETCH_MIRROR}/k8s/release/... If that fails it falls back to <upstream-url> unless
 #     FETCH_FALLBACK=none (CI), which makes it a build failure instead.
 #   - without one: "upstream-pinned", a direct fetch of <upstream-url>, bounded retries, sha256
-#     pinned. Every such line is a follow-up item (move it onto fetch-cache or a Harbor layer).
+#     pinned. Refused under FETCH_FALLBACK=none (CI), so every fetch in the image build must name a
+#     fetch-cache path (cluster-services-1499).
 # The sha256 is checked in every case; a mismatch always fails the build.
 set -eu
 out=$1 sha=$2 url=$3 path=${4:-}
@@ -29,6 +30,12 @@ if [ -n "$path" ] && [ -n "${FETCH_MIRROR:-}" ]; then
   fi
   tier=upstream-fallback
 else
+  if [ "${FETCH_FALLBACK:-upstream}" = "none" ]; then
+    # CI: every fetch must name a fetch-cache path (cluster-services-1499), so a new download
+    # added without one fails the build instead of quietly going upstream.
+    echo "FETCH_FALLBACK=none: ${name} has no fetch-cache path (or FETCH_MIRROR is empty); refusing upstream" >&2
+    exit 1
+  fi
   tier=upstream-pinned
 fi
 get "$url"

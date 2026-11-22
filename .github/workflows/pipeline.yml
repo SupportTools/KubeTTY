@@ -226,9 +226,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           # *_FALLBACK=none: every fetch a tier we run serves must come from it, or the build fails
           # instead of silently going upstream. apt -> fetch-cache (cluster-services-1494); npm ->
-          # Verdaccio; browser zips, kubectl, helm, yq -> fetch-cache; Go modules -> Athens only,
-          # no proxy.golang.org fallthrough (cluster-services-1496). See the Dockerfile header for
-          # the remaining upstream-pinned fetches.
+          # Verdaccio; browser zips, every release binary, the Chrome .deb and NodeSource apt ->
+          # fetch-cache (cluster-services-1499: build/fetch.sh refuses any fetch without a cache
+          # path); Go modules -> Athens only, no proxy.golang.org fallthrough (cluster-services-1496).
+          # pip (PyPI, --require-hashes) is the one upstream-pinned fetch left (Dockerfile header).
           build-args: |
             NODE_MAJOR=20
             APT_FALLBACK=none

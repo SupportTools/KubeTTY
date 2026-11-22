@@ -280,7 +280,8 @@ These knobs are exposed through the Helm chart under the `auth` section (`deploy
 People sign in with a GitHub App. KubeTTY reads the GitHub account once at sign-in and discards the user's GitHub
 token; every later check uses the App's installation token, so the App needs only these permissions:
 Organization **Members: read** and Repository **Metadata: read**. It must be installed on every org named in the
-rules and on every org that owns a project repository.
+rules and on every org that owns a project repository, with access to those repositories (all repositories, or each
+project's repo). If the App cannot see a project's repo, only admins can use that project.
 
 | Env var | Meaning |
 |---|---|

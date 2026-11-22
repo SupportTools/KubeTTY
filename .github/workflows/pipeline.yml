@@ -441,17 +441,16 @@ jobs:
       - name: Test gateway image references
         run: bash .github/scripts/test-helm-image-ref.sh
 
-      # cluster-services-1534: the CI smoke service token is a DEV-only identity. Prod must never map
-      # an Access service token to a user, so its render must not carry AUTH_ACCESS_SERVICE_TOKENS.
-      - name: Production renders no Access service token mapping
+      # The CI smoke user is a DEV-only identity: prod must not render it, and dev must, or the smoke gate fails.
+      - name: Smoke user is dev-only
         run: |
           set -euo pipefail
-          if helm template gateway deploy/helm-gateway/ -f deploy/helm-gateway/values.prd.yaml | grep -q AUTH_ACCESS_SERVICE_TOKENS; then
-            echo "::error::values.prd.yaml maps an Access service token (AUTH_ACCESS_SERVICE_TOKENS); service tokens are dev-only"
+          if helm template gateway deploy/helm-gateway/ -f deploy/helm-gateway/values.prd.yaml | grep -qE 'AUTH_ACCESS_SERVICE_TOKENS|AUTH_RESTRICTED_USERS'; then
+            echo "::error::values.prd.yaml maps a CI smoke identity; it is dev-only"
             exit 1
           fi
-          helm template gateway deploy/helm-gateway/ -f deploy/helm-gateway/values.dev.yaml | grep -q 'AUTH_ACCESS_SERVICE_TOKENS' \
-            || { echo "::error::values.dev.yaml lost the CI smoke service token mapping; the dev smoke gate would fail"; exit 1; }
+          helm template gateway deploy/helm-gateway/ -f deploy/helm-gateway/values.dev.yaml | grep -q 'AUTH_RESTRICTED_USERS' \
+            || { echo "::error::values.dev.yaml lost the CI smoke user (auth.restrictedUsers); the dev smoke gate would fail"; exit 1; }
 
       # The CI deployer may only manage these kinds (cluster-services
       # github-actions/supporttools/ci-deployers/kubetty-rbac.yaml). A new kind fails here, not as a Forbidden in deploy-dev.
@@ -635,18 +634,16 @@ jobs:
         if: always()
         run: rm -f "${KUBECONFIG:-$RUNNER_TEMP/kubeconfig}"
 
-  # Stage 6a2: functional smoke against DEV (cluster-services-1534, operator decision 2026-11-19
-  # "Automated smoke test before prod"). The dev health gate only proves the database answers;
-  # this proves a real Access-authenticated session works end to end, through Cloudflare exactly
-  # like a browser: GET /api/auth/me = 200 as the smoke user, the smoke user is restricted, and a
-  # throwaway terminal tab echoes a shell-evaluated line over /ws. CI cannot do a Google login, so
-  # it presents a Cloudflare Access SERVICE TOKEN that only the kubetty-dev Access app admits
-  # (cluster-services network/cloudflare-tunnels/terraform access.tf kubetty_dev_smoke). KubeTTY dev
-  # maps it (values.dev.yaml auth.access.serviceTokens) to kubetty-smoke, which may only open/close
-  # its own tab on test-project. The token comes keylessly from Vault (GitHub OIDC, role gha-kubetty).
-  # deploy-production needs this job: a smoke failure skips prod and rolls dev back.
+  # Stage 6a2: functional smoke against DEV. The dev health gate only proves the database answers;
+  # this logs in as kubetty-smoke (a restricted local user, values.dev.yaml auth.restrictedUsers),
+  # checks it is restricted, and runs a shell-evaluated line in a throwaway terminal tab over /ws.
+  # CI cannot do a GitHub login, so the smoke user has a password (Vault secret/kubetty/ci-smoke-user).
+  # Until the kubetty-dev Access app is removed it also presents the dev-only Access service token
+  # (cluster-services access.tf kubetty_dev_smoke) to get through Cloudflare. Secrets come keylessly
+  # from Vault (GitHub OIDC, role gha-kubetty). deploy-production needs this job: a smoke failure
+  # skips prod and rolls dev back.
   smoke-dev:
-    name: Smoke Test Dev (Access + terminal)
+    name: Smoke Test Dev (login + terminal)
     runs-on: self-hosted-linux
     needs: [build, deploy-dev]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
@@ -703,9 +700,9 @@ jobs:
           echo "ours=true" >> "$GITHUB_OUTPUT"
           echo "✓ dev runs ${EXPECTED_IMAGE}"
 
-      # Keyless: GitHub OIDC -> Vault jwt role gha-kubetty (policy gha-kubetty-read) -> the dev-only
-      # Access service token. vault-action masks both values in the log.
-      - name: Vault login (GitHub OIDC) + dev smoke Access token
+      # Keyless: GitHub OIDC -> Vault jwt role gha-kubetty (policy gha-kubetty-read). vault-action
+      # masks the values in the log.
+      - name: Vault login (GitHub OIDC) + dev smoke credentials
         uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
         with:
           url: https://vault.support.tools
@@ -715,12 +712,13 @@ jobs:
           jwtGithubAudience: https://github.com/SupportTools
           exportEnv: true
           secrets: |
+            secret/data/kubetty/ci-smoke-user password | KUBETTY_SMOKE_PASSWORD ;
             secret/data/kubetty/ci-smoke-access-token client_id | CF_ACCESS_CLIENT_ID ;
             secret/data/kubetty/ci-smoke-access-token client_secret | CF_ACCESS_CLIENT_SECRET
 
       # server/cmd/kubetty-smoke. Fetch tier: Go modules from Athens only (GOPROXY=goproxy.support.tools,
       # no proxy.golang.org fallthrough), same as the image build.
-      - name: Functional smoke (Access-authenticated /api/auth/me + terminal websocket echo)
+      - name: Functional smoke (login + terminal websocket echo)
         working-directory: server
         env:
           GOPROXY: https://goproxy.support.tools

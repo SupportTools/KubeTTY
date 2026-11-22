@@ -2,11 +2,14 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Lookups is what the Authorizer asks GitHub. *Client implements it.
@@ -162,6 +165,10 @@ func (a *Authorizer) CanWrite(ctx context.Context, repo, login string) (bool, er
 	}
 	return a.check("repo:"+strings.ToLower(repo)+":"+login, func() (bool, error) {
 		perm, err := a.lookups.RepoPermission(ctx, owner, name, login)
+		if errors.Is(err, ErrNotInstalled) {
+			log.WithField("repo", repo).Warn("github: the App cannot see this repository; nobody but admins can use its project")
+			return false, nil
+		}
 		return perm == "admin" || perm == "write", err
 	})
 }

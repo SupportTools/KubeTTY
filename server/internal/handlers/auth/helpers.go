@@ -184,7 +184,8 @@ func cookieTemplate(name, value string, expires time.Time, cfg AuthConfig) *http
 
 // AuthEnabled checks if authentication is enabled based on configuration.
 func AuthEnabled(cfg AuthConfig, authMgr *auth.Manager) bool {
-	return cfg.GetAuthMode() == "local" && authMgr != nil
+	mode := cfg.GetAuthMode()
+	return (mode == "local" || mode == AuthModeGitHub) && authMgr != nil
 }
 
 // AuthenticateRequest validates the access token from the request and returns

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/supporttools/KubeTTY/server/internal/auth"
 	gh "github.com/supporttools/KubeTTY/server/internal/auth/github"
@@ -285,5 +286,49 @@ func TestGitHubAdmission(t *testing.T) {
 	authz.err = errors.New("github down")
 	if _, err := admit(ctx, &auth.User{Username: "octo", GitHubID: 1, GitHubLogin: "octo"}); err == nil || errors.Is(err, auth.ErrNotAdmitted) {
 		t.Fatalf("an outage must be an error, not a refusal: %v", err)
+	}
+}
+
+func TestGitHubModeEnforcesAuthAndAllowsOnlyBreakGlassPasswords(t *testing.T) {
+	store := auth.NewMockStore()
+	hash, err := bcrypt.GenerateFromPassword([]byte("correct-horse-battery"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.AddUser(&auth.User{ID: uuid.New(), Username: "breakglass", PasswordHash: hash, IsActive: true})
+	store.AddUser(&auth.User{ID: uuid.New(), Username: "old-local", PasswordHash: hash, IsActive: true})
+	mgr, err := auth.NewManager(store, base64.StdEncoding.EncodeToString([]byte("test-secret-must-be-at-least-32-bytes-long!")), "kubetty-test", 15*time.Minute, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.SetAdmission(GitHubAdmission(&fakeAuthorizer{}, "breakglass", nil))
+	cfg := &mockAuthConfig{authMode: AuthModeGitHub}
+
+	var seen *User
+	protected := RequireAuth(cfg, mgr)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen = UserFromContext(r.Context()) }))
+	rec := httptest.NewRecorder()
+	protected.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/tabs", nil))
+	if rec.Code != http.StatusUnauthorized || seen != nil {
+		t.Fatalf("github mode must require a token: %d %+v", rec.Code, seen)
+	}
+
+	login := func(username string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		body := `{"username":"` + username + `","password":"correct-horse-battery"}`
+		NewAuthLoginHandler(cfg, mgr, store)(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(body)))
+		return rec
+	}
+	if rec := login("old-local"); rec.Code != http.StatusForbidden {
+		t.Fatalf("a non-break-glass local account must be refused: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = login("breakglass")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("break-glass login: %d %s", rec.Code, rec.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/tabs", nil)
+	req.AddCookie(&http.Cookie{Name: AccessTokenCookieName, Value: accessCookie(rec)})
+	protected.ServeHTTP(httptest.NewRecorder(), req)
+	if seen == nil || seen.Username != "breakglass" || !seen.IsAdmin() {
+		t.Fatalf("break-glass must reach protected routes as admin: %+v", seen)
 	}
 }

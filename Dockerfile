@@ -24,14 +24,19 @@
 #     only; the default falls through to proxy.golang.org off-network. go.sum verifies every module.
 #   - Playwright browser zips: the fetch-cache /playwright/ prefix (cdn.playwright.dev),
 #     FETCH_FALLBACK=none in CI.
-#   - kubectl, helm, yq: the fetch-cache /k8s/, /helm/, /github-releases/ prefixes, sha256 pinned
-#     (build/fetch.sh), FETCH_FALLBACK=none in CI.
-#   - upstream-pinned (no tier we run serves them yet; follow-up cluster-services-1496 notes): the
-#     other release binaries, the Go tarball, the Google Chrome .deb and the NodeSource nodejs .deb
-#     (apt, GPG-verified against the vendored build/nodesource.gpg), and pip (PyPI,
-#     --require-hashes on build/requirements-ai.txt). Each is pinned to the exact version prod
-#     shipped on 2026-11-19 and, except apt/pip which verify their own way, sha256-checked by
-#     build/fetch.sh, which prints "source=upstream-pinned" for each one in the build log.
+#   - every release binary (kubectl, helm, yq, docker CLI + compose/buildx, Go tarball, kustomize,
+#     helmfile, k9s, terraform, aws-cli, gh, git-lfs, kind, k3d, minikube, skaffold, tilt,
+#     telepresence, kubectx/kubens, stern, devspace, ctlptl, vcluster) and the Google Chrome .deb:
+#     the fetch-cache /k8s/, /helm/, /hashicorp/, /github-releases/, /kustomize/, /golang/,
+#     /awscli/, /gcs/, /docker-static/, /google-chrome/ prefixes (cluster-services-1499), sha256
+#     pinned (build/fetch.sh), FETCH_FALLBACK=none in CI. The build log prints "source=fetch-cache".
+#     Chrome: the cache keeps the pinned .deb for 90d after last use, so Google rotating it out of
+#     the dl.google.com pool no longer breaks a build that ran within that window.
+#   - NodeSource nodejs (apt, GPG-verified against the vendored build/nodesource.gpg): the
+#     fetch-cache /nodesource/ prefix, APT_FALLBACK=none in CI.
+#   - upstream-pinned (no tier we run serves it yet): pip (PyPI, --require-hashes on
+#     build/requirements-ai.txt), pinned to the exact set prod shipped on 2026-11-19. No PyPI
+#     mirror runs in the org; tracked as cluster-services-1551.
 ARG NODE_IMAGE=harbor.support.tools/dockerhub/library/node:20-bullseye@sha256:c0122351f25f04facee976f9db7214789eabadb489f4e4aea9cd00a0d6af77c4
 ARG GO_IMAGE=harbor.support.tools/dockerhub/library/golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0
 ARG RUNTIME_IMAGE=harbor.support.tools/dockerhub/library/ubuntu:22.04@sha256:9abcaffc92a5279fff3a6a41635c0800ea33e528425fb389658806476e7defde
@@ -249,8 +254,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Note: Chromium from apt is a snap package which doesn't work in containers
 # Chrome is installed to /opt/google/chrome/ but /opt is mounted as a PVC in project pods,
 # so we backup Chrome to /usr/local/share/chrome-backup for sync on container start
-# Pinned to the version prod shipped on 2026-11-19 (cluster-services-1496); upstream-pinned tier
-# (dl.google.com, sha256 checked). Google drops old .debs from the pool after a while, so a bump is
+# Pinned to the version prod shipped on 2026-11-19 (cluster-services-1496); fetch-cache tier
+# /google-chrome/ (cluster-services-1499, dl.google.com behind it, sha256 checked). Google drops old .debs from the pool after a while, so a bump is
 # CHROME_VERSION + CHROME_SHA256 together (sha256sum of the new pool .deb).
 # The google-chrome.sources the package's postinst writes is held aside until the last apt step, so
 # the later apt-get updates fetch only the Ubuntu fetch-cache, not dl.google.com.
@@ -258,7 +263,7 @@ ARG CHROME_VERSION=158.0.8127.36-1
 ARG CHROME_SHA256=4696bce00b128f385a870ba2eb6eede61698f22374ea0d8e09af8a1c6543d397
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh \
     sh /tmp/fetch.sh /tmp/chrome.deb "${CHROME_SHA256}" \
-       "https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}_amd64.deb" \
+       "https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}_amd64.deb" "google-chrome/google-chrome-stable_${CHROME_VERSION}_amd64.deb" \
     && apt-get update \
     && apt-get install -y --no-install-recommends /tmp/chrome.deb \
     && rm -f /tmp/chrome.deb \
@@ -280,21 +285,34 @@ WORKDIR /home/mmattox
 # (cluster-services-1496): the same pre-requisite packages, the NodeSource keyring (vendored as
 # build/nodesource.gpg, byte-identical to `curl .../gpgkey/nodesource-repo.gpg.key | gpg --dearmor`
 # on 2026-11-19, key 6F71F525282841EEDAF851B42F59B5F99B1BE0B4), the same sources/preferences files,
-# and nodejs pinned to the version prod shipped. Tier: upstream-pinned (deb.nodesource.com; apt
-# verifies the InRelease signature against the vendored key and the .deb against its hash).
-# The nodesource.sources file is held aside after the install, like google-chrome.sources.
+# and nodejs pinned to the version prod shipped. Tier: the org fetch-cache /nodesource/ prefix
+# (cluster-services-1499), same fallback rules as the Ubuntu apt step (APT_FALLBACK=none in CI). apt
+# verifies the InRelease signature against the vendored key and the .deb against its hash either way.
+# The nodesource.sources file is rewritten to the upstream URI and held aside after the install, like
+# google-chrome.sources, so the shipped image points at deb.nodesource.com exactly as before.
 ARG NODEJS_VERSION=20.20.2-1nodesource1
 COPY build/nodesource.gpg /usr/share/keyrings/nodesource.gpg
 RUN set -eu; \
     chmod 644 /usr/share/keyrings/nodesource.gpg; \
     apt-get update; \
     apt-get install -y apt-transport-https ca-certificates curl gnupg; \
-    printf 'Types: deb\nURIs: https://deb.nodesource.com/node_%s.x\nSuites: nodistro\nComponents: main\nArchitectures: %s\nSigned-By: /usr/share/keyrings/nodesource.gpg\n' \
-      "${NODE_MAJOR}" "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/nodesource.sources; \
+    ns_up="https://deb.nodesource.com/node_${NODE_MAJOR}.x"; \
+    ns_src() { printf 'Types: deb\nURIs: %s\nSuites: nodistro\nComponents: main\nArchitectures: %s\nSigned-By: /usr/share/keyrings/nodesource.gpg\n' \
+      "$1" "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/nodesource.sources; }; \
     printf 'Package: nsolid\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/nsolid; \
     printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/nodejs; \
-    apt-get update; \
+    if [ -n "${APT_MIRROR}" ] && ns_src "${APT_MIRROR}/nodesource/node_${NODE_MAJOR}.x" \
+       && apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=10 update --error-on=any; then \
+      echo "apt source: nodesource mirror ${APT_MIRROR}/nodesource/"; \
+    else \
+      [ -z "${APT_MIRROR}" ] || echo "apt source: nodesource MIRROR FAILED (${APT_MIRROR}/nodesource/)"; \
+      if [ "${APT_FALLBACK}" = "none" ]; then echo "APT_FALLBACK=none: refusing upstream nodesource" >&2; exit 1; fi; \
+      ns_src "${ns_up}"; \
+      apt-get update; \
+      echo "apt source: nodesource upstream ${ns_up}"; \
+    fi; \
     apt-get install -y --no-install-recommends "nodejs=${NODEJS_VERSION}"; \
+    ns_src "${ns_up}"; \
     mv /etc/apt/sources.list.d/nodesource.sources /etc/apt/sources.list.d.kubetty-held/; \
     rm -rf /var/lib/apt/lists/*
 
@@ -362,20 +380,20 @@ RUN mv /etc/apt/sources.list.kubetty-orig /etc/apt/sources.list \
 # Docker CLI only: dockerd runs in the privileged DinD sidecar, so this unprivileged container
 # needs no daemon, containerd or runc.
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/docker.tgz 7c1ebadc65c716cdc6d35fc78759ed0e4317debf43c21dd12f066f2006999def \
-      https://download.docker.com/linux/static/stable/x86_64/docker-29.10.0.tgz \
+      https://download.docker.com/linux/static/stable/x86_64/docker-29.10.0.tgz docker-static/x86_64/docker-29.10.0.tgz \
     && tar -C /usr/local/bin --strip-components=1 -xzf /tmp/docker.tgz docker/docker \
     && rm -f /tmp/docker.tgz
 
 # Install Docker Compose plugin and V1 compatibility symlink
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh mkdir -p /usr/local/lib/docker/cli-plugins \
     && sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-compose b8840f5008c447f41fce0a57ae3adeab42c89b1eb6e6012524bcabbfb4ffbaf6 \
-       https://github.com/docker/compose/releases/download/v5.8.0/docker-compose-linux-x86_64 \
+       https://github.com/docker/compose/releases/download/v5.8.0/docker-compose-linux-x86_64 github-releases/docker/compose/v5.8.0/docker-compose-linux-x86_64 \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
     && ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 
 # Install Docker Buildx plugin
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/lib/docker/cli-plugins/docker-buildx 5fb31a097304fbf6dd4038649a0decf32c2b9510e4047acd7d68b9d700c46194 \
-       https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-amd64 \
+       https://github.com/docker/buildx/releases/download/v0.39.0/buildx-v0.39.0.linux-amd64 github-releases/docker/buildx/v0.39.0/buildx-v0.39.0.linux-amd64 \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
 
 # Symlink fd command.
@@ -384,24 +402,24 @@ RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
 # Install Go toolchain for on-cluster development.
 # sha256 = go.dev's published checksum for go1.26.11.linux-amd64.tar.gz (GO_VERSION and this move together).
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/go.tgz 9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec \
-      https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
+      https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz golang/go${GO_VERSION}.linux-amd64.tar.gz \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm /tmp/go.tgz
 
 # Install Kubernetes/Cloud tooling.
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh set -eux; \
-    sh /tmp/fetch.sh /tmp/kustomize.tgz cb9e31198d3f63b44848bd0afc4c8efc56e6cfef9c93a4a39a211940e6decd61 https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.3/kustomize_v5.8.3_linux_amd64.tar.gz; \
+    sh /tmp/fetch.sh /tmp/kustomize.tgz cb9e31198d3f63b44848bd0afc4c8efc56e6cfef9c93a4a39a211940e6decd61 https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.3/kustomize_v5.8.3_linux_amd64.tar.gz kustomize/v5.8.3/kustomize_v5.8.3_linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/kustomize.tgz; \
     mv /tmp/kustomize /usr/local/bin/kustomize; \
-    sh /tmp/fetch.sh /tmp/helmfile.tgz 1f19ced8adb0cdf2350e94ca598cf64e390d8c21d0d9b4bdc1c9f246d4591c9d https://github.com/helmfile/helmfile/releases/download/v1.8.4/helmfile_1.8.4_linux_amd64.tar.gz; \
+    sh /tmp/fetch.sh /tmp/helmfile.tgz 1f19ced8adb0cdf2350e94ca598cf64e390d8c21d0d9b4bdc1c9f246d4591c9d https://github.com/helmfile/helmfile/releases/download/v1.8.4/helmfile_1.8.4_linux_amd64.tar.gz github-releases/helmfile/helmfile/v1.8.4/helmfile_1.8.4_linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/helmfile.tgz; \
     mv /tmp/helmfile /usr/local/bin/helmfile; \
-    sh /tmp/fetch.sh /tmp/k9s.tgz c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7 https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Linux_amd64.tar.gz; \
+    sh /tmp/fetch.sh /tmp/k9s.tgz c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7 https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Linux_amd64.tar.gz github-releases/derailed/k9s/v0.51.0/k9s_Linux_amd64.tar.gz; \
     tar -C /tmp -xzf /tmp/k9s.tgz; \
     mv /tmp/k9s /usr/local/bin/k9s; \
-    sh /tmp/fetch.sh /tmp/terraform.zip e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b https://releases.hashicorp.com/terraform/1.17.2/terraform_1.17.2_linux_amd64.zip; \
+    sh /tmp/fetch.sh /tmp/terraform.zip e6f16b2f0b137ee5729caa8c4e79a3bae4ee261acd198a1fcfa8584a6296605b https://releases.hashicorp.com/terraform/1.17.2/terraform_1.17.2_linux_amd64.zip hashicorp/terraform/1.17.2/terraform_1.17.2_linux_amd64.zip; \
     unzip /tmp/terraform.zip terraform -d /usr/local/bin; \
-    sh /tmp/fetch.sh /tmp/awscliv2.zip 2db6f80635cf554a506f3b3c1d070937b87526193fb37e0ac80c8705398219da https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.41.2.zip; \
+    sh /tmp/fetch.sh /tmp/awscliv2.zip 2db6f80635cf554a506f3b3c1d070937b87526193fb37e0ac80c8705398219da https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.41.2.zip awscli/awscli-exe-linux-x86_64-2.41.2.zip; \
     unzip /tmp/awscliv2.zip -d /tmp; \
     /tmp/aws/install --update; \
     rm -rf /tmp/kustomize.tgz /tmp/helmfile.tgz /tmp/k9s.tgz /tmp/terraform.zip /tmp/awscliv2.zip /tmp/aws
@@ -425,74 +443,74 @@ RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.s
 
 # GitHub CLI release build; Ubuntu 22.04's gh 2.4.0 is built with Go 1.18.
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/gh.tgz 79e7ab5db738c48777b696e374f8b428f0647debfb424f44d2f426370407fe2f \
-      https://github.com/cli/cli/releases/download/v2.105.0/gh_2.105.0_linux_amd64.tar.gz \
+      https://github.com/cli/cli/releases/download/v2.105.0/gh_2.105.0_linux_amd64.tar.gz github-releases/cli/cli/v2.105.0/gh_2.105.0_linux_amd64.tar.gz \
     && tar -C /usr/local/bin --strip-components=2 -xzf /tmp/gh.tgz gh_2.105.0_linux_amd64/bin/gh \
     && rm -f /tmp/gh.tgz
 
 # Git LFS release build; Ubuntu 22.04's git-lfs 3.0.2 is built with Go 1.18.
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/git-lfs.tgz e72cf723a4a660438862282e8aecf3885fc8123e88bfcad534cf6b941a354b75 \
-      https://github.com/git-lfs/git-lfs/releases/download/v3.8.1/git-lfs-linux-amd64-v3.8.1.tar.gz \
+      https://github.com/git-lfs/git-lfs/releases/download/v3.8.1/git-lfs-linux-amd64-v3.8.1.tar.gz github-releases/git-lfs/git-lfs/v3.8.1/git-lfs-linux-amd64-v3.8.1.tar.gz \
     && tar -C /usr/local/bin --strip-components=1 -xzf /tmp/git-lfs.tgz git-lfs-3.8.1/git-lfs \
     && rm -f /tmp/git-lfs.tgz \
     && git lfs install --system
 
 # Install Kind (Kubernetes in Docker) for spinning up temporary k8s clusters.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kind aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/kind aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 github-releases/kubernetes-sigs/kind/v0.33.0/kind-linux-amd64 \
     && chmod +x /usr/local/bin/kind
 
 # Install k3d (k3s in Docker) for lightweight temporary k8s clusters.
 # Was `curl .../k3d-io/k3d/main/install.sh | bash` (installs the latest release binary); prod had v5.9.0.
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/k3d 06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0 \
-      https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64 \
+      https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-amd64 github-releases/k3d-io/k3d/v5.9.0/k3d-linux-amd64 \
     && chmod 755 /usr/local/bin/k3d
 
 # Install Minikube for local Kubernetes clusters.
 # Was releases/latest; prod had v1.39.0.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/minikube b738496da01be06bbaf80c688f57ce25acd3849fbb518155f3a88e03ef555aa4 https://storage.googleapis.com/minikube/releases/v1.39.0/minikube-linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/minikube b738496da01be06bbaf80c688f57ce25acd3849fbb518155f3a88e03ef555aa4 https://storage.googleapis.com/minikube/releases/v1.39.0/minikube-linux-amd64 gcs/minikube/releases/v1.39.0/minikube-linux-amd64 \
     && chmod +x /usr/local/bin/minikube
 
 # Install Skaffold for continuous k8s development.
 # Was releases/latest; prod had v2.25.0.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/skaffold 42b9e2e3246c19b78fcc53dd60cc7ded1da8704293886b909a2a02b9bef34d20 https://storage.googleapis.com/skaffold/releases/v2.25.0/skaffold-linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/skaffold 42b9e2e3246c19b78fcc53dd60cc7ded1da8704293886b909a2a02b9bef34d20 https://storage.googleapis.com/skaffold/releases/v2.25.0/skaffold-linux-amd64 gcs/skaffold/releases/v2.25.0/skaffold-linux-amd64 \
     && chmod +x /usr/local/bin/skaffold
 
 # Install Tilt for live k8s development.
 # Was `curl .../tilt-dev/tilt/master/scripts/install.sh | bash` (latest release into /usr/local/bin);
 # prod had v0.37.9.
 RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/tilt.tgz e70bb856b8e1cddb249b1e4231c1b1edca1f78167415effbdc9a1e893b6b9a19 \
-      https://github.com/tilt-dev/tilt/releases/download/v0.37.9/tilt.0.37.9.linux.x86_64.tar.gz \
+      https://github.com/tilt-dev/tilt/releases/download/v0.37.9/tilt.0.37.9.linux.x86_64.tar.gz github-releases/tilt-dev/tilt/v0.37.9/tilt.0.37.9.linux.x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/tilt.tgz tilt \
     && rm -f /tmp/tilt.tgz
 
 # Install Telepresence for connecting local dev to remote clusters.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/telepresence a2929ecbcb229830e324deef8ff55d3b48d0f230a83730e18fa895e1ada3f04e https://github.com/telepresenceio/telepresence/releases/download/v2.33.3/telepresence-linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/telepresence a2929ecbcb229830e324deef8ff55d3b48d0f230a83730e18fa895e1ada3f04e https://github.com/telepresenceio/telepresence/releases/download/v2.33.3/telepresence-linux-amd64 github-releases/telepresenceio/telepresence/v2.33.3/telepresence-linux-amd64 \
     && chmod +x /usr/local/bin/telepresence
 
 # Install kubectx and kubens for quick context/namespace switching.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/kubectx.tgz 08e031c54fbffb3f100e904e4eae94bba2730fedf4869921fda79e4d7a8f5d4c https://github.com/ahmetb/kubectx/releases/download/v0.11.0/kubectx_v0.11.0_linux_x86_64.tar.gz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/kubectx.tgz 08e031c54fbffb3f100e904e4eae94bba2730fedf4869921fda79e4d7a8f5d4c https://github.com/ahmetb/kubectx/releases/download/v0.11.0/kubectx_v0.11.0_linux_x86_64.tar.gz github-releases/ahmetb/kubectx/v0.11.0/kubectx_v0.11.0_linux_x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/kubectx.tgz kubectx \
-    && sh /tmp/fetch.sh /tmp/kubens.tgz 326c021c7b35468ed9a187b361198d0f22ae32828139c65eb6670c0d8301cc09 https://github.com/ahmetb/kubectx/releases/download/v0.11.0/kubens_v0.11.0_linux_x86_64.tar.gz \
+    && sh /tmp/fetch.sh /tmp/kubens.tgz 326c021c7b35468ed9a187b361198d0f22ae32828139c65eb6670c0d8301cc09 https://github.com/ahmetb/kubectx/releases/download/v0.11.0/kubens_v0.11.0_linux_x86_64.tar.gz github-releases/ahmetb/kubectx/v0.11.0/kubens_v0.11.0_linux_x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/kubens.tgz kubens \
     && rm -f /tmp/kubectx.tgz /tmp/kubens.tgz
 
 # Install stern for multi-pod log tailing.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/stern.tgz 03729b01a8fcfab25f6ea53389bd38bc37400ff86d90cd2dcda541f248cf843e https://github.com/stern/stern/releases/download/v1.35.0/stern_1.35.0_linux_amd64.tar.gz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/stern.tgz 03729b01a8fcfab25f6ea53389bd38bc37400ff86d90cd2dcda541f248cf843e https://github.com/stern/stern/releases/download/v1.35.0/stern_1.35.0_linux_amd64.tar.gz github-releases/stern/stern/v1.35.0/stern_1.35.0_linux_amd64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/stern.tgz stern \
     && rm -f /tmp/stern.tgz
 
 # Install DevSpace for k8s development workflow.
 # Was releases/latest; prod had v6.3.21.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/devspace 9720a6c87a2465f6d73b4db5a908e15e1971158443b5de9162d94aa5f87f79f0 https://github.com/devspace-sh/devspace/releases/download/v6.3.21/devspace-linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/devspace 9720a6c87a2465f6d73b4db5a908e15e1971158443b5de9162d94aa5f87f79f0 https://github.com/devspace-sh/devspace/releases/download/v6.3.21/devspace-linux-amd64 github-releases/devspace-sh/devspace/v6.3.21/devspace-linux-amd64 \
     && chmod +x /usr/local/bin/devspace
 
 # Install ctlptl for declarative local cluster management.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/ctlptl.tgz a83ad620d04a526fd4186adfab9e757e8d59b9becf9b1244a9416dfaabec610f https://github.com/tilt-dev/ctlptl/releases/download/v0.9.6/ctlptl.0.9.6.linux.x86_64.tar.gz \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /tmp/ctlptl.tgz a83ad620d04a526fd4186adfab9e757e8d59b9becf9b1244a9416dfaabec610f https://github.com/tilt-dev/ctlptl/releases/download/v0.9.6/ctlptl.0.9.6.linux.x86_64.tar.gz github-releases/tilt-dev/ctlptl/v0.9.6/ctlptl.0.9.6.linux.x86_64.tar.gz \
     && tar -C /usr/local/bin -xzf /tmp/ctlptl.tgz ctlptl \
     && rm -f /tmp/ctlptl.tgz
 
 # Install vcluster for virtual clusters inside k8s.
 # Was releases/latest; prod had v0.38.0.
-RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/vcluster a27849d95f6565fb0eaf452f593b17628116201dd054cde6d83354afac6f89e5 https://github.com/loft-sh/vcluster/releases/download/v0.38.0/vcluster-linux-amd64 \
+RUN --mount=type=bind,source=build/fetch.sh,target=/tmp/fetch.sh sh /tmp/fetch.sh /usr/local/bin/vcluster a27849d95f6565fb0eaf452f593b17628116201dd054cde6d83354afac6f89e5 https://github.com/loft-sh/vcluster/releases/download/v0.38.0/vcluster-linux-amd64 github-releases/loft-sh/vcluster/v0.38.0/vcluster-linux-amd64 \
     && chmod +x /usr/local/bin/vcluster
 
 # Install python-based helpers for LLM tooling (placeholders for Claude/Codex/Gemini CLIs).

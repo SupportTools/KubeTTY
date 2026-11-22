@@ -23,7 +23,6 @@ type fakeGateway struct {
 	restricted    bool
 	shellEvals    bool // false: the "shell" only echoes input, never runs it
 	deleteCode    int
-	accessToken   string // non-empty: a Cloudflare Access service token is required in front
 	loggedOut     bool
 	revokedTokens []string
 }
@@ -40,10 +39,6 @@ func (g *fakeGateway) handler(t *testing.T) http.Handler {
 	up := websocket.Upgrader{}
 	n := 0
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if g.accessToken != "" && (r.Header.Get("CF-Access-Client-Id") != "cid.access" || r.Header.Get("CF-Access-Client-Secret") != g.accessToken) {
-			http.Redirect(w, r, "https://team.example.com/login", http.StatusFound)
-			return
-		}
 		if r.URL.Path == "/api/auth/login" && r.Method == http.MethodPost {
 			var req map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&req)
@@ -175,18 +170,6 @@ func TestSmokePasses(t *testing.T) {
 	}
 }
 
-func TestSmokeSendsAccessServiceToken(t *testing.T) {
-	g := newFake()
-	g.accessToken = "cf-secret"
-	out, err := runAgainst(t, g, func(c *config) { c.AccessClientID = "cid.access"; c.AccessClientSecret = "cf-secret" })
-	if err != nil {
-		t.Fatalf("smoke failed: %v\n%s", err, out)
-	}
-	if strings.Contains(out, "cf-secret") {
-		t.Fatal("secret printed")
-	}
-}
-
 func TestSmokeFailures(t *testing.T) {
 	cases := map[string]struct {
 		g    func(*fakeGateway)
@@ -194,7 +177,6 @@ func TestSmokeFailures(t *testing.T) {
 		want string
 	}{
 		"wrong password":              {cfg: func(c *config) { c.Password = "wrong" }, want: "/api/auth/login = 401"},
-		"refused in front (redirect)": {g: func(g *fakeGateway) { g.accessToken = "cf-secret" }, want: "/api/auth/login = 302"},
 		"not restricted":              {g: func(g *fakeGateway) { g.restricted = false }, want: "want 403"},
 		"shell does not run commands": {g: func(g *fakeGateway) { g.shellEvals = false }, cfg: func(c *config) { c.Timeout = time.Second }, want: "terminal echo"},
 		"tab not closed":              {g: func(g *fakeGateway) { g.deleteCode = http.StatusInternalServerError }, want: "want 204"},

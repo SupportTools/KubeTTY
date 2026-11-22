@@ -637,11 +637,9 @@ jobs:
   # Stage 6a2: functional smoke against DEV. The dev health gate only proves the database answers;
   # this logs in as kubetty-smoke (a restricted local user, values.dev.yaml auth.restrictedUsers),
   # checks it is restricted, and runs a shell-evaluated line in a throwaway terminal tab over /ws.
-  # CI cannot do a GitHub login, so the smoke user has a password (Vault secret/kubetty/ci-smoke-user).
-  # Until the kubetty-dev Access app is removed it also presents the dev-only Access service token
-  # (cluster-services access.tf kubetty_dev_smoke) to get through Cloudflare. Secrets come keylessly
-  # from Vault (GitHub OIDC, role gha-kubetty). deploy-production needs this job: a smoke failure
-  # skips prod and rolls dev back.
+  # CI cannot do a GitHub login, so the smoke user has a password (Vault secret/kubetty/ci-smoke-user,
+  # read keylessly through GitHub OIDC, role gha-kubetty). deploy-production needs this job: a smoke
+  # failure skips prod and rolls dev back.
   smoke-dev:
     name: Smoke Test Dev (login + terminal)
     runs-on: self-hosted-linux
@@ -702,7 +700,7 @@ jobs:
 
       # Keyless: GitHub OIDC -> Vault jwt role gha-kubetty (policy gha-kubetty-read). vault-action
       # masks the values in the log.
-      - name: Vault login (GitHub OIDC) + dev smoke credentials
+      - name: Vault login (GitHub OIDC) + dev smoke password
         uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
         with:
           url: https://vault.support.tools
@@ -712,9 +710,7 @@ jobs:
           jwtGithubAudience: https://github.com/SupportTools
           exportEnv: true
           secrets: |
-            secret/data/kubetty/ci-smoke-user password | KUBETTY_SMOKE_PASSWORD ;
-            secret/data/kubetty/ci-smoke-access-token client_id | CF_ACCESS_CLIENT_ID ;
-            secret/data/kubetty/ci-smoke-access-token client_secret | CF_ACCESS_CLIENT_SECRET
+            secret/data/kubetty/ci-smoke-user password | KUBETTY_SMOKE_PASSWORD
 
       # server/cmd/kubetty-smoke. Fetch tier: Go modules from Athens only (GOPROXY=goproxy.support.tools,
       # no proxy.golang.org fallthrough), same as the image build.

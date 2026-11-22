@@ -15,8 +15,6 @@
 //	KUBETTY_SMOKE_PASSWORD   password of the local smoke user
 //	KUBETTY_SMOKE_PROJECT    project to open the tab on (default test-project)
 //	KUBETTY_SMOKE_TIMEOUT    overall timeout (default 3m)
-//	CF_ACCESS_CLIENT_ID      Cloudflare Access service token, sent while Access
-//	CF_ACCESS_CLIENT_SECRET  fronts the site
 //
 // Exit status 0 only if every check passed. Secrets are never printed.
 package main
@@ -40,27 +38,23 @@ import (
 )
 
 type config struct {
-	BaseURL            string
-	User               string
-	Password           string
-	Project            string
-	AccessClientID     string
-	AccessClientSecret string
-	Timeout            time.Duration
+	BaseURL  string
+	User     string
+	Password string
+	Project  string
+	Timeout  time.Duration
 	// AttachRetry is how long to wait for shell output before resending the command.
 	AttachRetry time.Duration
 }
 
 func main() {
 	cfg := config{
-		BaseURL:            strings.TrimRight(os.Getenv("KUBETTY_SMOKE_URL"), "/"),
-		User:               envOr("KUBETTY_SMOKE_USER", "kubetty-smoke"),
-		Password:           os.Getenv("KUBETTY_SMOKE_PASSWORD"),
-		Project:            envOr("KUBETTY_SMOKE_PROJECT", "test-project"),
-		AccessClientID:     os.Getenv("CF_ACCESS_CLIENT_ID"),
-		AccessClientSecret: os.Getenv("CF_ACCESS_CLIENT_SECRET"),
-		Timeout:            3 * time.Minute,
-		AttachRetry:        15 * time.Second,
+		BaseURL:     strings.TrimRight(os.Getenv("KUBETTY_SMOKE_URL"), "/"),
+		User:        envOr("KUBETTY_SMOKE_USER", "kubetty-smoke"),
+		Password:    os.Getenv("KUBETTY_SMOKE_PASSWORD"),
+		Project:     envOr("KUBETTY_SMOKE_PROJECT", "test-project"),
+		Timeout:     3 * time.Minute,
+		AttachRetry: 15 * time.Second,
 	}
 	if v := os.Getenv("KUBETTY_SMOKE_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -98,10 +92,6 @@ type client struct {
 }
 
 func (c *client) headers(h http.Header) {
-	if c.cfg.AccessClientID != "" {
-		h.Set("CF-Access-Client-Id", c.cfg.AccessClientID)
-		h.Set("CF-Access-Client-Secret", c.cfg.AccessClientSecret)
-	}
 	if c.accessToken != "" {
 		h.Set("Authorization", "Bearer "+c.accessToken)
 	}

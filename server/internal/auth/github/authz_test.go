@@ -107,3 +107,11 @@ func TestAuthorizerCachesAnswersNotErrors(t *testing.T) {
 		t.Fatal("the error must not be cached")
 	}
 }
+
+func TestCanWriteWhenTheAppCannotSeeTheRepo(t *testing.T) {
+	f := &fakeLookups{err: ErrNotInstalled}
+	a := NewAuthorizer(f, nil, nil, time.Minute)
+	if ok, err := a.CanWrite(context.Background(), "Other/repo", "octo"); ok || err != nil {
+		t.Fatalf("a repo the App cannot see means no access, not an error: %v %v", ok, err)
+	}
+}

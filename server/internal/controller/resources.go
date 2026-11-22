@@ -338,8 +338,7 @@ func BuildService(p *projects.Project, cfg ResourceConfig) *corev1.Service {
 	}
 }
 
-// BuildNetworkPolicy creates a NetworkPolicy that allows ingress from gateway pods.
-// This enables the gateway to connect to project pods for terminal WebSocket and VNC traffic.
+// BuildNetworkPolicy admits only the gateway namespace, so a sandbox cannot skip the gateway's access checks.
 // Name format: {prefix}{project-name}-ingress
 func BuildNetworkPolicy(p *projects.Project, cfg ResourceConfig, gatewayNamespace string) *networkingv1.NetworkPolicy {
 	resourceName := fmt.Sprintf("%s-ingress", cfg.ResourceName(p.Name))
@@ -384,7 +383,6 @@ func BuildNetworkPolicy(p *projects.Project, cfg ResourceConfig, gatewayNamespac
 			},
 			Ingress: []networkingv1.NetworkPolicyIngressRule{
 				{
-					// Allow from gateway namespace
 					From: []networkingv1.NetworkPolicyPeer{
 						{
 							NamespaceSelector: &metav1.LabelSelector{
@@ -392,15 +390,6 @@ func BuildNetworkPolicy(p *projects.Project, cfg ResourceConfig, gatewayNamespac
 									"kubernetes.io/metadata.name": gatewayNamespace,
 								},
 							},
-						},
-					},
-					Ports: ingressPorts,
-				},
-				{
-					// Allow from same namespace (for health checks, prometheus)
-					From: []networkingv1.NetworkPolicyPeer{
-						{
-							PodSelector: &metav1.LabelSelector{},
 						},
 					},
 					Ports: ingressPorts,

@@ -12,6 +12,7 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/projects"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1177,31 +1178,13 @@ func (c *Controller) updateNetworkPolicyIfNeeded(ctx context.Context, p *project
 		return fmt.Errorf("failed to get NetworkPolicy: %w", err)
 	}
 
-	// Build desired NetworkPolicy
 	desiredNetPol := BuildNetworkPolicy(p, cfg, cfg.GatewayNamespace)
-
-	// Simple comparison: check if number of ingress rules/ports match
-	// For a more robust comparison, we'd need to compare the full spec
-	existingPortCount := 0
-	desiredPortCount := 0
-	if len(existingNetPol.Spec.Ingress) > 0 {
-		existingPortCount = len(existingNetPol.Spec.Ingress[0].Ports)
-	}
-	if len(desiredNetPol.Spec.Ingress) > 0 {
-		desiredPortCount = len(desiredNetPol.Spec.Ingress[0].Ports)
-	}
-
-	if existingPortCount == desiredPortCount {
-		logger.Debug("NetworkPolicy ingress rules already match desired state")
+	if equality.Semantic.DeepEqual(existingNetPol.Spec, desiredNetPol.Spec) {
+		logger.Debug("NetworkPolicy already matches desired state")
 		return nil
 	}
 
-	// Update NetworkPolicy
-	logger.WithFields(logrus.Fields{
-		"existingPorts": existingPortCount,
-		"desiredPorts":  desiredPortCount,
-	}).Info("Updating NetworkPolicy ingress rules")
-
+	logger.Info("Updating NetworkPolicy to the desired spec")
 	existingNetPol.Spec = desiredNetPol.Spec
 	if _, err := c.clientset.NetworkingV1().NetworkPolicies(cfg.Namespace).Update(ctx, existingNetPol, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("failed to update NetworkPolicy: %w", err)

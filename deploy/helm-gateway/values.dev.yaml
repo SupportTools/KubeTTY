@@ -23,7 +23,7 @@ env:
 auth:
   mode: github
   github:
-    clientId: PENDING-GITHUB-APP-CLIENT-ID
+    clientId: Iv23liM4XZDQoxB1Ml1S
     callbackUrl: https://kubetty-dev.support.tools/api/auth/github/callback
     allow: org:SupportTools
     adminTeams: SupportTools/admins

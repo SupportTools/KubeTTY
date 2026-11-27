@@ -438,6 +438,34 @@ const DinDImage = "harbor.support.tools/noemsign/library/docker:29.9.3-dind-noem
 //
 // find -exec ... {} + batches chown calls; chown -h changes a symlink itself
 // rather than whatever it points to; -xdev keeps the walk on the volume.
+//
+// The walk runs in parallel (cluster-services-1441). After 1430 the supervised
+// walk still took ~6 min at every restart (fruition 363-371s, fcp 351-367s):
+// one find reads one directory at a time, so a cold walk over iSCSI is bound by
+// round-trip latency, not by CPU or by the chown count (zero). The tree is split
+// at CHOWN_SPLIT_DEPTH below each root:
+//   - one find fixes every entry shallower than the split depth;
+//   - one find lists the directories AT the split depth (and fixes the
+//     non-directories there), and xargs walks each listed directory with its
+//     own find, CHOWN_PARALLEL at a time.
+//
+// Together they visit every entry exactly once, with the same test and the same
+// chown as the single find did (TestInitPermissions_ParallelWalkCoversEveryEntryOnce).
+// The one difference: a mount point lying exactly at the split depth would be
+// walked by its own find. The init container mounts only the volume, at /data,
+// so there is no such mount point.
+//
+// The default split depth comes from the inode layout of the fruition volume
+// (2026-11-27, home only; the cold du was cut off at 10 min). The largest single
+// subtree at each depth below home was: depth 6, 1.74M inodes
+// (~/go/src/github.com/fruition/d); depth 7, 1.64M (.../d/fruition-bot);
+// depth 8, 74K; depth 9, 43K. Out of ~5.2M, one 1.7M subtree would cap the
+// speedup at about 3x, so the split sits at depth 8. The shallow part above it
+// is about 15K directories.
+//
+// The walk runs in its own process group (set -m), so the supervisor sums the
+// CPU time of the whole group (every find, xargs and their chown children), and
+// a stall or budget stop kills the whole group, not just its leader.
 // KUBETTY_DATA_DIR and the CHOWN_* variables exist so tests can drive it.
 const initPermissionsScript = `
 set -euo pipefail
@@ -445,6 +473,10 @@ DATA="${KUBETTY_DATA_DIR:-/data}"
 BUDGET="${CHOWN_BUDGET_SECONDS:-900}"
 STALL="${CHOWN_STALL_SECONDS:-120}"
 POLL="${CHOWN_POLL_SECONDS:-5}"
+PARALLEL="${CHOWN_PARALLEL:-8}"
+SPLIT="${CHOWN_SPLIT_DEPTH:-8}"
+if [ "$SPLIT" -lt 1 ]; then SPLIT=1; fi
+if [ "$PARALLEL" -lt 1 ]; then PARALLEL=1; fi
 if ! getent group mmattox >/dev/null 2>&1; then
   groupadd -g 1000 mmattox
 fi
@@ -453,29 +485,55 @@ if ! id -u mmattox >/dev/null 2>&1; then
 fi
 mkdir -p "$DATA/opt" "$DATA/home" "$DATA/usr-local-go" "$DATA/var-lib-docker"
 mkdir -p "$DATA/home/mmattox"
+ROOTS=("$DATA/opt" "$DATA/home" "$DATA/usr-local-go")
 
-find "$DATA/opt" "$DATA/home" "$DATA/usr-local-go" -xdev \! -user mmattox -exec chown -h mmattox:mmattox {} + &
+# Every entry under ROOTS not owned by mmattox is chowned exactly once:
+# depth < SPLIT by the first find, depth == SPLIT by the second (directories are
+# handed to xargs instead), and below that by one find per SPLIT-depth directory.
+walk() {
+  local rc=0 shallow=0 p
+  find "${ROOTS[@]}" -xdev -maxdepth $((SPLIT - 1)) \! -user mmattox -exec chown -h mmattox:mmattox {} + &
+  p=$!
+  find "${ROOTS[@]}" -xdev -mindepth "$SPLIT" -maxdepth "$SPLIT" \
+      \( -type d -print0 \) -o \( \! -user mmattox -exec chown -h mmattox:mmattox {} + \) \
+    | xargs -0 -r -P "$PARALLEL" -I@SUBTREE@ find @SUBTREE@ -xdev \! -user mmattox -exec chown -h mmattox:mmattox {} + \
+    || rc=$?
+  wait "$p" || shallow=$?
+  if [ "$shallow" -ne 0 ]; then return "$shallow"; fi
+  return "$rc"
+}
+
+set -m
+walk &
 pid=$!
+set +m
 
-# utime+stime+cutime+cstime of the walker, in clock ticks.
-cpu_ticks() { awk '{print $14+$15+$16+$17}' "/proc/$1/stat" 2>/dev/null || echo gone; }
+# utime+stime+cutime+cstime of every process in the walk's process group, in
+# clock ticks. Fields counted after the "pid (comm) " prefix: $3 pgrp, $12-$15.
+# cat skips processes that exit mid-read (|| true: that is not an error here).
+group_ticks() {
+  { cat /proc/[0-9]*/stat 2>/dev/null || true; } | awk -v g="$1" '
+    { sub(/^[0-9]+ \(.*\) /, "") }
+    $3 == g { t += $12 + $13 + $14 + $15; n++ }
+    END { if (n) print t; else print "gone" }'
+}
 
 start=$SECONDS
 last=""
 idle=0
 while kill -0 "$pid" 2>/dev/null; do
   sleep "$POLL"
-  now=$(cpu_ticks "$pid")
+  now=$(group_ticks "$pid")
   [ "$now" = gone ] && break
   if [ "$now" = "$last" ]; then idle=$((idle + POLL)); else idle=0; last=$now; fi
   if [ "$idle" -ge "$STALL" ]; then
     echo "init-permissions: ownership walk made no CPU progress for ${idle}s; failing so kubelet retries (storage may be hung)" >&2
-    kill "$pid" 2>/dev/null || true
+    kill -- -"$pid" 2>/dev/null || true
     exit 1
   fi
   if [ $((SECONDS - start)) -ge "$BUDGET" ]; then
     echo "init-permissions: ownership walk still running after ${BUDGET}s on a large volume; continuing startup, files not reached are fixed on a later start" >&2
-    kill "$pid" 2>/dev/null || true
+    kill -- -"$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     exit 0
   fi

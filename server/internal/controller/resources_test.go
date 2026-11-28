@@ -5,7 +5,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/supporttools/KubeTTY/server/internal/projects"
-	rbacv1 "k8s.io/api/rbac/v1"
 )
 
 // testProject creates a sample project for testing.
@@ -183,55 +182,6 @@ func TestSanitizeName(t *testing.T) {
 			result := SanitizeName(tt.input)
 			if result != tt.expected {
 				t.Errorf("SanitizeName(%q) = %q, expected %q", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestResourceConfig_ClusterRoleName(t *testing.T) {
-	tests := []struct {
-		name        string
-		cfg         ResourceConfig
-		projectName string
-		role        string
-		expected    string
-	}{
-		{
-			name:        "admin role with env",
-			cfg:         ResourceConfig{Prefix: "kubetty-project-", Env: "dev"},
-			projectName: "alpha",
-			role:        "admin",
-			expected:    "kubetty-project-alpha-admin-dev",
-		},
-		{
-			name:        "read role with env",
-			cfg:         ResourceConfig{Prefix: "kubetty-project-", Env: "prd"},
-			projectName: "beta",
-			role:        "read",
-			expected:    "kubetty-project-beta-read-prd",
-		},
-		{
-			name:        "empty env omits suffix",
-			cfg:         ResourceConfig{Prefix: "kubetty-project-", Env: ""},
-			projectName: "gamma",
-			role:        "admin",
-			expected:    "kubetty-project-gamma-admin",
-		},
-		{
-			name:        "uppercase project name sanitized",
-			cfg:         ResourceConfig{Prefix: "kubetty-project-", Env: "dev"},
-			projectName: "MyProject",
-			role:        "admin",
-			expected:    "kubetty-project-myproject-admin-dev",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := tt.cfg.ClusterRoleName(tt.projectName, tt.role)
-			if result != tt.expected {
-				t.Errorf("ClusterRoleName(%q, %q) = %q, expected %q",
-					tt.projectName, tt.role, result, tt.expected)
 			}
 		})
 	}
@@ -463,137 +413,6 @@ func TestBuildDeployment_WithDinD(t *testing.T) {
 	}
 }
 
-func TestBuildAdminClusterRole(t *testing.T) {
-	p := testProject("eta")
-	cfg := testConfig()
-
-	cr := BuildAdminClusterRole(p, cfg)
-
-	// Test name format: {prefix}{project-name}-admin-{env}
-	expectedName := "kubetty-project-eta-admin-dev"
-	if cr.Name != expectedName {
-		t.Errorf("ClusterRole name = %q, expected %q", cr.Name, expectedName)
-	}
-
-	// Test that it's cluster-scoped (no namespace)
-	if cr.Namespace != "" {
-		t.Errorf("ClusterRole should be cluster-scoped, got namespace %q", cr.Namespace)
-	}
-
-	// Test labels
-	verifyLabels(t, cr.Labels, p, cfg, "AdminClusterRole")
-
-	// Test that it has admin permissions (includes create, delete, etc.)
-	verifyAdminPermissions(t, cr.Rules)
-}
-
-func TestBuildReadClusterRole(t *testing.T) {
-	p := testProject("theta")
-	cfg := testConfig()
-
-	cr := BuildReadClusterRole(p, cfg)
-
-	// Test name format: {prefix}{project-name}-read-{env}
-	expectedName := "kubetty-project-theta-read-dev"
-	if cr.Name != expectedName {
-		t.Errorf("ClusterRole name = %q, expected %q", cr.Name, expectedName)
-	}
-
-	// Test that it's cluster-scoped (no namespace)
-	if cr.Namespace != "" {
-		t.Errorf("ClusterRole should be cluster-scoped, got namespace %q", cr.Namespace)
-	}
-
-	// Test labels
-	verifyLabels(t, cr.Labels, p, cfg, "ReadClusterRole")
-
-	// Test that it has read-only permissions
-	verifyReadOnlyPermissions(t, cr.Rules)
-}
-
-func TestBuildAdminClusterRoleBinding(t *testing.T) {
-	p := testProject("iota")
-	cfg := testConfig()
-
-	crb := BuildAdminClusterRoleBinding(p, cfg)
-
-	// Test name format: {prefix}{project-name}-admin-{env}
-	expectedName := "kubetty-project-iota-admin-dev"
-	if crb.Name != expectedName {
-		t.Errorf("ClusterRoleBinding name = %q, expected %q", crb.Name, expectedName)
-	}
-
-	// Test that it's cluster-scoped (no namespace in ObjectMeta)
-	if crb.Namespace != "" {
-		t.Errorf("ClusterRoleBinding should be cluster-scoped, got namespace %q", crb.Namespace)
-	}
-
-	// Test labels
-	verifyLabels(t, crb.Labels, p, cfg, "AdminClusterRoleBinding")
-
-	// Test subject references correct ServiceAccount
-	expectedSAName := "kubetty-project-iota-sa"
-	if len(crb.Subjects) != 1 {
-		t.Errorf("ClusterRoleBinding should have 1 subject, got %d", len(crb.Subjects))
-	} else {
-		subject := crb.Subjects[0]
-		if subject.Kind != "ServiceAccount" {
-			t.Errorf("Subject kind = %q, expected ServiceAccount", subject.Kind)
-		}
-		if subject.Name != expectedSAName {
-			t.Errorf("Subject name = %q, expected %q", subject.Name, expectedSAName)
-		}
-		if subject.Namespace != cfg.Namespace {
-			t.Errorf("Subject namespace = %q, expected %q", subject.Namespace, cfg.Namespace)
-		}
-	}
-
-	// Test roleRef references correct ClusterRole
-	if crb.RoleRef.Kind != "ClusterRole" {
-		t.Errorf("RoleRef kind = %q, expected ClusterRole", crb.RoleRef.Kind)
-	}
-	if crb.RoleRef.Name != expectedName {
-		t.Errorf("RoleRef name = %q, expected %q", crb.RoleRef.Name, expectedName)
-	}
-}
-
-func TestBuildReadClusterRoleBinding(t *testing.T) {
-	p := testProject("kappa")
-	cfg := testConfig()
-
-	crb := BuildReadClusterRoleBinding(p, cfg)
-
-	// Test name format: {prefix}{project-name}-read-{env}
-	expectedName := "kubetty-project-kappa-read-dev"
-	if crb.Name != expectedName {
-		t.Errorf("ClusterRoleBinding name = %q, expected %q", crb.Name, expectedName)
-	}
-
-	// Test that it's cluster-scoped (no namespace in ObjectMeta)
-	if crb.Namespace != "" {
-		t.Errorf("ClusterRoleBinding should be cluster-scoped, got namespace %q", crb.Namespace)
-	}
-
-	// Test labels
-	verifyLabels(t, crb.Labels, p, cfg, "ReadClusterRoleBinding")
-
-	// Test subject references correct ServiceAccount
-	expectedSAName := "kubetty-project-kappa-sa"
-	if len(crb.Subjects) != 1 {
-		t.Errorf("ClusterRoleBinding should have 1 subject, got %d", len(crb.Subjects))
-	} else {
-		subject := crb.Subjects[0]
-		if subject.Name != expectedSAName {
-			t.Errorf("Subject name = %q, expected %q", subject.Name, expectedSAName)
-		}
-	}
-
-	// Test roleRef references correct ClusterRole
-	if crb.RoleRef.Name != expectedName {
-		t.Errorf("RoleRef name = %q, expected %q", crb.RoleRef.Name, expectedName)
-	}
-}
-
 func TestProjectLabels(t *testing.T) {
 	p := testProject("lambda")
 	cfg := testConfig()
@@ -639,52 +458,6 @@ func TestProjectSelectorLabels(t *testing.T) {
 	// Selector labels should be minimal (only 3 labels)
 	if len(labels) != 3 {
 		t.Errorf("Selector labels should have 3 entries, got %d", len(labels))
-	}
-}
-
-func TestResourceNaming_DifferentEnvironments(t *testing.T) {
-	p := testProject("nu")
-
-	tests := []struct {
-		env            string
-		namespace      string
-		expectedCRName string
-	}{
-		{
-			env:            "dev",
-			namespace:      "kubetty-projects-dev",
-			expectedCRName: "kubetty-project-nu-admin-dev",
-		},
-		{
-			env:            "stg",
-			namespace:      "kubetty-projects-stg",
-			expectedCRName: "kubetty-project-nu-admin-stg",
-		},
-		{
-			env:            "prd",
-			namespace:      "kubetty-projects-prd",
-			expectedCRName: "kubetty-project-nu-admin-prd",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.env, func(t *testing.T) {
-			cfg := ResourceConfig{
-				Namespace: tt.namespace,
-				Prefix:    "kubetty-project-",
-				Env:       tt.env,
-			}
-
-			cr := BuildAdminClusterRole(p, cfg)
-			if cr.Name != tt.expectedCRName {
-				t.Errorf("ClusterRole name = %q, expected %q", cr.Name, tt.expectedCRName)
-			}
-
-			// Verify env label
-			if cr.Labels[labelEnvironment] != tt.env {
-				t.Errorf("Environment label = %q, expected %q", cr.Labels[labelEnvironment], tt.env)
-			}
-		})
 	}
 }
 
@@ -745,49 +518,5 @@ func verifySelectorLabels(t *testing.T, labels map[string]string, p *projects.Pr
 	}
 	if labels[labelProject] != p.Name {
 		t.Errorf("%s selector label %s = %q, expected %q", resourceType, labelProject, labels[labelProject], p.Name)
-	}
-}
-
-func verifyAdminPermissions(t *testing.T, rules []rbacv1.PolicyRule) {
-	t.Helper()
-
-	if len(rules) == 0 {
-		t.Error("Admin ClusterRole should have rules")
-		return
-	}
-
-	// Check for wildcard verbs (admin permissions)
-	hasWildcardVerbs := false
-	for _, rule := range rules {
-		for _, verb := range rule.Verbs {
-			if verb == "*" {
-				hasWildcardVerbs = true
-				break
-			}
-		}
-	}
-
-	if !hasWildcardVerbs {
-		t.Error("Admin ClusterRole should have wildcard (*) verbs")
-	}
-}
-
-func verifyReadOnlyPermissions(t *testing.T, rules []rbacv1.PolicyRule) {
-	t.Helper()
-
-	if len(rules) == 0 {
-		t.Error("Read ClusterRole should have rules")
-		return
-	}
-
-	// Check that only read verbs are present
-	allowedVerbs := map[string]bool{"get": true, "list": true, "watch": true}
-
-	for _, rule := range rules {
-		for _, verb := range rule.Verbs {
-			if !allowedVerbs[verb] {
-				t.Errorf("Read ClusterRole has non-read verb: %q", verb)
-			}
-		}
 	}
 }

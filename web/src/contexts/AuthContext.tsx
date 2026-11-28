@@ -10,7 +10,12 @@ import {
 import { parseErrorResponse } from "../utils/errorParser";
 
 export type AuthState = "checking" | "authenticated" | "unauthenticated";
-export type AuthUser = { id: string; username: string } | null;
+export type AuthUser = { id: string; username: string; role?: string; githubLogin?: string } | null;
+
+export const AUTH_MODE_GITHUB = "github";
+export const GITHUB_LOGIN_URL = "/api/auth/github/login";
+// The break-glass password form is served only at this path in GitHub mode.
+export const LOCAL_LOGIN_PATH = "/login/local";
 
 interface AuthContextType {
   authState: AuthState;
@@ -19,6 +24,8 @@ interface AuthContextType {
   logout: () => Promise<void>;
   authFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   refreshToken: () => Promise<boolean>;
+  authMode?: string | null;
+  isAdmin: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -53,6 +60,7 @@ const authLog = (message: string, ...args: unknown[]) => {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [user, setUser] = useState<AuthUser>(null);
+  const [authMode, setAuthMode] = useState<string | null>(null);
   const refreshTimerRef = useRef<number | null>(null);
   const isRefreshingRef = useRef(false);
   const lastVisibilityRefreshRef = useRef<number>(0);
@@ -104,6 +112,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         method: "POST",
         credentials: "include"
       });
+
+      if (res.status === 503) {
+        // Sign-in checks are briefly unavailable (database or GitHub); keep the session and retry.
+        authLog(`refreshToken: 503, retrying in 30s`);
+        scheduleRefresh(Date.now() + REFRESH_BUFFER_MS + 30 * 1000);
+        return false;
+      }
 
       if (!res.ok) {
         authLog(`refreshToken FAILED: status=${res.status}`);
@@ -207,10 +222,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const probeAuth = async () => {
       authLog(`probeAuth: checking initial auth state...`);
+      fetch("/api/auth/config", { credentials: "include" })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((cfg) => {
+          if (!cancelled && cfg && typeof cfg.authMode === "string") {
+            setAuthMode(cfg.authMode);
+          }
+        })
+        .catch(() => undefined);
       try {
         const res = await fetch("/api/auth/me", { credentials: "include" });
         authLog(`probeAuth: /api/auth/me returned status=${res.status}`);
-
         // If auth endpoints don't exist, assume authenticated (disabled auth mode)
         if (res.status === 404 || res.status === 405) {
           authLog(`probeAuth: auth disabled (404/405), setting authenticated`);
@@ -246,6 +268,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const data = await res.json();
         authLog(`probeAuth: authenticated as ${data.user?.username}`);
         if (!cancelled) {
+          if (typeof data.authMode === "string") {
+            setAuthMode(data.authMode);
+          }
           setAuthState("authenticated");
           setUser(data.user);
 
@@ -304,7 +329,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         login,
         logout,
         authFetch,
-        refreshToken
+        refreshToken,
+        authMode,
+        isAdmin: !user || !user.role || user.role === "admin"
       }}
     >
       {children}

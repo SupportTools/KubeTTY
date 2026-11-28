@@ -35,8 +35,28 @@ func WriteJSON(w http.ResponseWriter, status int, payload any) error {
 	// Encoding succeeded - now set headers and write response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	if !bodyAllowedForStatus(status) {
+		// RFC 9110: 1xx, 204 and 304 responses carry no body. net/http
+		// rejects a Write for them with http.ErrBodyNotAllowed (and, since
+		// Go 1.26, so does httptest.ResponseRecorder), so skip the body.
+		return nil
+	}
 	_, err := w.Write(buf.Bytes())
 	return err
+}
+
+// bodyAllowedForStatus reports whether a response with the given status
+// may include a body, mirroring net/http's internal rule.
+func bodyAllowedForStatus(status int) bool {
+	switch {
+	case status >= 100 && status <= 199:
+		return false
+	case status == http.StatusNoContent:
+		return false
+	case status == http.StatusNotModified:
+		return false
+	}
+	return true
 }
 
 // ClientIPFromRequest extracts the client IP address from an HTTP request.

@@ -11,7 +11,15 @@
 image:
   repository: harbor.support.tools/kubetty/kubetty
   tag: "v1.1.6"
-  pullPolicy: Always
+  # CI deploys by digest (repo@sha256:...), so the reference is immutable and
+  # a node that already holds those layers never needs to re-pull the ~2.7 GB
+  # image (taskforge-2682).
+  pullPolicy: IfNotPresent
+
+# The cold pull of the runtime image takes ~8 min; Kubernetes' default 600s
+# progress deadline leaves almost no headroom. Keep >= the pipeline's
+# DEPLOY_TIMEOUT (15m) so `kubectl rollout status` does not fail first.
+progressDeadlineSeconds: 1200
 
 imagePullSecrets:
   - harbor-supporttools
@@ -21,16 +29,28 @@ deploymentId: kubetty-gateway
 # Production environment
 env:
   LOG_LEVEL: info
-  RECOMMENDED_IMAGE_TAG: "v1.1.6"
+  # CI overrides this on every prod deploy with the newest vX.Y.Z release
+  # (pipeline.yml, extract-tag). This value is only the fallback.
+  RECOMMENDED_IMAGE_TAG: "1.16.0"
 
 # Empty static catalog - production uses dynamic projects only
 catalog:
   inline: |
     projects: []
 
-# Authentication - enabled for production
+# Authentication - GitHub App sign-in (TaskForge 26815). The App's client secret
+# and private key come from Vault secret/kubetty/github-app through ESO
+# (cluster-services kubetty/a1-ops-prd/gateway-secrets/github-app-prd.yaml).
 auth:
-  mode: local
+  mode: github
+  github:
+    clientId: Iv23liM4XZDQoxB1Ml1S
+    callbackUrl: https://kubetty.support.tools/api/auth/github/callback
+    allow: org:SupportTools
+    adminTeams: SupportTools/admins
+    secretName: kubetty-gateway-github
+  # Local admin for GitHub outages; password form at /login/local.
+  breakGlassUser: breakglass
   jwtSecretSecret:
     name: "kubetty-gateway-auth"
     key: jwt-secret

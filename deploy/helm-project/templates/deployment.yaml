@@ -107,15 +107,16 @@ spec:
       containers:
         {{- if .Values.pipelines.dind.enabled }}
         - name: docker
-          image: docker:24.0.5-dind
+          image: harbor.support.tools/noemsign/library/docker:29.9.3-dind-noemsign.1@sha256:005e01ddc00d15946f3098ec36777d4844abb057a3ea570de2d0a723251bbf64
           securityContext:
             privileged: true
           env:
             - name: DOCKER_TLS_CERTDIR
               value: ""
           args:
+            - dockerd
             - --host=unix:///var/run/docker/docker.sock
-            - --host=tcp://0.0.0.0:2375
+            - --group=root
           volumeMounts:
             - name: data
               mountPath: /var/lib/docker
@@ -145,8 +146,10 @@ spec:
               value: {{ .Values.env.claudeMaxTokens | quote }}
             - name: ANTHROPIC_BASE_URL
               value: {{ .Values.env.anthropicBaseURL | quote }}
+            # --use-openssl-ca is always appended: Node's compiled-in roots still include eMudhra
+            # emSign roots; the image's OpenSSL store has none (fleet CA standard, cluster-services-1375).
             - name: NODE_OPTIONS
-              value: {{ .Values.env.nodeOptions | quote }}
+              value: {{ printf "%s --use-openssl-ca" (.Values.env.nodeOptions | default "") | trim | quote }}
             - name: CLAUDE_CONFIG_DIR
               value: {{ .Values.env.claudeConfigDir | quote }}
             {{- if .Values.pipelines.dind.enabled }}

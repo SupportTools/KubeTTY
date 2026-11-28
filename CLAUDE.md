@@ -57,7 +57,7 @@ The Dockerfile and Helm chart use `KUBETTY_MODE` environment variable to select 
 ## Technology Stack
 
 ### Backend (server/)
-- **Language**: Go 1.24
+- **Language**: Go 1.26
 - **HTTP Server**: net/http with ServeMux
 - **WebSocket**: gorilla/websocket
 - **Database**: PostgreSQL via pgxpool (pgx/v5)
@@ -281,7 +281,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 ## Important Rules
 
-1. **Go 1.24** - Always use Go 1.24 (check server/go.mod)
+1. **Go 1.26** - Always use the Go version in server/go.mod (currently 1.26)
 2. **No console.log** - Remove debug logs before committing
 3. **Input validation** - Validate all user inputs
 4. **Test coverage** - Write tests for all new code
@@ -319,7 +319,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 | `SESSION_LOG_MAX_ENTRIES` | Max log entries per session; parsed but currently unused | No | 5000 |
 | `PROJECT_CATALOG_PATH` | Path to project catalog YAML | No | - |
 | `TAB_IDLE_TIMEOUT` | Tab idle timeout | No | 2h |
-| `AUTH_MODE` | Auth mode (disabled/local) | No | disabled |
+| `AUTH_MODE` | Auth mode (`disabled`, `local` or `github`) | No | disabled |
 | `AUTH_JWT_SECRET` | JWT secret | If auth=local | - |
 | `AUTH_ACCESS_TTL` | Access token TTL | No | 15m |
 | `AUTH_REFRESH_TTL` | Refresh token TTL | No | 720h (30 days) |

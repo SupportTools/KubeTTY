@@ -1,6 +1,6 @@
-# Current Implementation State (2026-10-01)
+# Current Implementation State (2026-10-01; auth section updated 2026-11-28)
 
-Snapshot of what is in the code at `e4f5b99`. For open defects see `QA_REVIEW.md`. For the
+Snapshot of what is in the code at `e4f5b99`, with the auth section brought up to date with `main` at `9a95332`. For open defects see `QA_REVIEW.md`. For the
 original architecture spec see `DESIGN.md`.
 
 ## Binaries (`server/cmd/`)
@@ -38,12 +38,15 @@ same output into `cmd/project/ui/dist`).
 
 ## Authentication
 
-- `AUTH_MODE=local` enables JWT auth: a short-lived access token (default 15m) and a rotating
+- `AUTH_MODE=local` (passwords) or `AUTH_MODE=github` (GitHub App sign-in, with break-glass
+  password logins; production uses it since `80ba5e7`) enables JWT auth: a short-lived access token (default 15m) and a rotating
   hashed refresh token (default 30 days), stored as HttpOnly, SameSite=Lax cookies (Secure by
   default). There is also a password-change endpoint.
-- If `AUTH_MODE` is anything else, routes are open. The gateway then logs a security warning and
+- If `AUTH_MODE` is `disabled`, routes are open. The gateway then logs a security warning and
   adds an `X-Auth-Warning` header. The `helm-gateway` chart defaults to `auth.mode: local`.
-- There are no roles: every authenticated user can use the admin API (QA_REVIEW N1).
+- Admin role: `/api/admin/*`, the dashboard, settings and `/session/logs` require an admin
+  (`RequireAdmin`, `8ef30ec`). In GitHub mode, project access follows the user's permission on
+  the project's `github_repo`; `RESTRICTED_USERS` can pin a user to one project.
 
 ## Project controller and HA
 

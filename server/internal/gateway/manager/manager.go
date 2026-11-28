@@ -403,8 +403,58 @@ func (m *Manager) Attach(ctx context.Context, tabID, clientID string, upstream *
 	return m.AttachWithOptions(ctx, tabID, clientID, upstream, false)
 }
 
+// ErrTabNotOwned is returned when a caller tries to attach to a tab owned by a
+// different owner ID. force=true does not override it (cluster-services-1542):
+// force only preempts the owner's own existing connection.
+var ErrTabNotOwned = errors.New("tab owned by another client")
+
+// TabProject returns the project ID of a live tab.
+func (m *Manager) TabProject(tabID string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.tabs[tabID]
+	if !ok {
+		return "", false
+	}
+	return e.project.ID, true
+}
+
+// CheckAttach reports whether clientID may attach to tabID without touching
+// the tab: tabs.ErrNotFound, ErrTabNotOwned, or nil. Handlers call it before
+// the WebSocket upgrade so a refusal is a plain HTTP 404/403; AttachWithOptions
+// re-checks under the lock.
+func (m *Manager) CheckAttach(tabID, clientID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.tabs[tabID]
+	if !ok {
+		return tabs.ErrNotFound
+	}
+	if e.clientID != clientID {
+		return ErrTabNotOwned
+	}
+	return nil
+}
+
+// refuseForeignAttach logs and builds the refusal for an attach by a
+// caller that does not own the tab. Call it after releasing m.mu.
+func refuseForeignAttach(kind, tabID, ownerID, callerID string, forceTakeover bool) error {
+	log.WithFields(log.Fields{
+		"tab_id":    tabID,
+		"owner_id":  ownerID,
+		"client_id": callerID,
+		"force":     forceTakeover,
+		"kind":      kind,
+	}).Warn("gateway/manager: attach to another owner's tab refused")
+	return fmt.Errorf("%w: tab %s", ErrTabNotOwned, tabID)
+}
+
 // AttachWithOptions proxies between the caller WebSocket and the downstream relay.
-// If forceTakeover is true, allows a different client to take over the tab.
+// forceTakeover preempts the owner's own existing connection (the same user on
+// another browser or device); it never transfers a tab to a different owner.
+// The owner ID is user-scoped in auth mode ("user:<uuid>", shared across a
+// user's devices) and browser-scoped in no-auth mode. There is no admin
+// takeover: an attach by any other owner returns ErrTabNotOwned.
 func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string, upstream *websocket.Conn, forceTakeover bool) error {
 	m.mu.Lock()
 	e, ok := m.tabs[tabID]
@@ -413,27 +463,9 @@ func (m *Manager) AttachWithOptions(ctx context.Context, tabID, clientID string,
 		return tabs.ErrNotFound
 	}
 	if e.clientID != clientID {
-		if !forceTakeover {
-			m.mu.Unlock()
-			return fmt.Errorf("tab %s owned by another client", tabID)
-		}
-		// Force takeover: update clientID
-		log.WithFields(log.Fields{
-			"tab_id":        tabID,
-			"old_client_id": e.clientID,
-			"new_client_id": clientID,
-		}).Info("gateway/manager: force takeover of tab")
-		e.clientID = clientID
-		// Update in database
-		go func() {
-			if err := m.store.UpdateClientID(context.Background(), tabID, clientID); err != nil {
-				log.WithFields(log.Fields{
-					"tab_id":    tabID,
-					"client_id": clientID,
-					"error":     err.Error(),
-				}).Warn("gateway/manager: failed to update client ID in database")
-			}
-		}()
+		owner := e.clientID
+		m.mu.Unlock()
+		return refuseForeignAttach("terminal", tabID, owner, clientID, forceTakeover)
 	}
 
 	// Health check: verify relay is in a connectable state before attaching
@@ -630,27 +662,9 @@ func (m *Manager) AttachVNC(ctx context.Context, tabID, clientID string, upstrea
 	}
 
 	if e.clientID != clientID {
-		if !forceTakeover {
-			m.mu.Unlock()
-			return fmt.Errorf("tab %s owned by another client", tabID)
-		}
-		// Force takeover: update clientID
-		log.WithFields(log.Fields{
-			"tab_id":        tabID,
-			"old_client_id": e.clientID,
-			"new_client_id": clientID,
-		}).Info("gateway/manager: force VNC takeover of tab")
-		e.clientID = clientID
-		// Update in database
-		go func() {
-			if err := m.store.UpdateClientID(context.Background(), tabID, clientID); err != nil {
-				log.WithFields(log.Fields{
-					"tab_id":    tabID,
-					"client_id": clientID,
-					"error":     err.Error(),
-				}).Warn("gateway/manager: failed to update client ID in database")
-			}
-		}()
+		owner := e.clientID
+		m.mu.Unlock()
+		return refuseForeignAttach("vnc", tabID, owner, clientID, forceTakeover)
 	}
 
 	vncRelay := e.vncProxier

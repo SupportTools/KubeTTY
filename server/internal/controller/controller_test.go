@@ -145,6 +145,22 @@ func (m *mockStore) SetStatus(ctx context.Context, id uuid.UUID, status projects
 	return projects.ErrProjectNotFound
 }
 
+func (m *mockStore) SetPendingChanges(ctx context.Context, id uuid.UUID, changes []projects.PendingChange) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p, ok := m.projects[id]; ok {
+		if len(changes) == 0 {
+			p.PendingChanges = nil
+		} else {
+			p.PendingChanges = append([]projects.PendingChange(nil), changes...)
+		}
+		now := time.Now()
+		p.DriftCheckedAt = &now
+		return nil
+	}
+	return projects.ErrProjectNotFound
+}
+
 func (m *mockStore) SetPaused(ctx context.Context, id uuid.UUID, paused bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -466,15 +482,18 @@ func TestController_CorrectResourceNaming(t *testing.T) {
 	}
 }
 
-// TestController_ClusterRoleNaming verifies cluster-scoped resources use ClusterRoleName.
-func TestController_ClusterRoleNaming(t *testing.T) {
+// TestController_ProjectGetsNoAPIAccess: the pod runs an unsandboxed agent, so AdminNamespaces must not grant it API access.
+func TestController_ProjectGetsNoAPIAccess(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	store := newMockStore()
 	cfg := newControllerConfig()
+	sharedNS := cfg.ResourceConfig.Namespace
 
 	ctrl := NewWithClient(cfg, store, client)
 
 	project := newTestProjectWithStatus("rbac-test", projects.StatusPending)
+	project.AdminNamespaces = []string{"app-staging", sharedNS}
+	project.ReadNamespaces = []string{"app-production"}
 	store.addProject(project)
 
 	ctx := context.Background()
@@ -482,42 +501,43 @@ func TestController_ClusterRoleNaming(t *testing.T) {
 		t.Fatalf("handlePending failed: %v", err)
 	}
 
-	// Verify admin ClusterRole name uses env suffix
-	expectedAdminName := cfg.ResourceConfig.ClusterRoleName(project.Name, "admin")
-	adminRole, err := client.RbacV1().ClusterRoles().Get(ctx, expectedAdminName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Admin ClusterRole not found with expected name %s: %v", expectedAdminName, err)
+	rbac := client.RbacV1()
+	clusterRoles, err := rbac.ClusterRoles().List(ctx, metav1.ListOptions{})
+	if err != nil || len(clusterRoles.Items) != 0 {
+		t.Errorf("want no ClusterRoles, got %v (err %v)", clusterRoles, err)
 	}
-	if adminRole.Name != expectedAdminName {
-		t.Errorf("Admin ClusterRole name mismatch: expected %s, got %s", expectedAdminName, adminRole.Name)
+	clusterRoleBindings, err := rbac.ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+	if err != nil || len(clusterRoleBindings.Items) != 0 {
+		t.Errorf("want no ClusterRoleBindings, got %v (err %v)", clusterRoleBindings, err)
 	}
-
-	// Verify admin ClusterRoleBinding name
-	adminBinding, err := client.RbacV1().ClusterRoleBindings().Get(ctx, expectedAdminName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Admin ClusterRoleBinding not found with expected name %s: %v", expectedAdminName, err)
+	roles, err := rbac.Roles(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil || len(roles.Items) != 0 {
+		t.Errorf("want no Roles, got %v (err %v)", roles, err)
 	}
-	if adminBinding.Name != expectedAdminName {
-		t.Errorf("Admin ClusterRoleBinding name mismatch: expected %s, got %s", expectedAdminName, adminBinding.Name)
-	}
-
-	// Verify read ClusterRole name
-	expectedReadName := cfg.ResourceConfig.ClusterRoleName(project.Name, "read")
-	readRole, err := client.RbacV1().ClusterRoles().Get(ctx, expectedReadName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Read ClusterRole not found with expected name %s: %v", expectedReadName, err)
-	}
-	if readRole.Name != expectedReadName {
-		t.Errorf("Read ClusterRole name mismatch: expected %s, got %s", expectedReadName, readRole.Name)
+	roleBindings, err := rbac.RoleBindings(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil || len(roleBindings.Items) != 0 {
+		t.Errorf("want no RoleBindings, got %v (err %v)", roleBindings, err)
 	}
 
-	// Verify read ClusterRoleBinding name
-	readBinding, err := client.RbacV1().ClusterRoleBindings().Get(ctx, expectedReadName, metav1.GetOptions{})
+	resourceName := cfg.ResourceConfig.ResourceName(project.Name)
+	sa, err := client.CoreV1().ServiceAccounts(sharedNS).Get(ctx, resourceName+"-sa", metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("Read ClusterRoleBinding not found with expected name %s: %v", expectedReadName, err)
+		t.Fatalf("ServiceAccount not found: %v", err)
 	}
-	if readBinding.Name != expectedReadName {
-		t.Errorf("Read ClusterRoleBinding name mismatch: expected %s, got %s", expectedReadName, readBinding.Name)
+	if v := sa.AutomountServiceAccountToken; v == nil || *v {
+		t.Error("ServiceAccount automountServiceAccountToken must be explicitly false")
+	}
+
+	deploy, err := client.AppsV1().Deployments(sharedNS).Get(ctx, resourceName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Deployment not found: %v", err)
+	}
+	podSpec := deploy.Spec.Template.Spec
+	if podSpec.ServiceAccountName != resourceName+"-sa" {
+		t.Errorf("pod serviceAccountName = %q, want %q", podSpec.ServiceAccountName, resourceName+"-sa")
+	}
+	if v := podSpec.AutomountServiceAccountToken; v == nil || *v {
+		t.Error("pod automountServiceAccountToken must be explicitly false")
 	}
 }
 
@@ -582,66 +602,6 @@ func TestController_LabelSelectors(t *testing.T) {
 		if got := svc.Spec.Selector[key]; got != expected {
 			t.Errorf("Service selector %s: expected %s, got %s", key, expected, got)
 		}
-	}
-}
-
-// TestController_HandleDeletingCleansUpClusterRoles verifies cluster-scoped resources are deleted.
-func TestController_HandleDeletingCleansUpClusterRoles(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	store := newMockStore()
-	cfg := newControllerConfig()
-
-	ctrl := NewWithClient(cfg, store, client)
-
-	project := newTestProjectWithStatus("cleanup-test", projects.StatusPending)
-	store.addProject(project)
-
-	ctx := context.Background()
-
-	// First create resources
-	if err := ctrl.handlePending(ctx, project); err != nil {
-		t.Fatalf("handlePending failed: %v", err)
-	}
-
-	// Verify resources exist before deletion
-	expectedAdminName := cfg.ResourceConfig.ClusterRoleName(project.Name, "admin")
-	expectedReadName := cfg.ResourceConfig.ClusterRoleName(project.Name, "read")
-
-	_, err := client.RbacV1().ClusterRoles().Get(ctx, expectedAdminName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Admin ClusterRole should exist before deletion: %v", err)
-	}
-	_, err = client.RbacV1().ClusterRoles().Get(ctx, expectedReadName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Read ClusterRole should exist before deletion: %v", err)
-	}
-
-	// Now delete
-	project.Status = projects.StatusDeleting
-	if err := ctrl.handleDeleting(ctx, project); err != nil {
-		t.Fatalf("handleDeleting failed: %v", err)
-	}
-
-	// Verify ClusterRoles are deleted
-	_, err = client.RbacV1().ClusterRoles().Get(ctx, expectedAdminName, metav1.GetOptions{})
-	if err == nil {
-		t.Errorf("Admin ClusterRole should be deleted but still exists")
-	}
-
-	_, err = client.RbacV1().ClusterRoles().Get(ctx, expectedReadName, metav1.GetOptions{})
-	if err == nil {
-		t.Errorf("Read ClusterRole should be deleted but still exists")
-	}
-
-	// Verify ClusterRoleBindings are deleted
-	_, err = client.RbacV1().ClusterRoleBindings().Get(ctx, expectedAdminName, metav1.GetOptions{})
-	if err == nil {
-		t.Errorf("Admin ClusterRoleBinding should be deleted but still exists")
-	}
-
-	_, err = client.RbacV1().ClusterRoleBindings().Get(ctx, expectedReadName, metav1.GetOptions{})
-	if err == nil {
-		t.Errorf("Read ClusterRoleBinding should be deleted but still exists")
 	}
 }
 
@@ -1004,61 +964,6 @@ func TestController_GetDeploymentStatus_NotFound(t *testing.T) {
 
 	if status.Exists {
 		t.Error("Expected deployment to not exist")
-	}
-}
-
-// TestController_GetProjectSecrets verifies secrets retrieval.
-func TestController_GetProjectSecrets(t *testing.T) {
-	store := newMockStore()
-	cfg := newControllerConfig()
-
-	project := newTestProjectWithStatus("secrets-get-test", projects.StatusRunning)
-	store.addProject(project)
-
-	client := fake.NewSimpleClientset()
-	ctrl := NewWithClient(cfg, store, client)
-
-	// First create the resources (which includes the empty env secret)
-	ctx := context.Background()
-	project.Status = projects.StatusPending
-	if err := ctrl.handlePending(ctx, project); err != nil {
-		t.Fatalf("handlePending failed: %v", err)
-	}
-
-	// Get secrets (should be empty initially)
-	secrets, err := ctrl.GetProjectSecrets(ctx, project)
-	if err != nil {
-		t.Fatalf("GetProjectSecrets failed: %v", err)
-	}
-
-	// Should be empty map since no secrets were added
-	if len(secrets) != 0 {
-		t.Errorf("Expected empty secrets map, got %d entries", len(secrets))
-	}
-}
-
-// TestController_GetProjectSecrets_NotFound verifies behavior when secret doesn't exist.
-func TestController_GetProjectSecrets_NotFound(t *testing.T) {
-	store := newMockStore()
-	cfg := newControllerConfig()
-
-	project := newTestProjectWithStatus("secrets-notfound-test", projects.StatusRunning)
-	store.addProject(project)
-
-	client := fake.NewSimpleClientset()
-	ctrl := NewWithClient(cfg, store, client)
-
-	ctx := context.Background()
-
-	// Get secrets when secret doesn't exist
-	secrets, err := ctrl.GetProjectSecrets(ctx, project)
-	if err != nil {
-		t.Fatalf("GetProjectSecrets should not error for missing secret, got: %v", err)
-	}
-
-	// Should return empty map
-	if len(secrets) != 0 {
-		t.Errorf("Expected empty secrets map for missing secret, got %d entries", len(secrets))
 	}
 }
 
@@ -1823,91 +1728,6 @@ func TestController_ScaleProject_NotFound(t *testing.T) {
 	}
 }
 
-// TestController_UpdateProjectSecrets_CreateNew verifies creating new secrets.
-func TestController_UpdateProjectSecrets_CreateNew(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	store := newMockStore()
-	cfg := newControllerConfig()
-
-	ctrl := NewWithClient(cfg, store, client)
-
-	project := newTestProjectWithStatus("secrets-create-test", projects.StatusRunning)
-	store.addProject(project)
-
-	// Create the deployment first (UpdateProjectSecrets triggers restart)
-	ctx := context.Background()
-	project.Status = projects.StatusPending
-	if err := ctrl.handlePending(ctx, project); err != nil {
-		t.Fatalf("handlePending failed: %v", err)
-	}
-
-	// Delete the auto-created secret to test creation
-	envSecretName := cfg.ResourceConfig.EnvSecretName(project.Name)
-	client.CoreV1().Secrets(cfg.ResourceConfig.Namespace).Delete(ctx, envSecretName, metav1.DeleteOptions{})
-
-	// Update secrets (should create new)
-	secrets := map[string]string{
-		"API_KEY":     "test-key",
-		"DB_PASSWORD": "test-pass",
-	}
-
-	if err := ctrl.UpdateProjectSecrets(ctx, project, secrets); err != nil {
-		t.Fatalf("UpdateProjectSecrets failed: %v", err)
-	}
-
-	// Verify secret was created
-	secret, err := client.CoreV1().Secrets(cfg.ResourceConfig.Namespace).Get(ctx, envSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Failed to get secret: %v", err)
-	}
-
-	if string(secret.Data["API_KEY"]) != "test-key" {
-		t.Errorf("API_KEY = %q, want %q", string(secret.Data["API_KEY"]), "test-key")
-	}
-	if string(secret.Data["DB_PASSWORD"]) != "test-pass" {
-		t.Errorf("DB_PASSWORD = %q, want %q", string(secret.Data["DB_PASSWORD"]), "test-pass")
-	}
-}
-
-// TestController_UpdateProjectSecrets_UpdateExisting verifies updating existing secrets.
-func TestController_UpdateProjectSecrets_UpdateExisting(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	store := newMockStore()
-	cfg := newControllerConfig()
-
-	ctrl := NewWithClient(cfg, store, client)
-
-	project := newTestProjectWithStatus("secrets-update-test", projects.StatusRunning)
-	store.addProject(project)
-
-	// Create the deployment first
-	ctx := context.Background()
-	project.Status = projects.StatusPending
-	if err := ctrl.handlePending(ctx, project); err != nil {
-		t.Fatalf("handlePending failed: %v", err)
-	}
-
-	// Update secrets
-	secrets := map[string]string{
-		"NEW_KEY": "new-value",
-	}
-
-	if err := ctrl.UpdateProjectSecrets(ctx, project, secrets); err != nil {
-		t.Fatalf("UpdateProjectSecrets failed: %v", err)
-	}
-
-	// Verify secret was updated
-	envSecretName := cfg.ResourceConfig.EnvSecretName(project.Name)
-	secret, err := client.CoreV1().Secrets(cfg.ResourceConfig.Namespace).Get(ctx, envSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Failed to get secret: %v", err)
-	}
-
-	if string(secret.Data["NEW_KEY"]) != "new-value" {
-		t.Errorf("NEW_KEY = %q, want %q", string(secret.Data["NEW_KEY"]), "new-value")
-	}
-}
-
 // TestController_HandleSyncing_JobNotFound verifies handling when sync job is not found.
 func TestController_HandleSyncing_JobNotFound(t *testing.T) {
 	client := fake.NewSimpleClientset()
@@ -1978,4 +1798,8 @@ func TestController_HandleUpdating_DeploymentNotFound(t *testing.T) {
 	if !found {
 		t.Error("Expected project to transition to creating status")
 	}
+}
+
+func (m *mockStore) AutoFollowImage(ctx context.Context, id uuid.UUID, fromTag, toTag string, idleBefore time.Time) (bool, error) {
+	return false, nil
 }

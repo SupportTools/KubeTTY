@@ -33,9 +33,10 @@ func (c DatabaseConfig) ConnString() string {
 // AuthConfig contains authentication and JWT token settings.
 // These settings control user authentication, token generation, and cookie behavior.
 type AuthConfig struct {
-	// Mode specifies the authentication mode: "disabled", "local"
+	// Mode specifies the authentication mode: "disabled", "local", "github"
 	// - "disabled" or "": No authentication required
 	// - "local": Username/password authentication with JWT tokens
+	// - "github": GitHub App sign-in, plus one break-glass local account (gateway only)
 	Mode string
 
 	// JWTSecret is the secret key used to sign JWT tokens
@@ -55,6 +56,13 @@ type AuthConfig struct {
 	// CookieSecure controls whether cookies require HTTPS
 	// Should be true in production, false for local development
 	CookieSecure bool
+
+	// GitHub App sign-in (Mode "github", gateway only).
+	GitHubClientID     string
+	GitHubClientSecret string
+	GitHubPrivateKey   string
+	GitHubCallbackURL  string
+	GitHubAllow        string
 }
 
 // IsEnabled returns true if authentication is enabled (mode is not "" or "disabled").

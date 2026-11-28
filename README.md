@@ -250,7 +250,7 @@ KubeTTY is configured via environment variables injected by Helm:
 - `CLAUDE_CONFIG_DIR` - Claude configuration directory
 
 **Authentication (required configuration):**
-- `AUTH_MODE` - **Required.** Set to `local` to enable built-in login, or `disabled` to run without authentication. Empty values are rejected to prevent accidental insecure deployments.
+- `AUTH_MODE` - **Required.** `github` (gateway GitHub sign-in, see below), `local` for built-in login, or `disabled` to run without authentication. Empty values are rejected to prevent accidental insecure deployments.
 - `AUTH_JWT_SECRET` - Base64 (recommended) or raw secret used to sign JWTs. Generate via `openssl rand -base64 48`. Required when `AUTH_MODE=local`.
 - `AUTH_ACCESS_TTL` / `AUTH_REFRESH_TTL` - Token lifetimes (e.g., `15m`, `720h`).
 - `AUTH_ISSUER` - JWT issuer claim (default: `kubetty`).
@@ -274,6 +274,36 @@ KubeTTY is configured via environment variables injected by Helm:
 > **For production deployments, always use `AUTH_MODE=local` with a strong `AUTH_JWT_SECRET`.**
 
 These knobs are exposed through the Helm chart under the `auth` section (`deploy/helm/values.yaml`). You can point `AUTH_JWT_SECRET` at a Kubernetes Secret via `auth.jwtSecretSecret` to avoid storing raw secrets in values files.
+
+### GitHub sign-in (`AUTH_MODE=github`, gateway only)
+
+People sign in with a GitHub App. KubeTTY reads the GitHub account once at sign-in and discards the user's GitHub
+token; every later check uses the App's installation token, so the App needs only these permissions:
+Organization **Members: read** and Repository **Metadata: read**. It must be installed on every org named in the
+rules and on every org that owns a project repository, with access to those repositories (all repositories, or each
+project's repo). If the App cannot see a project's repo, only admins can use that project.
+
+| Env var | Meaning |
+|---|---|
+| `AUTH_GITHUB_CLIENT_ID` | The App's client ID |
+| `AUTH_GITHUB_CLIENT_SECRET`, `AUTH_GITHUB_PRIVATE_KEY` | From a Secret (keys `client-secret`, `private-key`), filled from Vault by ESO |
+| `AUTH_GITHUB_CALLBACK_URL` | `https://<host>/api/auth/github/callback`; must be one of the App's callback URLs |
+| `AUTH_GITHUB_ALLOW` | `org:<org>`, `team:<org>/<team-slug>`, `user:<login>`, comma-separated. Any match admits |
+| `AUTH_GITHUB_ADMIN_TEAMS` | `<org>/<team-slug>` list whose members are admins (default `SupportTools/admins`) |
+| `AUTH_GITHUB_CACHE_TTL` | How long a membership or permission answer is cached (default `1m`) |
+| `AUTH_BREAKGLASS_USER` | The one local account that may sign in with a password, as admin. Its form is at `/login/local` |
+| `AUTH_RESTRICTED_USERS` | `<username>:<project>` local accounts limited to their own terminal tabs on one project (the CI smoke user) |
+
+- **Roles:** admins (admin teams, and the break-glass account) can use the admin API, settings, the dashboard, session
+  logs and every project. Everyone else can only open terminals.
+- **Projects:** a project's `githubRepo` (`owner/name`) decides who can open its terminal: write, maintain or admin on
+  that repo. A project without a repo is admins only.
+- **Re-checks:** allow rules and admin teams are checked again at every token refresh (access tokens last
+  `AUTH_ACCESS_TTL`), so leaving the org or team ends access within that time. If GitHub cannot be reached, refresh
+  answers 503 and keeps the session; sign-in and project checks fail closed.
+- **Accounts:** a GitHub account is keyed by its numeric GitHub ID. On first sign-in it takes over an active local
+  account with the same name (keeping its tabs, dropping its password), unless that name is the break-glass or a
+  restricted user; then it gets `<login>-gh<id>`.
 
 ### Creating Users
 

@@ -14,8 +14,7 @@ on:
 env:
   REGISTRY: harbor.support.tools
   IMAGE_NAME: kubetty/kubetty
-  GO_VERSION: '1.24'
-  NODE_VERSION: '22'
+  NODE_VERSION: '22' # runner image bakes Node 22; setup-node resolves it from the toolcache (no job-time download)
 
 jobs:
   # Stage 1: Validation
@@ -24,21 +23,22 @@ jobs:
     runs-on: self-hosted-linux
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Test cross-cluster kubeconfig validation
         run: bash .github/actions/setup-kubeconfig-onprem/security-validation.test.sh
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
-
-      - name: Verify Go version
+      # No actions/setup-go: the self-hosted runner image (runner:v21.1-arc2+)
+      # bakes Go at /usr/local/go (1.26.x, GOTOOLCHAIN=local), which satisfies
+      # server/go.mod's `go 1.24.0` floor. setup-go with any version spec missed
+      # the runner tool cache and downloaded a Go tarball at job time
+      # (taskforge-2849). No download fallback: fail loudly on a runner defect.
+      - name: Verify baked Go
         run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner. It must be pre-baked into the runner image - there is deliberately no download fallback. Fix the runner image."; exit 1; }
           go version
-          go version | grep -q "go1.24" || (echo "ERROR: Must use Go 1.24.x" && exit 1)
+          go env GOROOT GOTOOLCHAIN GOCACHE GOMODCACHE
 
       - name: Check Go formatting
         working-directory: server
@@ -61,7 +61,7 @@ jobs:
           git diff --exit-code go.mod go.sum || (echo "ERROR: go.mod or go.sum not tidy" && exit 1)
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -77,13 +77,19 @@ jobs:
     needs: validate
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
+      # No actions/setup-go: the self-hosted runner image (runner:v21.1-arc2+)
+      # bakes Go at /usr/local/go (1.26.x, GOTOOLCHAIN=local), which satisfies
+      # server/go.mod's `go 1.24.0` floor. setup-go with any version spec missed
+      # the runner tool cache and downloaded a Go tarball at job time
+      # (taskforge-2849). No download fallback: fail loudly on a runner defect.
+      - name: Verify baked Go
+        run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner. It must be pre-baked into the runner image - there is deliberately no download fallback. Fix the runner image."; exit 1; }
+          go version
+          go env GOROOT GOTOOLCHAIN GOCACHE GOMODCACHE
 
       - name: Run server tests
         working-directory: server
@@ -106,7 +112,7 @@ jobs:
           fi
 
       - name: Upload coverage to artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: server-coverage
           path: server/coverage.out
@@ -118,10 +124,10 @@ jobs:
     needs: validate
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -151,14 +157,20 @@ jobs:
       runtime-image-digest: ${{ steps.image-identity.outputs.runtime-digest }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          # binfmt from the Harbor Docker Hub proxy-cache (anonymous pull), pinned by tag + index
+          # digest instead of docker.io/tonistiigi/binfmt:latest (cluster-services-1470).
+          image: harbor.support.tools/dockerhub/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
+          # BuildKit from the Harbor Docker Hub proxy, pinned by index digest (cluster-services-1487)
+          driver-opts: image=harbor.support.tools/dockerhub/moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
           # The ephemeral DFW runner can be starved when BuildKit executes the
           # UI, Go, and runtime stages concurrently. Keep the full image build,
           # but serialize BuildKit work so the runner remains responsive.
@@ -170,7 +182,7 @@ jobs:
       # repo-scoped Harbor robot (replaces org admin HARBOR_USERNAME/PASSWORD).
       - name: Vault login (GitHub OIDC) + Harbor robot
         if: github.event_name != 'pull_request'
-        uses: hashicorp/vault-action@v3
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
         with:
           url: https://vault.support.tools
           method: jwt
@@ -184,7 +196,7 @@ jobs:
 
       - name: Log in to Harbor
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ env.HARBOR_ROBOT_USER }}
@@ -192,7 +204,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -205,16 +217,26 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # *_FALLBACK=none: every fetch a tier we run serves must come from it, or the build fails
+          # instead of silently going upstream. apt -> fetch-cache (cluster-services-1494); npm ->
+          # Verdaccio; browser zips, every release binary, the Chrome .deb and NodeSource apt ->
+          # fetch-cache (cluster-services-1499: build/fetch.sh refuses any fetch without a cache
+          # path); Go modules -> Athens only, no proxy.golang.org fallthrough (cluster-services-1496).
+          # pip (--require-hashes) -> the devpi PyPI cache (cluster-services-1551).
           build-args: |
-            GO_VERSION=1.24.3
-            NODE_MAJOR=22
+            NODE_MAJOR=20
+            APT_FALLBACK=none
+            NPM_FALLBACK=none
+            FETCH_FALLBACK=none
+            PIP_FALLBACK=none
+            GOPROXY=https://goproxy.support.tools
 
       - name: Record pushed image identity
         id: image-identity
@@ -261,31 +283,125 @@ jobs:
             echo "- linux/amd64 runtime manifest: \`${RUNTIME_DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Stage 4: Security Scanning (disabled - image too large for CI timeout)
-  # Migrated from a per-repo Trivy job to Grype for consistency across repos, but kept
-  # opt-in/disabled: `if: false` mirrors the previous Trivy job's disabled state (KubeTTY's
-  # image is too large for Grype to scan in CI). Uses anchore/scan-action (grype engine)
-  # IN-LINE rather than the org reusable grype-scan.yml: pipeline.yml is pull_request-
-  # triggered, and a private-repo reusable `uses:` fails to resolve at workflow-LOAD time
-  # on pull_request, failing the ENTIRE run at startup (0 jobs) even with `if: false`, since
-  # resolution happens before `if` is evaluated. An in-line action has no such problem.
-  grype-scan:
-    name: Security Scan (Grype)
+  # Stage 4: Grype scan of the pushed linux/amd64 digest (taskforge-22081). deploy-production
+  # needs it. Gate (operator decision 2026-11-20): fail on Critical findings that have a fix;
+  # report High without failing.
+  # In-line, not the org reusable SupportTools/ci-runners grype-scan.yml: this public repo
+  # cannot call a private repo's reusable workflow (the run fails at load time, 0 jobs).
+  image-scan:
+    name: Image Scan (Grype)
     runs-on: self-hosted-linux
     needs: [build]
-    if: false  # Disabled - KubeTTY image too large for Grype to scan in CI (same reasoning as the prior Trivy job)
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 30
     permissions:
       contents: read
-      security-events: write
+      id-token: write          # GitHub OIDC -> Vault (the build job's Harbor robot, pull only here)
     steps:
-      # NOTE: if ever enabled, this needs a Harbor login step (image is a private
-      # harbor.support.tools ref); left out while the job is disabled.
-      - name: Grype scan (anchore/scan-action, informational)
-        uses: anchore/scan-action@v6
+      - name: Checkout .grype.yaml (accepted findings, if any)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image-digest }}
-          fail-build: false
-          severity-cutoff: high
+          sparse-checkout: .grype.yaml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Vault login (GitHub OIDC) + Harbor robot for grype
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: https://vault.support.tools
+          method: jwt
+          path: github-actions
+          role: gha-kubetty
+          jwtGithubAudience: https://github.com/SupportTools
+          exportEnv: true
+          secrets: |
+            secret/data/harbor/kubetty-ci-robot username | GRYPE_REGISTRY_AUTH_USERNAME ;
+            secret/data/harbor/kubetty-ci-robot password | GRYPE_REGISTRY_AUTH_PASSWORD
+
+      # grype v0.117.0 is baked into the runner image. The vuln DB comes from the internal mirror
+      # that Harbor's Grype scanner also uses, so CI and Harbor report the same findings.
+      - name: Grype scan
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.runtime-image-digest }}
+          GRYPE_REGISTRY_AUTH_AUTHORITY: ${{ env.REGISTRY }}
+          GRYPE_DB_UPDATE_URL: https://s3.support.tools/grype-db/v6/latest.json
+          GRYPE_DB_AUTO_UPDATE: 'true'
+          GRYPE_CHECK_FOR_APP_UPDATE: 'false'
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::no runtime digest from the build job: '$IMAGE'"; exit 1; }
+          grype version
+          for attempt in 1 2; do
+            start=$(date +%s)
+            rm -f "$RUNNER_TEMP/grype.json"
+            if grype "registry:${IMAGE}" -o json --file "$RUNNER_TEMP/grype.json"; then
+              echo "scan took $(( $(date +%s) - start ))s"
+              exit 0
+            fi
+            echo "::warning::grype attempt ${attempt} failed after $(( $(date +%s) - start ))s (pull or DB fetch, not a finding)"
+            sleep 15
+          done
+          echo "::error::grype could not scan ${IMAGE}; this is a transport failure, not a vulnerability"
+          exit 1
+
+      - name: Findings summary
+        if: always()
+        env:
+          DIGEST: ${{ needs.build.outputs.runtime-image-digest }}
+        run: |
+          set -euo pipefail
+          [[ -s "$RUNNER_TEMP/grype.json" ]] || { echo "::warning::no grype report; the scan did not finish"; exit 0; }
+          {
+            echo "### Grype: \`${DIGEST}\`"
+            echo
+            echo "| severity | findings | fix available |"
+            echo "|---|---|---|"
+            jq -r '
+              ["Critical","High","Medium","Low","Negligible","Unknown"] as $order
+              | [.matches[] | {sev: .vulnerability.severity, fixed: (.vulnerability.fix.state == "fixed"), key: "\(.vulnerability.id) \(.artifact.name)"}] | unique as $m
+              | $order[] as $s
+              | ($m | map(select(.sev == $s))) as $x
+              | "| \($s) | \($x | length) | \($x | map(select(.fixed)) | length) |"' "$RUNNER_TEMP/grype.json"
+            echo
+            jq -r '[.ignoredMatches[]? | select(any(.appliedIgnoreRules[]; (.vulnerability // "") != ""))
+              | "\(.vulnerability.id) \(.artifact.name) \(.artifact.version)"] | unique | length
+              | "Not counted above: \(.) finding(s) accepted in the .grype.yaml baseline."' "$RUNNER_TEMP/grype.json"
+            echo
+            echo "#### Critical and High with a fix"
+            echo
+            echo "| severity | id | package | version | fixed in | type |"
+            echo "|---|---|---|---|---|---|"
+            jq -r '
+              [.matches[] | select((.vulnerability.severity == "Critical" or .vulnerability.severity == "High") and .vulnerability.fix.state == "fixed")
+               | [.vulnerability.severity, .vulnerability.id, .artifact.name, .artifact.version, (.vulnerability.fix.versions | join(", ")), .artifact.type]]
+              | unique | sort_by(.[0], .[2]) | .[] | "| " + join(" | ") + " |"' "$RUNNER_TEMP/grype.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload grype report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: grype-report
+          path: ${{ runner.temp }}/grype.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Gate on fixable Critical
+        run: |
+          set -euo pipefail
+          fixable() {
+            jq -r --arg sev "$1" '[.matches[] | select(.vulnerability.severity == $sev and .vulnerability.fix.state == "fixed")
+              | "\(.vulnerability.id) \(.artifact.name) \(.artifact.version) -> \(.vulnerability.fix.versions | join(", "))"] | unique | .[]' "$RUNNER_TEMP/grype.json"
+          }
+          HIGH=$(fixable High | wc -l | tr -d ' ')
+          [[ "$HIGH" -eq 0 ]] || echo "::warning::${HIGH} High finding(s) have a fix (reported, not blocking); see the job summary"
+          CRIT=$(fixable Critical)
+          if [[ -n "$CRIT" ]]; then
+            while read -r line; do echo "::error::fixable Critical: ${line}"; done <<<"$CRIT"
+            echo "::error::production deploy is blocked until these are fixed or listed in .grype.yaml with a reason"
+            exit 1
+          fi
+          echo "no Critical finding with a fix"
 
   # Stage 5: Helm Chart Validation
   helm-validate:
@@ -294,12 +410,16 @@ jobs:
     needs: validate
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-        with:
-          version: 'v3.15.2'
+      # Helm is baked into the runner image (ci-runners Dockerfile.arc2, checksum-pinned).
+      # Do not download it per job: a job-time fetch from get.helm.sh failed twice on
+      # 2026-10-01 (site IPv6 PMTU black hole) and skipped the deploy. See the TaskForge
+      # CI runner contract, "No job-time downloads" (taskforge-2670).
+      - name: Helm (baked into the runner image)
+        run: |
+          command -v helm >/dev/null || { echo "::error::helm is not on the runner image; fix ci-runners, do not download it here"; exit 1; }
+          helm version --short
 
       - name: Lint Helm charts
         run: |
@@ -323,6 +443,32 @@ jobs:
       - name: Test gateway image references
         run: bash .github/scripts/test-helm-image-ref.sh
 
+      # The CI smoke user is a DEV-only identity: prod must not render it, and dev must, or the smoke gate fails.
+      - name: Smoke user is dev-only
+        run: |
+          set -euo pipefail
+          if helm template gateway deploy/helm-gateway/ -f deploy/helm-gateway/values.prd.yaml | grep -q 'AUTH_RESTRICTED_USERS'; then
+            echo "::error::values.prd.yaml maps a CI smoke identity; it is dev-only"
+            exit 1
+          fi
+          helm template gateway deploy/helm-gateway/ -f deploy/helm-gateway/values.dev.yaml | grep -q 'AUTH_RESTRICTED_USERS' \
+            || { echo "::error::values.dev.yaml lost the CI smoke user (auth.restrictedUsers); the dev smoke gate would fail"; exit 1; }
+
+      # The CI deployer may only manage these kinds (cluster-services
+      # github-actions/supporttools/ci-deployers/kubetty-rbac.yaml). A new kind fails here, not as a Forbidden in deploy-dev.
+      - name: Chart renders only kinds the CI deployer may manage
+        run: |
+          set -euo pipefail
+          allowed="ClusterRole ConfigMap Deployment Ingress Role RoleBinding Service ServiceAccount"
+          for env in dev prd; do
+            for kind in $(helm template kubetty-gateway deploy/helm-gateway/ -f "deploy/helm-gateway/values.${env}.yaml" | sed -n 's/^kind: *//p' | sort -u); do
+              if [[ " ${allowed} " != *" ${kind} "* ]]; then
+                echo "::error::values.${env}.yaml renders kind ${kind}; grant it to kubetty-ci-deployer in cluster-services kubetty-rbac.yaml first, then add it here"
+                exit 1
+              fi
+            done
+          done
+
       - name: Package Helm charts
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -331,21 +477,286 @@ jobs:
 
       - name: Upload Helm charts as artifact
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: helm-charts
           path: helm-packages/*.tgz
           retention-days: 3
 
-  # Stage 6: Deploy to Production
-  deploy-production:
-    name: Deploy to Production
+  # Stage 6a: Deploy to Dev (health gate for production)
+  # The dev gateway (kubetty-gateway-dev, https://kubetty-dev.support.tools) used to be
+  # hand-deployed with `helm upgrade --reuse-values --set-string image.digest=...`, so dev
+  # drifted and prd was the first place a build ran. Now every main/tag run deploys the SAME
+  # build digest to dev first, health-gates it, and deploy-production needs this job: a dev
+  # failure stops the prd deploy. Auth is the prd pattern: keyless GitHub OIDC -> Vault
+  # kubernetes-onprem/creds/kubetty -> kubetty-ci-deployer (dev RBAC: cluster-services
+  # github-actions/supporttools/ci-deployers/kubetty-rbac.yaml, cluster-services-1407).
+  # values.dev.yaml + the three --set-string values below render byte-identical to the
+  # hand-deployed revision 21 (verified 2026-11-15), so --reuse-values is not needed.
+  deploy-dev:
+    name: Deploy to Dev
     runs-on: self-hosted-linux
     needs: [build, helm-validate]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
       id-token: write          # GitHub OIDC -> Vault (keyless, namespace-scoped K8s token)
+    timeout-minutes: 45
+    env:
+      DEPLOY_TIMEOUT: 15m      # cold pull of the ~2.7 GB image (taskforge-2682)
+      DEV_NAMESPACE: kubetty-gateway-dev
+      # In-cluster Service: the runners are pods in a1-ops-prd, so this tests the gateway
+      # itself rather than ingress/DNS/Cloudflare. /api/healthz pings the database.
+      DEV_HEALTH_URL: http://gateway.kubetty-gateway-dev.svc:8080/api/healthz
+    outputs:
+      deployed-digest: ${{ steps.deploy.outputs.deployed-digest }}
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    environment:
+      name: dev
+      url: https://kubetty-dev.support.tools
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.30.3'
+
+      - name: Helm (baked into the runner image)
+        run: |
+          command -v helm >/dev/null || { echo "::error::helm is not on the runner image; fix ci-runners, do not download it here"; exit 1; }
+          helm version --short
+
+      - name: Set up dev kubeconfig
+        uses: ./.github/actions/setup-kubeconfig-onprem
+        with:
+          namespace: kubetty-gateway-dev
+
+      - name: Resolve image tag
+        id: extract-tag
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"; TAG="${TAG#v}"
+            RECOMMENDED="${TAG}"
+          else
+            TAG="latest"
+            RECOMMENDED=$(git ls-remote --tags --refs origin 'v*' \
+              | sed -n 's#.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$#\1#p' \
+              | sort -V | tail -1)
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "recommended=${RECOMMENDED}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to dev
+        id: deploy
+        env:
+          IMAGE_REPOSITORY: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ steps.extract-tag.outputs.tag }}
+          RECOMMENDED_TAG: ${{ steps.extract-tag.outputs.recommended }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.image-digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::refusing to deploy an invalid image digest: '$IMAGE_DIGEST'"
+            exit 1
+          fi
+          EXTRA_SET=()
+          if [[ -n "${RECOMMENDED_TAG}" ]]; then
+            EXTRA_SET+=(--set-string "env.RECOMMENDED_IMAGE_TAG=${RECOMMENDED_TAG}")
+          fi
+          echo "Previous dev image: $(kubectl get deployment gateway -n "$DEV_NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '<none>')"
+          echo "Deploying ${IMAGE_REPOSITORY}@${IMAGE_DIGEST} (tag ${IMAGE_TAG}) to ${DEV_NAMESPACE}"
+          # --atomic: a failed rollout rolls dev back and fails this job, which skips prd.
+          helm upgrade --install kubetty-gateway deploy/helm-gateway/ \
+            -n "$DEV_NAMESPACE" \
+            -f deploy/helm-gateway/values.dev.yaml \
+            --set-string image.repository="${IMAGE_REPOSITORY}" \
+            --set-string image.tag="${IMAGE_TAG}" \
+            --set-string image.digest="${IMAGE_DIGEST}" \
+            "${EXTRA_SET[@]}" \
+            --wait \
+            --timeout="${DEPLOY_TIMEOUT}" \
+            --history-max=20 \
+            --atomic
+          echo "deployed-digest=${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Health gate
+        env:
+          EXPECTED_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image-digest }}
+        run: |
+          set -euo pipefail
+          kubectl rollout status deployment/gateway -n "$DEV_NAMESPACE" --timeout="${DEPLOY_TIMEOUT}"
+          DEPLOYED_IMAGE=$(kubectl get deployment gateway -n "$DEV_NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          if [[ "$DEPLOYED_IMAGE" != "$EXPECTED_IMAGE" ]]; then
+            echo "::error::dev deployment image '$DEPLOYED_IMAGE' does not match '$EXPECTED_IMAGE'"
+            exit 1
+          fi
+          # Every non-terminating pod must be Ready on the expected image.
+          BAD=$(kubectl get pods -n "$DEV_NAMESPACE" -l app.kubernetes.io/name=kubetty-gateway -o json \
+            | jq --arg e "$EXPECTED_IMAGE" '[.items[] | select(.metadata.deletionTimestamp == null) | select(.spec.containers[0].image != $e or (.status.containerStatuses[0].ready != true))] | length')
+          if [[ "$BAD" -ne 0 ]]; then
+            echo "::error::${BAD} dev gateway pod(s) not Ready on ${EXPECTED_IMAGE}"
+            kubectl get pods -n "$DEV_NAMESPACE" -l app.kubernetes.io/name=kubetty-gateway -o wide || true
+            exit 1
+          fi
+          # Application health: status=healthy and database=ok, 3 consecutive passes.
+          ok=0
+          for i in $(seq 1 30); do
+            BODY=$(curl -sS -m 10 "$DEV_HEALTH_URL" 2>&1 || true)
+            if jq -e '.status == "healthy" and .components.database == "ok"' >/dev/null 2>&1 <<<"$BODY"; then
+              ok=$((ok + 1))
+              [[ $ok -ge 3 ]] && { echo "✓ dev health: ${BODY}"; exit 0; }
+            else
+              ok=0
+              echo "attempt ${i}: not healthy yet: ${BODY}"
+            fi
+            sleep 10
+          done
+          echo "::error::dev gateway did not report healthy at ${DEV_HEALTH_URL}; production deploy is blocked"
+          exit 1
+
+      - name: Roll dev back on failed health gate
+        if: failure() && steps.deploy.outcome == 'success'
+        run: |
+          set -euo pipefail
+          kubectl logs deployment/gateway -n "$DEV_NAMESPACE" --tail=100 || true
+          kubectl get events -n "$DEV_NAMESPACE" --sort-by='.lastTimestamp' | tail -20 || true
+          PREV=$(helm history kubetty-gateway -n "$DEV_NAMESPACE" -o json | jq -r '[.[] | select(.status == "superseded")] | last | .revision // empty')
+          if [[ -n "$PREV" ]]; then
+            helm rollback kubetty-gateway "$PREV" -n "$DEV_NAMESPACE" --wait --timeout="${DEPLOY_TIMEOUT}"
+            echo "Rolled dev back to revision ${PREV}"
+          fi
+
+      - name: Remove kubeconfig
+        if: always()
+        run: rm -f "${KUBECONFIG:-$RUNNER_TEMP/kubeconfig}"
+
+  # Stage 6a2: functional smoke against DEV. The dev health gate only proves the database answers;
+  # this logs in as kubetty-smoke (a restricted local user, values.dev.yaml auth.restrictedUsers),
+  # checks it is restricted, and runs a shell-evaluated line in a throwaway terminal tab over /ws.
+  # CI cannot do a GitHub login, so the smoke user has a password (Vault secret/kubetty/ci-smoke-user,
+  # read keylessly through GitHub OIDC, role gha-kubetty). deploy-production needs this job: a smoke
+  # failure skips prod and rolls dev back.
+  smoke-dev:
+    name: Smoke Test Dev (login + terminal)
+    runs-on: self-hosted-linux
+    needs: [build, deploy-dev]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      id-token: write          # GitHub OIDC -> Vault (smoke token + namespace-scoped K8s token)
+    timeout-minutes: 30
+    env:
+      DEV_NAMESPACE: kubetty-gateway-dev
+      DEPLOY_TIMEOUT: 15m
+      KUBETTY_SMOKE_URL: https://kubetty-dev.support.tools
+      KUBETTY_SMOKE_USER: kubetty-smoke
+      KUBETTY_SMOKE_PROJECT: test-project
+      KUBETTY_SMOKE_TIMEOUT: 4m
+    concurrency:
+      group: deploy-dev          # no other run may redeploy dev while this run smoke-tests it
+      cancel-in-progress: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify baked Go
+        run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner (no download fallback)"; exit 1; }
+          go version
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
+        with:
+          version: 'v1.30.3'
+
+      - name: Helm (baked into the runner image)
+        run: |
+          command -v helm >/dev/null || { echo "::error::helm is not on the runner image; fix ci-runners, do not download it here"; exit 1; }
+          helm version --short
+
+      - name: Set up dev kubeconfig
+        uses: ./.github/actions/setup-kubeconfig-onprem
+        with:
+          namespace: kubetty-gateway-dev
+
+      - name: Dev runs this build
+        id: digest
+        env:
+          EXPECTED_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.image-digest }}
+        run: |
+          set -euo pipefail
+          DEPLOYED_IMAGE=$(kubectl get deployment gateway -n "$DEV_NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}')
+          if [[ "$DEPLOYED_IMAGE" != "$EXPECTED_IMAGE" ]]; then
+            echo "::error::dev runs '$DEPLOYED_IMAGE', not this run's '$EXPECTED_IMAGE' (a newer run redeployed dev?); not smoke-testing someone else's build"
+            exit 1
+          fi
+          echo "ours=true" >> "$GITHUB_OUTPUT"
+          echo "✓ dev runs ${EXPECTED_IMAGE}"
+
+      # Keyless: GitHub OIDC -> Vault jwt role gha-kubetty (policy gha-kubetty-read). vault-action
+      # masks the values in the log.
+      - name: Vault login (GitHub OIDC) + dev smoke password
+        uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+        with:
+          url: https://vault.support.tools
+          method: jwt
+          path: github-actions
+          role: gha-kubetty
+          jwtGithubAudience: https://github.com/SupportTools
+          exportEnv: true
+          secrets: |
+            secret/data/kubetty/ci-smoke-user password | KUBETTY_SMOKE_PASSWORD
+
+      # server/cmd/kubetty-smoke. Fetch tier: Go modules from Athens only (GOPROXY=goproxy.support.tools,
+      # no proxy.golang.org fallthrough), same as the image build.
+      - name: Functional smoke (login + terminal websocket echo)
+        working-directory: server
+        env:
+          GOPROXY: https://goproxy.support.tools
+          GOFLAGS: -mod=readonly
+        run: go run ./cmd/kubetty-smoke
+
+      - name: Roll dev back on failed smoke
+        if: failure() && steps.digest.outputs.ours == 'true'
+        run: |
+          set -euo pipefail
+          kubectl logs deployment/gateway -n "$DEV_NAMESPACE" --tail=100 || true
+          PREV=$(helm history kubetty-gateway -n "$DEV_NAMESPACE" -o json | jq -r '[.[] | select(.status == "superseded")] | last | .revision // empty')
+          if [[ -n "$PREV" ]]; then
+            helm rollback kubetty-gateway "$PREV" -n "$DEV_NAMESPACE" --wait --timeout="${DEPLOY_TIMEOUT}"
+            echo "Rolled dev back to revision ${PREV}; production deploy is skipped"
+          fi
+
+      - name: Remove kubeconfig
+        if: always()
+        run: rm -f "${KUBECONFIG:-$RUNNER_TEMP/kubeconfig}"
+
+  # Stage 6b: Deploy to Production
+  deploy-production:
+    name: Deploy to Production
+    runs-on: self-hosted-linux
+    # dev must deploy, pass its health gate AND the functional smoke first (cluster-services-1534);
+    # the image must have no Critical finding with a fix (taskforge-22081)
+    needs: [build, helm-validate, deploy-dev, smoke-dev, image-scan]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      id-token: write          # GitHub OIDC -> Vault (keyless, namespace-scoped K8s token)
+    # The runtime image is ~2.7 GB and a cold pull on an a1-ops-prd node takes
+    # ~8 minutes (taskforge-2682). Every wait in this job that can span an image
+    # pull uses DEPLOY_TIMEOUT, sized well above the measured cold pull, so a
+    # slow-but-healthy rollout is not reported as a failure and rolled back.
+    # Keep the chart's progressDeadlineSeconds (values.prd.yaml) >= this.
+    timeout-minutes: 60
+    env:
+      DEPLOY_TIMEOUT: 15m
     concurrency:
       group: deploy-production
       cancel-in-progress: false
@@ -366,29 +777,22 @@ jobs:
           fi
           echo "✓ Valid semantic version: $TAG"
 
-      - name: Verify security scan passed
-        if: false  # Disabled - Grype scan is opt-in/skipped (image too large for CI)
-        run: |
-          if [ "${{ needs.grype-scan.result }}" != "success" ]; then
-            echo "ERROR: Security scan did not pass"
-            echo "Security scan result: ${{ needs.grype-scan.result }}"
-            echo "Cannot deploy to production with security issues"
-            exit 1
-          fi
-          echo "✓ Security scan passed"
-
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@bda439f5f36b99b262ebdcd3613869bddb064c8e # v5.2.0
         with:
           version: 'v1.30.3'
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-        with:
-          version: 'v3.15.2'
+      # Helm is baked into the runner image (ci-runners Dockerfile.arc2, checksum-pinned).
+      # Do not download it per job: a job-time fetch from get.helm.sh failed twice on
+      # 2026-10-01 (site IPv6 PMTU black hole) and skipped the deploy. See the TaskForge
+      # CI runner contract, "No job-time downloads" (taskforge-2670).
+      - name: Helm (baked into the runner image)
+        run: |
+          command -v helm >/dev/null || { echo "::error::helm is not on the runner image; fix ci-runners, do not download it here"; exit 1; }
+          helm version --short
 
       # DFW runners live in stackeye-ci-dfw01, so their in-cluster API endpoint
       # and projected CA cannot be used for the a1-ops-prd deployment.
@@ -412,15 +816,38 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Deploying version: ${TAG}"
 
+          # RECOMMENDED_IMAGE_TAG is the version the admin UI offers for a project
+          # upgrade, and the upgrade API accepts only semver tags. It used to be a
+          # hand-edited constant in values.prd.yaml (v1.1.6 while projects ran
+          # v1.13-v1.15), so the UI offered a downgrade and per-project sandboxes
+          # stayed on images that still trusted emSign ECC Root CA - G3
+          # (cluster-services-1333). Derive it from the release instead: the tag
+          # being deployed, or on a main push the newest vX.Y.Z tag in the repo.
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            RECOMMENDED="${TAG}"
+          else
+            RECOMMENDED=$(git ls-remote --tags --refs origin 'v*' \
+              | sed -n 's#.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$#\1#p' \
+              | sort -V | tail -1)
+          fi
+          echo "recommended=${RECOMMENDED}" >> "$GITHUB_OUTPUT"
+          echo "Recommended project image tag: ${RECOMMENDED:-<unchanged, values file>}"
+
       - name: Deploy to production
         id: deploy
         env:
           IMAGE_REPOSITORY: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           IMAGE_TAG: ${{ steps.extract-tag.outputs.tag }}
+          RECOMMENDED_TAG: ${{ steps.extract-tag.outputs.recommended }}
           IMAGE_DIGEST: ${{ needs.build.outputs.image-digest }}
           RUNTIME_IMAGE_DIGEST: ${{ needs.build.outputs.runtime-image-digest }}
+          DEV_DIGEST: ${{ needs.deploy-dev.outputs.deployed-digest }}
         run: |
           set -euo pipefail
+          EXTRA_SET=()
+          if [[ -n "${RECOMMENDED_TAG}" ]]; then
+            EXTRA_SET+=(--set-string "env.RECOMMENDED_IMAGE_TAG=${RECOMMENDED_TAG}")
+          fi
           if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::refusing to deploy an invalid image digest: '$IMAGE_DIGEST'"
             exit 1
@@ -430,6 +857,11 @@ jobs:
             exit 1
           fi
           EXPECTED_IMAGE="${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+          if [[ "$IMAGE_DIGEST" != "$DEV_DIGEST" ]]; then
+            echo "::error::prd digest '$IMAGE_DIGEST' is not the digest dev was health-gated on: '$DEV_DIGEST'"
+            exit 1
+          fi
+          echo "Same digest as health-gated dev: ${DEV_DIGEST}"
 
           # Capture current revision for potential rollback
           CURRENT_REVISION=$(helm history kubetty-gateway -n kubetty-gateway-prd --max 1 -o json 2>/dev/null | jq -r '.[0].revision // "0"') || CURRENT_REVISION="0"
@@ -457,8 +889,9 @@ jobs:
             --set-string image.repository="${IMAGE_REPOSITORY}" \
             --set-string image.tag="${IMAGE_TAG}" \
             --set-string image.digest="${IMAGE_DIGEST}" \
+            "${EXTRA_SET[@]}" \
             --wait \
-            --timeout=5m \
+            --timeout="${DEPLOY_TIMEOUT}" \
             --history-max=20 \
             --atomic
 
@@ -473,10 +906,21 @@ jobs:
           set -euo pipefail
           kubectl rollout status deployment/gateway \
             -n kubetty-gateway-prd \
-            --timeout=300s
+            --timeout="${DEPLOY_TIMEOUT}"
 
-          kubectl wait --for=condition=ready pod \
-            -l app.kubernetes.io/name=kubetty-gateway \
+          # Wait only on pods that are not being deleted. Right after the
+          # rollout the old ReplicaSet's pod is still Terminating; a label-
+          # selector wait picks it up, blocks on it until it is gone, and then
+          # times out the whole step (2026-10-05 run 37257107122 rolled back a
+          # healthy deploy this way). cluster-services-1008.
+          mapfile -t LIVE_PODS < <(kubectl get pods -n kubetty-gateway-prd \
+            -l app.kubernetes.io/name=kubetty-gateway -o json \
+            | jq -r '.items[] | select(.metadata.deletionTimestamp == null) | "pod/" + .metadata.name')
+          if [[ "${#LIVE_PODS[@]}" -eq 0 ]]; then
+            echo "ERROR: no non-terminating gateway pods after rollout"
+            exit 1
+          fi
+          kubectl wait --for=condition=ready "${LIVE_PODS[@]}" \
             -n kubetty-gateway-prd \
             --timeout=300s
 
@@ -508,8 +952,12 @@ jobs:
           ACTIVE_REPLICA_SET=""
           for row in "${READY_PODS[@]}"; do
             IFS=$'\t' read -r pod replica_set image_id <<<"$row"
-            if [[ "$image_id" != *@"$RUNTIME_IMAGE_DIGEST" ]]; then
-              echo "ERROR: Pod '$pod' runtime imageID '$image_id' does not match '$RUNTIME_IMAGE_DIGEST'"
+            # containerd reports imageID as the digest the image was pulled by.
+            # The chart pins the multi-arch index digest, so a correct pod reports
+            # IMAGE_DIGEST; a node that resolved the platform manifest reports
+            # RUNTIME_IMAGE_DIGEST. Both identify this build; anything else does not.
+            if [[ "$image_id" != *@"$IMAGE_DIGEST" && "$image_id" != *@"$RUNTIME_IMAGE_DIGEST" ]]; then
+              echo "ERROR: Pod '$pod' runtime imageID '$image_id' matches neither index digest '$IMAGE_DIGEST' nor linux/amd64 digest '$RUNTIME_IMAGE_DIGEST'"
               exit 1
             fi
             ACTIVE_REPLICA_SET="$replica_set"
@@ -550,9 +998,26 @@ jobs:
         run: |
           set -euo pipefail
           echo "❌ PRODUCTION DEPLOYMENT FAILED ❌"
+
+          # A rollback while the new pod is still pulling the image cannot help:
+          # it replaces a healthy-but-slow rollout with another one that also
+          # times out (taskforge-2682). If any gateway pod is still in
+          # ContainerCreating/PodInitializing (no pull error), leave the rollout
+          # alone; the job stays red so a human looks at it.
+          PULLING=$(kubectl get pods -n kubetty-gateway-prd \
+            -l app.kubernetes.io/name=kubetty-gateway -o json \
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null) | .status.containerStatuses[]?.state.waiting.reason // empty | select(. == "ContainerCreating" or . == "PodInitializing")] | length') \
+            || PULLING=0
+          if [[ "${PULLING:-0}" -gt 0 ]]; then
+            echo "::warning::${PULLING} gateway pod(s) still ContainerCreating (image pull in progress); skipping automatic rollback"
+            kubectl get pods -n kubetty-gateway-prd -l app.kubernetes.io/name=kubetty-gateway -o wide || true
+            exit 0
+          fi
+
           echo "Attempting automatic rollback to revision ${{ steps.deploy.outputs.current-revision }}..."
 
-          helm rollback kubetty-gateway ${{ steps.deploy.outputs.current-revision }} -n kubetty-gateway-prd --wait
+          helm rollback kubetty-gateway ${{ steps.deploy.outputs.current-revision }} -n kubetty-gateway-prd \
+            --wait --timeout="${DEPLOY_TIMEOUT}"
 
           if [[ -n "$PREVIOUS_IMAGE" ]]; then
             ROLLED_BACK_IMAGE=$(kubectl get deployment gateway -n kubetty-gateway-prd \
@@ -585,3 +1050,7 @@ jobs:
           echo ""
           echo "=== Recent Events ==="
           kubectl get events -n kubetty-gateway-prd --sort-by='.lastTimestamp' | tail -30
+
+      - name: Remove kubeconfig
+        if: always()
+        run: rm -f "${KUBECONFIG:-$RUNNER_TEMP/kubeconfig}"

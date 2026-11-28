@@ -28,6 +28,8 @@ type ProjectHandlers struct {
 }
 
 // NewProjectHandlers creates a new ProjectHandlers instance.
+const githubRepoError = "githubRepo must be empty or owner/name"
+
 func NewProjectHandlers(store projects.Store, ctrl *controller.Controller, recommendedImageTag string) *ProjectHandlers {
 	return &ProjectHandlers{
 		store:               store,
@@ -131,6 +133,8 @@ func (h *ProjectHandlers) ListProjects(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const msgNamespaceAccessUnsupported = "adminNamespaces and readNamespaces are not supported: project pods get no Kubernetes API access"
+
 // CreateProject handles POST /api/admin/projects
 func (h *ProjectHandlers) CreateProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -162,6 +166,11 @@ func (h *ProjectHandlers) CreateProject(w http.ResponseWriter, r *http.Request) 
 		_ = apierrors.WriteError(w, apierrors.BadRequest("userName is required", ""))
 		return
 	}
+	req.GitHubRepo = strings.TrimSpace(req.GitHubRepo)
+	if !projects.ValidGitHubRepo(req.GitHubRepo) {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(githubRepoError, ""))
+		return
+	}
 	if req.SessionMode != "" && !req.SessionMode.IsValid() {
 		_ = apierrors.WriteError(w, apierrors.BadRequest(
 			"sessionMode must be one of: exclusive_takeover, shared_concurrent, independent_shells", ""))
@@ -177,6 +186,10 @@ func (h *ProjectHandlers) CreateProject(w http.ResponseWriter, r *http.Request) 
 	if !isValidVNCPort(req.GUIVNCPort) {
 		_ = apierrors.WriteError(w, apierrors.BadRequest(
 			"guiVNCPort must be in range 5900-5999", ""))
+		return
+	}
+	if len(req.AdminNamespaces) > 0 || len(req.ReadNamespaces) > 0 {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(msgNamespaceAccessUnsupported, ""))
 		return
 	}
 
@@ -233,7 +246,15 @@ func (h *ProjectHandlers) GetProject(w http.ResponseWriter, r *http.Request) {
 	_ = util.WriteJSON(w, http.StatusOK, project)
 }
 
-// UpdateProject handles PUT /api/admin/projects/{id}
+// UpdateProject handles PUT /api/admin/projects/{id}, and PATCH on the same
+// path as an alias: the update is already partial (only the fields present are
+// changed), so both verbs have the same semantics (cluster-services-1024).
+//
+// The body may set "applyMode": "now" (default) saves and rolls the pod when
+// the image, a cpu/memory request or limit, or the storage size is in the
+// request; "next_restart" saves to the DB only, leaves the pod running and
+// records the difference as pending changes that the next restart applies
+// (cluster-services-1024).
 func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -247,6 +268,14 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
 		return
+	}
+	if req.GitHubRepo != nil {
+		repo := strings.TrimSpace(*req.GitHubRepo)
+		if !projects.ValidGitHubRepo(repo) {
+			_ = apierrors.WriteError(w, apierrors.BadRequest(githubRepoError, ""))
+			return
+		}
+		req.GitHubRepo = &repo
 	}
 	if req.SessionMode != nil && !req.SessionMode.IsValid() {
 		_ = apierrors.WriteError(w, apierrors.BadRequest(
@@ -266,6 +295,35 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if !req.ApplyMode.IsValid() {
+		_ = apierrors.WriteError(w, apierrors.BadRequest(
+			"applyMode must be one of: now, next_restart", ""))
+		return
+	}
+	deferred := req.ApplyMode == projects.ApplyModeNextRestart
+
+	// "Apply on next restart" (cluster-services-1024) saves to the DB only. A
+	// storage resize cannot wait for a restart: PVC expansion happens only in
+	// the controller's updating pass, which this mode skips, so a restart
+	// would never grow the volume. Refuse it rather than silently drop it.
+	if deferred && req.StorageSize != nil {
+		current, err := h.store.Get(ctx, projectID)
+		if err != nil {
+			if errors.Is(err, projects.ErrProjectNotFound) {
+				_ = apierrors.WriteError(w, apierrors.NotFound("project not found", ""))
+				return
+			}
+			log.WithError(err).Error("admin/projects: failed to get project for update")
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to update project", ""))
+			return
+		}
+		if *req.StorageSize != current.StorageSize {
+			_ = apierrors.WriteError(w, apierrors.BadRequest(
+				"storageSize cannot be changed with applyMode next_restart; save it with applyMode now", ""))
+			return
+		}
+	}
+
 	project, err := h.store.Update(ctx, projectID, req)
 	if err != nil {
 		if errors.Is(err, projects.ErrProjectNotFound) {
@@ -277,8 +335,27 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// If image tag or resources changed, trigger an update
-	if req.ImageTag != nil || req.CPULimit != nil || req.MemoryLimit != nil || req.StorageSize != nil {
+	switch {
+	case deferred:
+		// Do not set status=updating: the running pod is left alone. Refresh
+		// the drift record now so the admin UI shows the pending changes
+		// without waiting for the periodic check. CheckProjectDrift only reads
+		// the Deployment; it never rolls the pod.
+		if h.controller != nil && project.Status == projects.StatusRunning {
+			changes, err := h.controller.CheckProjectDrift(ctx, project)
+			if err != nil {
+				log.WithError(err).WithField("project", project.Name).
+					Warn("admin/projects: drift check after deferred update failed; the periodic check will retry")
+			} else {
+				project.PendingChanges = changes
+			}
+		}
+	case req.ImageTag != nil || req.CPURequest != nil || req.CPULimit != nil ||
+		req.MemoryRequest != nil || req.MemoryLimit != nil || req.StorageSize != nil:
+		// If the image tag or any resource field is in the request, trigger an
+		// update (rolls the pod). Requests count too: a requests-only edit in
+		// "now" mode used to save without a rollout, leaving the pod on the old
+		// requests until some unrelated restart (cluster-services-1024).
 		if err := h.store.SetStatus(ctx, projectID, projects.StatusUpdating, "Applying configuration changes"); err != nil {
 			log.WithError(err).Warn("admin/projects: failed to set updating status")
 		}
@@ -287,9 +364,18 @@ func (h *ProjectHandlers) UpdateProject(w http.ResponseWriter, r *http.Request) 
 	log.WithFields(log.Fields{
 		"project_id":   project.ID.String(),
 		"project_name": project.Name,
+		"apply_mode":   applyModeLabel(req.ApplyMode),
 	}).Info("admin/projects: project updated")
 
 	_ = util.WriteJSON(w, http.StatusOK, project)
+}
+
+// applyModeLabel names the apply mode for logs; the empty mode is "now".
+func applyModeLabel(m projects.ApplyMode) string {
+	if m == "" {
+		return string(projects.ApplyModeNow)
+	}
+	return string(m)
 }
 
 // DeleteProject handles DELETE /api/admin/projects/{id}
@@ -494,6 +580,7 @@ func (h *ProjectHandlers) GetUpgradeInfo(w http.ResponseWriter, r *http.Request)
 	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
 		"currentVersion":       project.ImageTag,
 		"recommendedVersion":   h.recommendedImageTag,
+		"imageAutoFollow":      project.ImageAutoFollow,
 		"lastActivity":         project.LastActivity,
 		"minutesSinceActivity": minutesSinceActivity,
 	})
@@ -563,7 +650,7 @@ func (h *ProjectHandlers) UpgradeProject(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// GetProjectSecrets handles GET /api/admin/projects/{id}/secrets
+// GetProjectSecrets handles GET /api/admin/projects/{id}/secrets. It returns key names only.
 func (h *ProjectHandlers) GetProjectSecrets(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -591,12 +678,11 @@ func (h *ProjectHandlers) GetProjectSecrets(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	_ = util.WriteJSON(w, http.StatusOK, map[string]any{
-		"secrets": secrets,
-	})
+	_ = util.WriteJSON(w, http.StatusOK, secrets)
 }
 
-// UpdateProjectSecrets handles PUT /api/admin/projects/{id}/secrets
+// UpdateProjectSecrets handles PUT /api/admin/projects/{id}/secrets.
+// The body lists every key the Secret should hold; a null value keeps that key's current value.
 func (h *ProjectHandlers) UpdateProjectSecrets(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -607,7 +693,7 @@ func (h *ProjectHandlers) UpdateProjectSecrets(w http.ResponseWriter, r *http.Re
 	}
 
 	var req struct {
-		Secrets map[string]string `json:"secrets"`
+		Secrets map[string]*string `json:"secrets"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		_ = apierrors.WriteError(w, apierrors.BadRequest("invalid JSON", ""))
@@ -626,8 +712,16 @@ func (h *ProjectHandlers) UpdateProjectSecrets(w http.ResponseWriter, r *http.Re
 	}
 
 	if err := h.controller.UpdateProjectSecrets(ctx, project, req.Secrets); err != nil {
-		log.WithError(err).Error("admin/projects: failed to update project secrets")
-		_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to update project secrets", ""))
+		switch {
+		case errors.Is(err, controller.ErrSecretExternallyManaged):
+			_ = apierrors.WriteError(w, apierrors.Conflict(
+				"this project's secrets are managed by an ExternalSecret; change them in Vault", ""))
+		case errors.Is(err, controller.ErrUnknownSecretKey):
+			_ = apierrors.WriteError(w, apierrors.BadRequest(err.Error(), ""))
+		default:
+			log.WithError(err).Error("admin/projects: failed to update project secrets")
+			_ = apierrors.WriteError(w, apierrors.InternalServerError("failed to update project secrets", ""))
+		}
 		return
 	}
 
@@ -770,6 +864,7 @@ func (h *ProjectHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/projects", h.CreateProject)
 	mux.HandleFunc("GET /api/admin/projects/{id}", h.GetProject)
 	mux.HandleFunc("PUT /api/admin/projects/{id}", h.UpdateProject)
+	mux.HandleFunc("PATCH /api/admin/projects/{id}", h.UpdateProject) // alias of PUT (cluster-services-1024)
 	mux.HandleFunc("DELETE /api/admin/projects/{id}", h.DeleteProject)
 	mux.HandleFunc("POST /api/admin/projects/{id}/restart", h.RestartProject)
 	mux.HandleFunc("POST /api/admin/projects/{id}/resync", h.ResyncProject)

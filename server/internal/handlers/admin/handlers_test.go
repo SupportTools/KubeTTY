@@ -29,6 +29,7 @@ type mockProjectStore struct {
 	setStatusErr  error
 	calledStatus  projects.ProjectStatus
 	calledMessage string
+	updateCalls   int
 }
 
 func newMockProjectStore() *mockProjectStore {
@@ -110,6 +111,25 @@ func (m *mockProjectStore) Update(ctx context.Context, id uuid.UUID, req project
 	if req.DisplayName != nil {
 		p.DisplayName = *req.DisplayName
 	}
+	if req.CPURequest != nil {
+		p.CPURequest = *req.CPURequest
+	}
+	if req.CPULimit != nil {
+		p.CPULimit = *req.CPULimit
+	}
+	if req.MemoryRequest != nil {
+		p.MemoryRequest = *req.MemoryRequest
+	}
+	if req.MemoryLimit != nil {
+		p.MemoryLimit = *req.MemoryLimit
+	}
+	if req.ImageTag != nil {
+		p.ImageTag = *req.ImageTag
+	}
+	if req.ImageAutoFollow != nil {
+		p.ImageAutoFollow = *req.ImageAutoFollow
+	}
+	m.updateCalls++
 	return p, nil
 }
 
@@ -137,6 +157,14 @@ func (m *mockProjectStore) SetStatus(ctx context.Context, id uuid.UUID, status p
 	if p, ok := m.projects[id]; ok {
 		p.Status = status
 		p.StatusMessage = message
+		return nil
+	}
+	return projects.ErrProjectNotFound
+}
+
+func (m *mockProjectStore) SetPendingChanges(ctx context.Context, id uuid.UUID, changes []projects.PendingChange) error {
+	if p, ok := m.projects[id]; ok {
+		p.PendingChanges = changes
 		return nil
 	}
 	return projects.ErrProjectNotFound
@@ -188,14 +216,14 @@ type mockController struct {
 	restartErr       error
 	deploymentStatus *controller.DeploymentStatus
 	deploymentErr    error
-	secrets          map[string]string
+	secrets          map[string]*string
 	getSecretsErr    error
 	updateSecretsErr error
 }
 
 func newMockController() *mockController {
 	return &mockController{
-		secrets: make(map[string]string),
+		secrets: make(map[string]*string),
 	}
 }
 
@@ -217,14 +245,18 @@ func (m *mockController) GetDeploymentStatus(ctx context.Context, p *projects.Pr
 	}, nil
 }
 
-func (m *mockController) GetProjectSecrets(ctx context.Context, p *projects.Project) (map[string]string, error) {
+func (m *mockController) GetProjectSecrets(ctx context.Context, p *projects.Project) (controller.ProjectSecrets, error) {
 	if m.getSecretsErr != nil {
-		return nil, m.getSecretsErr
+		return controller.ProjectSecrets{}, m.getSecretsErr
 	}
-	return m.secrets, nil
+	keys := make([]string, 0, len(m.secrets))
+	for k := range m.secrets {
+		keys = append(keys, k)
+	}
+	return controller.ProjectSecrets{Keys: keys}, nil
 }
 
-func (m *mockController) UpdateProjectSecrets(ctx context.Context, p *projects.Project, secrets map[string]string) error {
+func (m *mockController) UpdateProjectSecrets(ctx context.Context, p *projects.Project, secrets map[string]*string) error {
 	if m.updateSecretsErr != nil {
 		return m.updateSecretsErr
 	}
@@ -236,8 +268,8 @@ func (m *mockController) UpdateProjectSecrets(ctx context.Context, p *projects.P
 type controllerInterface interface {
 	RestartProject(ctx context.Context, p *projects.Project) error
 	GetDeploymentStatus(ctx context.Context, p *projects.Project) (*controller.DeploymentStatus, error)
-	GetProjectSecrets(ctx context.Context, p *projects.Project) (map[string]string, error)
-	UpdateProjectSecrets(ctx context.Context, p *projects.Project, secrets map[string]string) error
+	GetProjectSecrets(ctx context.Context, p *projects.Project) (controller.ProjectSecrets, error)
+	UpdateProjectSecrets(ctx context.Context, p *projects.Project, secrets map[string]*string) error
 }
 
 // testableProjectHandlers wraps ProjectHandlers to use mockController
@@ -1718,4 +1750,8 @@ func TestDeleteProject_DeleteReturnsNotFound(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected status 404, got %d", rec.Code)
 	}
+}
+
+func (m *mockProjectStore) AutoFollowImage(ctx context.Context, id uuid.UUID, fromTag, toTag string, idleBefore time.Time) (bool, error) {
+	return false, nil
 }

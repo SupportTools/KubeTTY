@@ -168,6 +168,43 @@ func (m *MockStore) UpdateLastLogin(ctx context.Context, id uuid.UUID, ts time.T
 	return nil
 }
 
+// GetUserByGitHubID retrieves the user linked to a GitHub account.
+func (m *MockStore) GetUserByGitHubID(ctx context.Context, githubID int64) (*User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.err != nil {
+		err := m.err
+		m.err = nil
+		return nil, err
+	}
+	for _, user := range m.users {
+		if githubID != 0 && user.GitHubID == githubID {
+			return user, nil
+		}
+	}
+	return nil, ErrUserNotFound
+}
+
+// LinkGitHub links a user to a GitHub account and replaces its password hash.
+func (m *MockStore) LinkGitHub(ctx context.Context, id uuid.UUID, githubID int64, login string, passwordHash []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		err := m.err
+		m.err = nil
+		return err
+	}
+	user, ok := m.users[id]
+	if !ok {
+		return ErrUserNotFound
+	}
+	user.GitHubID = githubID
+	user.GitHubLogin = login
+	user.PasswordHash = passwordHash
+	user.UpdatedAt = time.Now()
+	return nil
+}
+
 // InsertRefreshToken inserts a new refresh token.
 func (m *MockStore) InsertRefreshToken(ctx context.Context, token RefreshToken) error {
 	m.mu.Lock()

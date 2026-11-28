@@ -8,6 +8,7 @@ interface ProfileModalProps {
 
 const ProfileModal = ({ onClose, onPasswordChange }: ProfileModalProps) => {
   const { user, logout } = useAuth();
+  const sso = Boolean(user?.githubLogin);
 
   const handleLogout = useCallback(async () => {
     await logout();
@@ -58,13 +59,27 @@ const ProfileModal = ({ onClose, onPasswordChange }: ProfileModalProps) => {
                 <label>User ID</label>
                 <span className="user-id">{user.id}</span>
               </div>
+              {user.githubLogin && (
+                <div className="profile-field">
+                  <label>GitHub</label>
+                  <span>{user.githubLogin}</span>
+                </div>
+              )}
+              {user.role && (
+                <div className="profile-field">
+                  <label>Role</label>
+                  <span>{user.role}</span>
+                </div>
+              )}
             </div>
           </div>
         </div>
         <div className="modal-footer">
-          <button className="secondary" onClick={handlePasswordChange}>
-            Change Password
-          </button>
+          {!sso && (
+            <button className="secondary" onClick={handlePasswordChange}>
+              Change Password
+            </button>
+          )}
           <button className="danger" onClick={handleLogout}>
             Logout
           </button>

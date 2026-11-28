@@ -222,6 +222,7 @@ var projectColumns = []string{
 	"image_repository", "image_tag",
 	"status", "status_message", "last_health_check", "last_activity", "pod_ip", "paused",
 	"created_at", "updated_at", "deleted_at",
+	"pending_changes", "drift_checked_at", "image_auto_follow", "github_repo",
 }
 
 type projectRow struct {
@@ -252,6 +253,7 @@ func (p projectRow) values() []any {
 		"repo", "tag",
 		p.status, (*string)(nil), (*time.Time)(nil), (*time.Time)(nil), (*string)(nil), p.paused,
 		now, now, (*time.Time)(nil),
+		[]byte(nil), (*time.Time)(nil), false, "",
 	}
 }
 

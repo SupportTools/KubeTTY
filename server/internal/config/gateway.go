@@ -33,6 +33,16 @@ type GatewayConfig struct {
 	AuthIssuer         string
 	AuthCookieDomain   string
 	AuthCookieSecure   bool
+	// GitHub App sign-in (AUTH_MODE=github)
+	GitHubClientID     string
+	GitHubClientSecret string
+	GitHubPrivateKey   string
+	GitHubCallbackURL  string
+	GitHubAllow        string        // AUTH_GITHUB_ALLOW
+	GitHubAdminTeams   string        // AUTH_GITHUB_ADMIN_TEAMS, comma-separated org/team
+	GitHubCacheTTL     time.Duration // AUTH_GITHUB_CACHE_TTL
+	BreakGlassUser     string        // AUTH_BREAKGLASS_USER, the local admin account
+	RestrictedUsers    string        // AUTH_RESTRICTED_USERS, comma-separated <username>:<project>
 	// Metrics collection configuration
 	MetricsEnabled  bool          // Enable tab resource metrics collection (default: true)
 	MetricsInterval time.Duration // Metrics collection interval (default: 15s)
@@ -76,6 +86,14 @@ type ControllerConfig struct {
 	StorageExpandThreshold float64       // Expand PVC when usage >= this fraction (default: 0.70)
 	StorageExpandAmount    string        // Fixed amount to expand by (default: "10Gi")
 	StorageExpandCooldown  time.Duration // Minimum time between expansions (default: 5m)
+
+	// Sandbox image auto-follow (cluster-services-1376): move idle projects to
+	// RECOMMENDED_IMAGE_TAG. A project with an open tab or recent activity is
+	// never touched. Off when RECOMMENDED_IMAGE_TAG is not a semver.
+	AutoFollowImageEnabled    bool          // AUTO_FOLLOW_IMAGE_ENABLED (default: true)
+	AutoFollowImageInterval   time.Duration // AUTO_FOLLOW_IMAGE_INTERVAL (default: 5m)
+	AutoFollowImageIdleGrace  time.Duration // AUTO_FOLLOW_IMAGE_IDLE_GRACE (default: 30m)
+	AutoFollowImageMaxPerPass int           // AUTO_FOLLOW_IMAGE_MAX_PER_PASS (default: 1)
 }
 
 // ParseEnvironment extracts the environment suffix from ProjectsNamespace.
@@ -117,6 +135,15 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 		AuthIssuer:         sharedconfig.GetEnv("AUTH_ISSUER", "kubetty"),
 		AuthCookieDomain:   os.Getenv("AUTH_COOKIE_DOMAIN"),
 		AuthCookieSecure:   sharedconfig.GetEnvBool("AUTH_COOKIE_SECURE", true),
+		GitHubClientID:     strings.TrimSpace(os.Getenv("AUTH_GITHUB_CLIENT_ID")),
+		GitHubClientSecret: strings.TrimSpace(os.Getenv("AUTH_GITHUB_CLIENT_SECRET")),
+		GitHubPrivateKey:   os.Getenv("AUTH_GITHUB_PRIVATE_KEY"),
+		GitHubCallbackURL:  strings.TrimSpace(os.Getenv("AUTH_GITHUB_CALLBACK_URL")),
+		GitHubAllow:        os.Getenv("AUTH_GITHUB_ALLOW"),
+		GitHubAdminTeams:   sharedconfig.GetEnv("AUTH_GITHUB_ADMIN_TEAMS", "SupportTools/admins"),
+		GitHubCacheTTL:     sharedconfig.GetEnvDuration("AUTH_GITHUB_CACHE_TTL", time.Minute),
+		BreakGlassUser:     strings.TrimSpace(os.Getenv("AUTH_BREAKGLASS_USER")),
+		RestrictedUsers:    os.Getenv("AUTH_RESTRICTED_USERS"),
 		MetricsEnabled:     sharedconfig.GetEnvBool("METRICS_ENABLED", true),
 		MetricsInterval:    sharedconfig.GetEnvDuration("METRICS_INTERVAL", 15*time.Second),
 		Controller: ControllerConfig{
@@ -135,6 +162,11 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 			StorageExpandThreshold: sharedconfig.GetEnvFloat64("STORAGE_EXPAND_THRESHOLD", 0.70),
 			StorageExpandAmount:    sharedconfig.GetEnv("STORAGE_EXPAND_AMOUNT", "10Gi"),
 			StorageExpandCooldown:  sharedconfig.GetEnvDuration("STORAGE_EXPAND_COOLDOWN", 5*time.Minute),
+
+			AutoFollowImageEnabled:    sharedconfig.GetEnvBool("AUTO_FOLLOW_IMAGE_ENABLED", true),
+			AutoFollowImageInterval:   sharedconfig.GetEnvDuration("AUTO_FOLLOW_IMAGE_INTERVAL", 5*time.Minute),
+			AutoFollowImageIdleGrace:  sharedconfig.GetEnvDuration("AUTO_FOLLOW_IMAGE_IDLE_GRACE", 30*time.Minute),
+			AutoFollowImageMaxPerPass: sharedconfig.GetEnvInt("AUTO_FOLLOW_IMAGE_MAX_PER_PASS", 1),
 		},
 		LeaderElection: LeaderElectionConfig{
 			Enabled:       sharedconfig.GetEnvBool("LEADER_ELECTION_ENABLED", true),
@@ -164,6 +196,12 @@ func LoadGatewayConfig() (GatewayConfig, error) {
 		RefreshTTL:   cfg.AuthRefreshTTL,
 		CookieDomain: cfg.AuthCookieDomain,
 		CookieSecure: cfg.AuthCookieSecure,
+
+		GitHubClientID:     cfg.GitHubClientID,
+		GitHubClientSecret: cfg.GitHubClientSecret,
+		GitHubPrivateKey:   cfg.GitHubPrivateKey,
+		GitHubCallbackURL:  cfg.GitHubCallbackURL,
+		GitHubAllow:        cfg.GitHubAllow,
 	}
 	if err := sharedconfig.ValidateAuth(authCfg); err != nil {
 		return cfg, err

@@ -12,7 +12,7 @@ import (
 	"github.com/supporttools/KubeTTY/server/internal/projects"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +38,15 @@ type Config struct {
 
 	// StorageMonitor holds configuration for automatic PVC expansion.
 	StorageMonitor StorageMonitorConfig
+
+	// DriftCheckInterval is how often to compare running project Deployments
+	// with their DB rows and record pending changes (cluster-services-1024).
+	// The check is report-only. Zero means DefaultDriftCheckInterval.
+	DriftCheckInterval time.Duration
+
+	// AutoFollow moves idle projects to the recommended sandbox image
+	// (cluster-services-1376). The loop runs only when AutoFollow.Active().
+	AutoFollow AutoFollowConfig
 }
 
 // DefaultConfig returns sensible defaults.
@@ -171,6 +180,20 @@ func (c *Controller) Start(ctx context.Context) {
 	// Health check loop
 	c.wg.Add(1)
 	go c.runHealthCheckLoop(ctx)
+
+	// Drift check loop: report-only, never rolls a pod (cluster-services-1024)
+	c.wg.Add(1)
+	go c.runDriftCheckLoop(ctx)
+
+	// Sandbox image auto-follow: upgrades idle projects only (cluster-services-1376)
+	if c.cfg.AutoFollow.Active() {
+		c.wg.Add(1)
+		go c.runAutoFollowLoop(ctx)
+	} else {
+		log.WithField("enabled", c.cfg.AutoFollow.Enabled).
+			WithField("recommended_tag", c.cfg.AutoFollow.RecommendedTag).
+			Info("Sandbox image auto-follow is off (disabled, or the recommended tag is not a semver)")
+	}
 
 	// Storage monitor loop (for automatic PVC expansion)
 	c.wg.Add(1)
@@ -307,34 +330,6 @@ func (c *Controller) handlePending(ctx context.Context, p *projects.Project) err
 				logger.WithError(statusErr).Error("Failed to update project status to failed")
 			}
 			return fmt.Errorf("failed to create ServiceAccount: %w", err)
-		}
-	}
-
-	// Create ClusterRole and ClusterRoleBinding for admin access
-	adminRole := BuildAdminClusterRole(p, cfg)
-	if _, err := c.clientset.RbacV1().ClusterRoles().Create(ctx, adminRole, metav1.CreateOptions{}); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			logger.WithError(err).Warn("Failed to create admin ClusterRole")
-		}
-	}
-	adminBinding := BuildAdminClusterRoleBinding(p, cfg)
-	if _, err := c.clientset.RbacV1().ClusterRoleBindings().Create(ctx, adminBinding, metav1.CreateOptions{}); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			logger.WithError(err).Warn("Failed to create admin ClusterRoleBinding")
-		}
-	}
-
-	// Create ClusterRole and ClusterRoleBinding for read access
-	readRole := BuildReadClusterRole(p, cfg)
-	if _, err := c.clientset.RbacV1().ClusterRoles().Create(ctx, readRole, metav1.CreateOptions{}); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			logger.WithError(err).Warn("Failed to create read ClusterRole")
-		}
-	}
-	readBinding := BuildReadClusterRoleBinding(p, cfg)
-	if _, err := c.clientset.RbacV1().ClusterRoleBindings().Create(ctx, readBinding, metav1.CreateOptions{}); err != nil {
-		if !errors.IsAlreadyExists(err) {
-			logger.WithError(err).Warn("Failed to create read ClusterRoleBinding")
 		}
 	}
 
@@ -564,6 +559,7 @@ func (c *Controller) handleUpdating(ctx context.Context, p *projects.Project) er
 		_, err = c.clientset.AppsV1().Deployments(cfg.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
 		if err == nil {
 			logger.Info("Deployment updated, transitioning to creating status")
+			c.clearPendingChanges(ctx, p)
 			return c.store.SetStatus(ctx, p.ID, projects.StatusCreating, "Waiting for deployment rollout")
 		}
 
@@ -628,42 +624,7 @@ func (c *Controller) handleDeleting(ctx context.Context, p *projects.Project) er
 		}
 	}
 
-	// Delete per-project env secret
-	envSecretName := cfg.EnvSecretName(p.Name)
-	if err := c.clientset.CoreV1().Secrets(cfg.Namespace).Delete(ctx, envSecretName, metav1.DeleteOptions{}); err != nil {
-		if !errors.IsNotFound(err) {
-			logger.WithError(err).Warn("Failed to delete env secret")
-		}
-	}
-
-	// Delete cluster-scoped RBAC resources
-	// Use ClusterRoleName for consistent naming with the builders
-	adminRoleName := cfg.ClusterRoleName(p.Name, "admin")
-	readRoleName := cfg.ClusterRoleName(p.Name, "read")
-
-	// Delete admin ClusterRoleBinding and ClusterRole
-	if err := c.clientset.RbacV1().ClusterRoleBindings().Delete(ctx, adminRoleName, metav1.DeleteOptions{}); err != nil {
-		if !errors.IsNotFound(err) {
-			logger.WithError(err).Warn("Failed to delete admin ClusterRoleBinding")
-		}
-	}
-	if err := c.clientset.RbacV1().ClusterRoles().Delete(ctx, adminRoleName, metav1.DeleteOptions{}); err != nil {
-		if !errors.IsNotFound(err) {
-			logger.WithError(err).Warn("Failed to delete admin ClusterRole")
-		}
-	}
-
-	// Delete read ClusterRoleBinding and ClusterRole
-	if err := c.clientset.RbacV1().ClusterRoleBindings().Delete(ctx, readRoleName, metav1.DeleteOptions{}); err != nil {
-		if !errors.IsNotFound(err) {
-			logger.WithError(err).Warn("Failed to delete read ClusterRoleBinding")
-		}
-	}
-	if err := c.clientset.RbacV1().ClusterRoles().Delete(ctx, readRoleName, metav1.DeleteOptions{}); err != nil {
-		if !errors.IsNotFound(err) {
-			logger.WithError(err).Warn("Failed to delete read ClusterRole")
-		}
-	}
+	c.deleteEnvSecret(ctx, p, logger)
 
 	// Note: We intentionally don't delete the PVC to preserve data
 	// The PVC can be cleaned up manually if needed
@@ -877,13 +838,41 @@ func (c *Controller) ResyncProject(ctx context.Context, p *projects.Project) err
 	return nil
 }
 
-// RestartProject triggers a restart of the project deployment.
+// RestartProject restarts the project's pod with a Deployment rebuilt from the
+// project's current database record.
+//
+// The Deployment spec is regenerated with BuildDeployment, so any change saved
+// to the DB since the last rollout (cpu_limit, memory, image tag, DinD sidecar
+// settings, ...) takes effect on this restart. Before cluster-services-1008 a
+// restart only bumped the restartedAt annotation and reused the stale pod
+// template, so DB-side resource changes never reached a running workspace.
+//
+// The restartedAt annotation is still set, so the rollout happens even when the
+// rebuilt spec is identical to the live one. Replicas follow the project's
+// paused flag (0 when paused, 1 otherwise), matching BuildDeployment and
+// ScaleProject.
 func (c *Controller) RestartProject(ctx context.Context, p *projects.Project) error {
 	logger := log.WithField("project", p.Name)
-	logger.Info("Restarting project")
+	logger.Info("Restarting project (rebuilding deployment from database)")
+
+	// BuildDeployment uses resource.MustParse; reject a malformed DB value with
+	// an error instead of panicking the gateway.
+	if err := validateProjectResources(p); err != nil {
+		return fmt.Errorf("cannot rebuild deployment: %w", err)
+	}
 
 	cfg := c.cfg.ResourceConfig
 	resourceName := cfg.ResourceName(p.Name)
+	desired := BuildDeployment(p, cfg, cfg.EnvSecretName(p.Name))
+	replicas := int32(1)
+	if p.Paused {
+		replicas = 0
+	}
+	desired.Spec.Replicas = &replicas
+	if desired.Spec.Template.Annotations == nil {
+		desired.Spec.Template.Annotations = map[string]string{}
+	}
+	desired.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
 
 	// Retry loop for handling optimistic concurrency conflicts
 	const maxRetries = 5
@@ -895,15 +884,21 @@ func (c *Controller) RestartProject(ctx context.Context, p *projects.Project) er
 			return fmt.Errorf("failed to get deployment: %w", err)
 		}
 
-		// Add/update restart annotation
-		if deploy.Spec.Template.Annotations == nil {
-			deploy.Spec.Template.Annotations = map[string]string{}
-		}
-		deploy.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
+		// Replace the spec with the one rebuilt from the DB. Selector is
+		// immutable and derived from the project name, so it is unchanged.
+		deploy.Spec = *desired.Spec.DeepCopy()
 
 		// Update deployment
 		_, err = c.clientset.AppsV1().Deployments(cfg.Namespace).Update(ctx, deploy, metav1.UpdateOptions{})
 		if err == nil {
+			logger.WithFields(logrus.Fields{
+				"cpu_request":    p.CPURequest,
+				"cpu_limit":      p.CPULimit,
+				"memory_request": p.MemoryRequest,
+				"memory_limit":   p.MemoryLimit,
+				"image_tag":      p.ImageTag,
+			}).Info("Deployment rebuilt from database for restart")
+			c.clearPendingChanges(ctx, p)
 			// Set status to creating to wait for rollout
 			return c.store.SetStatus(ctx, p.ID, projects.StatusCreating, "Restarting deployment")
 		}
@@ -921,6 +916,22 @@ func (c *Controller) RestartProject(ctx context.Context, p *projects.Project) er
 
 	// Exhausted retries
 	return fmt.Errorf("failed to restart deployment after %d retries: %w", maxRetries, lastErr)
+}
+
+// validateProjectResources checks that the project's resource quantities parse,
+// so BuildDeployment (which uses resource.MustParse) cannot panic on them.
+func validateProjectResources(p *projects.Project) error {
+	for field, value := range map[string]string{
+		"cpu_request":    p.CPURequest,
+		"cpu_limit":      p.CPULimit,
+		"memory_request": p.MemoryRequest,
+		"memory_limit":   p.MemoryLimit,
+	} {
+		if _, err := resource.ParseQuantity(value); err != nil {
+			return fmt.Errorf("invalid %s %q: %w", field, value, err)
+		}
+	}
+	return nil
 }
 
 // ScaleProject scales a project's deployment to the specified number of replicas.
@@ -1033,67 +1044,6 @@ func isPodReady(pod *corev1.Pod) bool {
 		}
 	}
 	return false
-}
-
-// GetProjectSecrets returns the environment secrets for a project (key names only, not values).
-func (c *Controller) GetProjectSecrets(ctx context.Context, p *projects.Project) (map[string]string, error) {
-	cfg := c.cfg.ResourceConfig
-	envSecretName := cfg.EnvSecretName(p.Name)
-
-	secret, err := c.clientset.CoreV1().Secrets(cfg.Namespace).Get(ctx, envSecretName, metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// Secret doesn't exist yet, return empty map
-			return map[string]string{}, nil
-		}
-		return nil, fmt.Errorf("failed to get secret: %w", err)
-	}
-
-	// Return key-value pairs (values as strings)
-	result := make(map[string]string)
-	for k, v := range secret.Data {
-		result[k] = string(v)
-	}
-	return result, nil
-}
-
-// UpdateProjectSecrets updates the environment secrets for a project.
-// This replaces the entire secret data with the new values and triggers a deployment restart.
-func (c *Controller) UpdateProjectSecrets(ctx context.Context, p *projects.Project, secrets map[string]string) error {
-	logger := log.WithField("project", p.Name)
-	cfg := c.cfg.ResourceConfig
-	envSecretName := cfg.EnvSecretName(p.Name)
-
-	// Build the secret data
-	secretData := make(map[string][]byte)
-	for k, v := range secrets {
-		secretData[k] = []byte(v)
-	}
-
-	// Check if secret exists
-	existing, err := c.clientset.CoreV1().Secrets(cfg.Namespace).Get(ctx, envSecretName, metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// Create new secret
-			newSecret := BuildEnvSecret(p, cfg, secrets)
-			if _, err := c.clientset.CoreV1().Secrets(cfg.Namespace).Create(ctx, newSecret, metav1.CreateOptions{}); err != nil {
-				return fmt.Errorf("failed to create secret: %w", err)
-			}
-			logger.Info("Created project env secret")
-		} else {
-			return fmt.Errorf("failed to get secret: %w", err)
-		}
-	} else {
-		// Update existing secret
-		existing.Data = secretData
-		if _, err := c.clientset.CoreV1().Secrets(cfg.Namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("failed to update secret: %w", err)
-		}
-		logger.Info("Updated project env secret")
-	}
-
-	// Trigger a deployment restart to pick up the new secrets
-	return c.RestartProject(ctx, p)
 }
 
 // expandPVCIfNeeded expands a project's PVC if the requested storage is larger than current.
@@ -1228,31 +1178,13 @@ func (c *Controller) updateNetworkPolicyIfNeeded(ctx context.Context, p *project
 		return fmt.Errorf("failed to get NetworkPolicy: %w", err)
 	}
 
-	// Build desired NetworkPolicy
 	desiredNetPol := BuildNetworkPolicy(p, cfg, cfg.GatewayNamespace)
-
-	// Simple comparison: check if number of ingress rules/ports match
-	// For a more robust comparison, we'd need to compare the full spec
-	existingPortCount := 0
-	desiredPortCount := 0
-	if len(existingNetPol.Spec.Ingress) > 0 {
-		existingPortCount = len(existingNetPol.Spec.Ingress[0].Ports)
-	}
-	if len(desiredNetPol.Spec.Ingress) > 0 {
-		desiredPortCount = len(desiredNetPol.Spec.Ingress[0].Ports)
-	}
-
-	if existingPortCount == desiredPortCount {
-		logger.Debug("NetworkPolicy ingress rules already match desired state")
+	if equality.Semantic.DeepEqual(existingNetPol.Spec, desiredNetPol.Spec) {
+		logger.Debug("NetworkPolicy already matches desired state")
 		return nil
 	}
 
-	// Update NetworkPolicy
-	logger.WithFields(logrus.Fields{
-		"existingPorts": existingPortCount,
-		"desiredPorts":  desiredPortCount,
-	}).Info("Updating NetworkPolicy ingress rules")
-
+	logger.Info("Updating NetworkPolicy to the desired spec")
 	existingNetPol.Spec = desiredNetPol.Spec
 	if _, err := c.clientset.NetworkingV1().NetworkPolicies(cfg.Namespace).Update(ctx, existingNetPol, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("failed to update NetworkPolicy: %w", err)
@@ -1264,7 +1196,5 @@ func (c *Controller) updateNetworkPolicyIfNeeded(ctx context.Context, p *project
 
 // Ensure interfaces are implemented (compile-time check)
 var (
-	_ *appsv1.Deployment         = nil
-	_ *rbacv1.ClusterRole        = nil
-	_ *rbacv1.ClusterRoleBinding = nil
+	_ *appsv1.Deployment = nil
 )

@@ -2,6 +2,7 @@ package projects
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -483,4 +484,58 @@ func TestPGStore_Create_InvalidName(t *testing.T) {
 			t.Errorf("Create with name %q: error = %v, want ErrInvalidName", name, err)
 		}
 	}
+}
+
+// cluster-services-1024: drift check results are stored as JSONB; an empty
+// result is stored as NULL so a project with no drift reads back clean.
+func TestPGStore_SetPendingChanges(t *testing.T) {
+	t.Run("stores changes as json", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		id := uuid.New()
+		changes := []PendingChange{{Field: "cpuLimit", Running: "1", Desired: "2"}}
+		want, _ := json.Marshal(changes)
+		mock.ExpectExec(`UPDATE kubetty_projects\s+SET pending_changes = \$2, drift_checked_at = NOW\(\)`).
+			WithArgs(id, want).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		if err := store.SetPendingChanges(context.Background(), id, changes); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("empty clears to null", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		id := uuid.New()
+		mock.ExpectExec(`UPDATE kubetty_projects`).
+			WithArgs(id, nil).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		if err := store.SetPendingChanges(context.Background(), id, nil); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		mock, store := setupMockPool(t)
+		defer mock.Close()
+
+		id := uuid.New()
+		mock.ExpectExec(`UPDATE kubetty_projects`).
+			WithArgs(id, nil).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		if err := store.SetPendingChanges(context.Background(), id, nil); !errors.Is(err, ErrProjectNotFound) {
+			t.Errorf("error = %v, want ErrProjectNotFound", err)
+		}
+	})
 }

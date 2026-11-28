@@ -7,15 +7,12 @@ new findings below were observed while doing so. Line numbers refer to the files
 
 ## Summary
 
-All P0/P1 items from the original review are fixed. The remaining risk is concentrated in authorization
-(no admin role, cross-user tab takeover), the per-project RBAC the controller still tries
-to create, and a few dead or inconsistent subsystems (DB session logs, storage-class defaults).
+All P0/P1 items from the original review are fixed. The remaining risk is concentrated in the legacy
+`deploy/helm` chart's cluster-wide RBAC and a few dead or inconsistent subsystems (DB session
+logs, storage-class defaults). Updated 2026-11-28: N1–N3 are fixed on `main`.
 
 | # | Finding | Severity | Status |
 |---|---------|----------|--------|
-| N1 | No admin role: any authenticated user can use every `/api/admin/*` endpoint | MEDIUM | New |
-| N2 | `?force=true` lets any authenticated user take over another user's tab | MEDIUM | New |
-| N3 | Controller still creates per-project cluster-wide `*` ClusterRoles/Bindings | MEDIUM | New |
 | N4 | Legacy `deploy/helm` chart still binds the controller cluster-wide | MEDIUM | New |
 | N5 | DB session logs are never written; `/session/logs` and retention settings do nothing | MEDIUM | New |
 | N6 | Default storage class is still `longhorn` in DB/UI defaults | MEDIUM | New |
@@ -30,33 +27,6 @@ to create, and a few dead or inconsistent subsystems (DB session logs, storage-c
 ---
 
 ## Open Findings
-
-### N1. No authorization tier for admin endpoints
-
-`kubetty_users` has no role column (`server/migrations/0004_auth_tables.up.sql:3-11`). Admin routes
-are wrapped only in `requireAuth` (`server/cmd/gateway/main.go:545-558`, `580-583`, `594-602`), so
-any active user can create, delete or upgrade projects, change global settings, and read or write
-project env secrets (`GET/PUT /api/admin/projects/{id}/secrets`, `main.go:557-558`).
-With `AUTH_MODE` other than `local`, the same routes are registered with no auth at all
-(`main.go:559-573`, `585-588`, `604-612`). The gateway logs a warning in that case (see Resolved).
-
-### N2. Cross-user tab takeover
-
-`AttachWithOptions` reassigns tab ownership to the caller whenever `force=true`
-(`server/internal/gateway/manager/manager.go:415-436`). The caller is identified by user ID
-(`server/cmd/gateway/main.go:1379-1386`), but nothing checks that the old and new owners are the
-same user, so any authenticated user who knows a tab ID can take over another user's live shell.
-`AttachVNC` behaves the same way (`manager.go:633-642`).
-
-### N3. Controller still tries to create cluster-wide per-project RBAC
-
-`createProjectResources` creates an admin ClusterRole with `*` verbs on `*` resources in the
-core, apps, batch, extensions and networking groups, plus a ClusterRoleBinding
-(`server/internal/controller/controller.go:313-338`, `server/internal/controller/resources.go:697-716`).
-Since `5ff9bba` the `helm-gateway` chart no longer grants the controller `clusterroles` or
-`clusterrolebindings`, so these calls now fail. The controller only logs a warning, so project
-creation continues without the RBAC. The intent should be redesigned as namespaced Roles, or the
-code removed.
 
 ### N4. Legacy `deploy/helm` chart is still cluster-wide
 
@@ -153,6 +123,9 @@ There are now 62 Go test files and 9 web test files (see Resolved). Remaining ga
 |------------------|------------|----------|
 | Single-client enforcement missing (CRITICAL) | 409 on second client added in `ba7a23b` (2025-11-20). TOCTOU race fixed with `reserveSlot()` in `6661fa4` (2026-02-08). Superseded by per-project session modes in `e2d489d` (2026-03-03): `exclusive_takeover` (default, 409 plus `?force=true` takeover), `shared_concurrent`, `independent_shells` | `server/cmd/project/main.go:429-520`, `server/migrations/0016_project_session_mode.up.sql`, gateway tab ownership at `server/internal/gateway/manager/manager.go:408-505` |
 | Debug `console.log` in `TerminalView`/`App` | Dev-gated `devLog` helpers (`d515859`, `39ac98c`); `App.tsx` clean | `web/src/components/TerminalView.tsx:8-17` |
+| No admin role on `/api/admin/*` (N1, found 2026-10-01) | Admin role and `RequireAdmin` middleware on every admin, dashboard, settings and session-log route (`8ef30ec`, #69) | `server/internal/handlers/auth/restricted.go` (`RequireAdmin`), `server/cmd/gateway/main.go` (`routes`) |
+| `?force=true` cross-user tab takeover (N2, found 2026-10-01) | Force only preempts the owner's own connection; a foreign owner is refused (`82938d2`, #52) | `server/internal/gateway/manager/manager.go` (`refuseForeignAttach`) |
+| Controller creates cluster-wide per-project RBAC (N3, found 2026-10-01) | Project pods get no RBAC and no mounted token (`5dde721`, #55) | `server/internal/controller/controller.go` |
 | Auth debug logging always on in `AuthContext.tsx` (found 2026-10-01) | `authLog` returns early unless `import.meta.env.DEV` (`c71468c`) | `web/src/contexts/AuthContext.tsx:44-48` |
 | Single-client reservation edge cases: stale `releaseSlot()` and unreserved force path (found 2026-10-01) | Takeover epoch: `takeover()` atomically disconnects, invalidates mid-upgrade admissions and reserves the slot; `releaseSlot` only releases an unconsumed reservation of the current epoch (`ec2c48c`). Also fixed the flaky `TestWebSocket_ForceReconnect*` tests | `server/cmd/project/main.go` (`takeover`, `addClient`, `releaseSlot`) |
 | Auth not enforced / no warning | Startup warning (`cbdb234`), `X-Auth-Warning` header middleware; Helm `helm-gateway` defaults `auth.mode: local` | `server/cmd/gateway/main.go:95-100,651`, `server/internal/shared/server/auth_warning.go`, `deploy/helm-gateway/values.yaml:30` |

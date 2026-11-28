@@ -52,8 +52,19 @@ const authUserContextKey contextKey = "kubettyAuthUser"
 
 // User represents an authenticated user in the request context
 type User struct {
-	ID       uuid.UUID
-	Username string
+	ID          uuid.UUID
+	Username    string
+	Role        string
+	GitHubLogin string
+	// Restricted users (AUTH_RESTRICTED_USERS) may only use RestrictedRouteAllowed
+	// and open terminal tabs on AllowedProject.
+	Restricted     bool
+	AllowedProject string
+}
+
+// IsAdmin reports whether the user has the admin role.
+func (u *User) IsAdmin() bool {
+	return u != nil && !u.Restricted && u.Role == auth.RoleAdmin
 }
 
 // StoreMetricsObserver defines an interface for observing store operations.
@@ -173,7 +184,8 @@ func cookieTemplate(name, value string, expires time.Time, cfg AuthConfig) *http
 
 // AuthEnabled checks if authentication is enabled based on configuration.
 func AuthEnabled(cfg AuthConfig, authMgr *auth.Manager) bool {
-	return cfg.GetAuthMode() == "local" && authMgr != nil
+	mode := cfg.GetAuthMode()
+	return (mode == "local" || mode == AuthModeGitHub) && authMgr != nil
 }
 
 // AuthenticateRequest validates the access token from the request and returns
@@ -218,7 +230,7 @@ func AuthenticateRequest(r *http.Request, authMgr *auth.Manager) (*User, error) 
 		"username":  claims.Username,
 	}).Debug("auth/helpers: token validated successfully")
 
-	return &User{ID: userID, Username: claims.Username}, nil
+	return &User{ID: userID, Username: claims.Username, Role: claims.Role, GitHubLogin: claims.GitHubLogin}, nil
 }
 
 // HandleAuthFailure sends a standardized authentication failure response.

@@ -10,7 +10,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -53,7 +52,7 @@ type ResourceConfig struct {
 	Prefix string
 
 	// Env is the environment suffix parsed from the namespace
-	// (e.g., "dev", "prd") - used for cluster-scoped resources
+	// (e.g., "dev", "prd")
 	Env string
 
 	// ImagePullSecrets lists secret names for pulling container images
@@ -117,17 +116,6 @@ func (c ResourceConfig) PVCName(projectName string) string {
 		suffix = "-data"
 	}
 	return fmt.Sprintf("%s%s", c.ResourceName(projectName), suffix)
-}
-
-// ClusterRoleName returns the name for a cluster-scoped RBAC resource.
-// Format: {prefix}{project-name}-{role}-{env}
-// If Env is empty, it omits the environment suffix.
-func (c ResourceConfig) ClusterRoleName(projectName, role string) string {
-	baseName := c.ResourceName(projectName)
-	if c.Env == "" {
-		return fmt.Sprintf("%s-%s", baseName, role)
-	}
-	return fmt.Sprintf("%s-%s-%s", baseName, role, c.Env)
 }
 
 // buildImagePullSecrets converts a list of secret names to LocalObjectReferences.
@@ -284,8 +272,10 @@ echo "Template sync job completed"
 
 // BuildServiceAccount creates a ServiceAccount for the project pod.
 // Name format: {prefix}{project-name}-sa
+// It has no RBAC and no mounted token: the sandbox runs an unsandboxed agent.
 func BuildServiceAccount(p *projects.Project, cfg ResourceConfig) *corev1.ServiceAccount {
 	resourceName := fmt.Sprintf("%s-sa", cfg.ResourceName(p.Name))
+	automount := false
 
 	return &corev1.ServiceAccount{
 		TypeMeta: metav1.TypeMeta{
@@ -297,6 +287,7 @@ func BuildServiceAccount(p *projects.Project, cfg ResourceConfig) *corev1.Servic
 			Namespace: cfg.Namespace,
 			Labels:    projectLabels(p, cfg),
 		},
+		AutomountServiceAccountToken: &automount,
 	}
 }
 
@@ -347,8 +338,7 @@ func BuildService(p *projects.Project, cfg ResourceConfig) *corev1.Service {
 	}
 }
 
-// BuildNetworkPolicy creates a NetworkPolicy that allows ingress from gateway pods.
-// This enables the gateway to connect to project pods for terminal WebSocket and VNC traffic.
+// BuildNetworkPolicy admits only the gateway namespace, so a sandbox cannot skip the gateway's access checks.
 // Name format: {prefix}{project-name}-ingress
 func BuildNetworkPolicy(p *projects.Project, cfg ResourceConfig, gatewayNamespace string) *networkingv1.NetworkPolicy {
 	resourceName := fmt.Sprintf("%s-ingress", cfg.ResourceName(p.Name))
@@ -393,7 +383,6 @@ func BuildNetworkPolicy(p *projects.Project, cfg ResourceConfig, gatewayNamespac
 			},
 			Ingress: []networkingv1.NetworkPolicyIngressRule{
 				{
-					// Allow from gateway namespace
 					From: []networkingv1.NetworkPolicyPeer{
 						{
 							NamespaceSelector: &metav1.LabelSelector{
@@ -405,22 +394,159 @@ func BuildNetworkPolicy(p *projects.Project, cfg ResourceConfig, gatewayNamespac
 					},
 					Ports: ingressPorts,
 				},
-				{
-					// Allow from same namespace (for health checks, prometheus)
-					From: []networkingv1.NetworkPolicyPeer{
-						{
-							PodSelector: &metav1.LabelSelector{},
-						},
-					},
-					Ports: ingressPorts,
-				},
 			},
 		},
 	}
 }
 
+// DinDImage is the Docker-in-Docker sidecar image for projects with DinD
+// enabled. Bumped from docker:24.0.5-dind (EOL) in cluster-services-1008, then
+// from 29.9.1 to the digest-pinned 29.9.3 in cluster-services-1329: 29.9.1 ships
+// ca-certificates 20260909, which still trusts the compromised emSign ECC Root
+// CA - G3 (USN-8944-1); 29.9.3 ships 20261020 and does not. dockerd verifies
+// registry TLS against this bundle when it pulls images.
+// cluster-services-1405: 20261020 still ships emSign C1, C3 and G1 (only G3 was
+// removed), so the sidecar now runs the no-emSign derived image of that same
+// 29.9.3 digest (SupportTools/noemsign-images: one appended clean CA-bundle layer,
+// upstream layers and config untouched), pulled from Harbor project `noemsign`.
+const DinDImage = "harbor.support.tools/noemsign/library/docker:29.9.3-dind-noemsign.1@sha256:005e01ddc00d15946f3098ec36777d4844abb057a3ea570de2d0a723251bbf64"
+
 // BuildDeployment creates a Deployment for the project pod.
 // Name format: {prefix}{project-name}
+// initPermissionsScript is the init-permissions container's script. It makes
+// the project volume's opt/home/usr-local-go trees owned by mmattox before
+// the sandbox starts.
+//
+// The cost is the walk, not the chown. A project volume holds the user's whole
+// workspace: on 2026-11-17 fruition had 5.2M inodes and fcp 4.9M (about 93% of
+// them source checkouts under ~/go/src), and a warm-cache walk took ~42s while
+// the number of files that actually needed a chown was zero. Cold-cache, over
+// iSCSI, the walk exceeded the old fixed `timeout 300`, so the init container
+// failed and kubelet restarted it, which began the same walk again from the
+// top (cluster-services-1430: fruition 2 init restarts, fcp 1).
+//
+// So the walk is supervised instead of hard-killed:
+//   - stall: if find (plus its reaped chown children) accrues no CPU time for
+//     CHOWN_STALL_SECONDS, the volume is treated as hung and the container
+//     fails, so kubelet retries. This keeps the original intent of the timeout
+//     (do not D-state forever on a dead CSI/iSCSI session,
+//     cluster-services-alert-remediation-111).
+//   - budget: a walk that is still making progress after CHOWN_BUDGET_SECONDS
+//     is stopped and startup continues (exit 0). Anything it did not reach is
+//     fixed on a later start, and the sandbox is never held in an init
+//     restart loop by a large but healthy volume.
+//
+// find -exec ... {} + batches chown calls; chown -h changes a symlink itself
+// rather than whatever it points to; -xdev keeps the walk on the volume.
+//
+// The walk runs in parallel (cluster-services-1441). After 1430 the supervised
+// walk still took ~6 min at every restart (fruition 363-371s, fcp 351-367s):
+// one find reads one directory at a time, so a cold walk over iSCSI is bound by
+// round-trip latency, not by CPU or by the chown count (zero). The tree is split
+// at CHOWN_SPLIT_DEPTH below each root:
+//   - one find fixes every entry shallower than the split depth;
+//   - one find lists the directories AT the split depth (and fixes the
+//     non-directories there), and xargs walks each listed directory with its
+//     own find, CHOWN_PARALLEL at a time.
+//
+// Together they visit every entry exactly once, with the same test and the same
+// chown as the single find did (TestInitPermissions_ParallelWalkCoversEveryEntryOnce).
+// The one difference: a mount point lying exactly at the split depth would be
+// walked by its own find. The init container mounts only the volume, at /data,
+// so there is no such mount point.
+//
+// The default split depth comes from the inode layout of the fruition volume
+// (2026-11-27, home only; the cold du was cut off at 10 min). The largest single
+// subtree at each depth below home was: depth 6, 1.74M inodes
+// (~/go/src/github.com/fruition/d); depth 7, 1.64M (.../d/fruition-bot);
+// depth 8, 74K; depth 9, 43K. Out of ~5.2M, one 1.7M subtree would cap the
+// speedup at about 3x, so the split sits at depth 8. The shallow part above it
+// is about 15K directories.
+//
+// The walk runs in its own process group (set -m), so the supervisor sums the
+// CPU time of the whole group (every find, xargs and their chown children), and
+// a stall or budget stop kills the whole group, not just its leader.
+// KUBETTY_DATA_DIR and the CHOWN_* variables exist so tests can drive it.
+const initPermissionsScript = `
+set -euo pipefail
+DATA="${KUBETTY_DATA_DIR:-/data}"
+BUDGET="${CHOWN_BUDGET_SECONDS:-900}"
+STALL="${CHOWN_STALL_SECONDS:-120}"
+POLL="${CHOWN_POLL_SECONDS:-5}"
+PARALLEL="${CHOWN_PARALLEL:-8}"
+SPLIT="${CHOWN_SPLIT_DEPTH:-8}"
+if [ "$SPLIT" -lt 1 ]; then SPLIT=1; fi
+if [ "$PARALLEL" -lt 1 ]; then PARALLEL=1; fi
+if ! getent group mmattox >/dev/null 2>&1; then
+  groupadd -g 1000 mmattox
+fi
+if ! id -u mmattox >/dev/null 2>&1; then
+  useradd -u 1000 -g mmattox -M -s /usr/sbin/nologin mmattox
+fi
+mkdir -p "$DATA/opt" "$DATA/home" "$DATA/usr-local-go" "$DATA/var-lib-docker"
+mkdir -p "$DATA/home/mmattox"
+ROOTS=("$DATA/opt" "$DATA/home" "$DATA/usr-local-go")
+
+# Every entry under ROOTS not owned by mmattox is chowned exactly once:
+# depth < SPLIT by the first find, depth == SPLIT by the second (directories are
+# handed to xargs instead), and below that by one find per SPLIT-depth directory.
+walk() {
+  local rc=0 shallow=0 p
+  find "${ROOTS[@]}" -xdev -maxdepth $((SPLIT - 1)) \! -user mmattox -exec chown -h mmattox:mmattox {} + &
+  p=$!
+  find "${ROOTS[@]}" -xdev -mindepth "$SPLIT" -maxdepth "$SPLIT" \
+      \( -type d -print0 \) -o \( \! -user mmattox -exec chown -h mmattox:mmattox {} + \) \
+    | xargs -0 -r -P "$PARALLEL" -I@SUBTREE@ find @SUBTREE@ -xdev \! -user mmattox -exec chown -h mmattox:mmattox {} + \
+    || rc=$?
+  wait "$p" || shallow=$?
+  if [ "$shallow" -ne 0 ]; then return "$shallow"; fi
+  return "$rc"
+}
+
+set -m
+walk &
+pid=$!
+set +m
+
+# utime+stime+cutime+cstime of every process in the walk's process group, in
+# clock ticks. Fields counted after the "pid (comm) " prefix: $3 pgrp, $12-$15.
+# cat skips processes that exit mid-read (|| true: that is not an error here).
+group_ticks() {
+  { cat /proc/[0-9]*/stat 2>/dev/null || true; } | awk -v g="$1" '
+    { sub(/^[0-9]+ \(.*\) /, "") }
+    $3 == g { t += $12 + $13 + $14 + $15; n++ }
+    END { if (n) print t; else print "gone" }'
+}
+
+start=$SECONDS
+last=""
+idle=0
+while kill -0 "$pid" 2>/dev/null; do
+  sleep "$POLL"
+  now=$(group_ticks "$pid")
+  [ "$now" = gone ] && break
+  if [ "$now" = "$last" ]; then idle=$((idle + POLL)); else idle=0; last=$now; fi
+  if [ "$idle" -ge "$STALL" ]; then
+    echo "init-permissions: ownership walk made no CPU progress for ${idle}s; failing so kubelet retries (storage may be hung)" >&2
+    kill -- -"$pid" 2>/dev/null || true
+    exit 1
+  fi
+  if [ $((SECONDS - start)) -ge "$BUDGET" ]; then
+    echo "init-permissions: ownership walk still running after ${BUDGET}s on a large volume; continuing startup, files not reached are fixed on a later start" >&2
+    kill -- -"$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    exit 0
+  fi
+done
+rc=0
+wait "$pid" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "init-permissions: ownership walk failed (exit $rc)" >&2
+  exit "$rc"
+fi
+echo "init-permissions: ownership walk finished in $((SECONDS - start))s"
+`
+
 func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName string) *appsv1.Deployment {
 	replicas := int32(1)
 	resourceName := cfg.ResourceName(p.Name)
@@ -463,16 +589,31 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 		privileged := true
 		containers = append(containers, corev1.Container{
 			Name:  "docker",
-			Image: "docker:24.0.5-dind",
+			Image: DinDImage,
 			SecurityContext: &corev1.SecurityContext{
 				Privileged: &privileged,
 			},
 			Env: []corev1.EnvVar{
 				{Name: "DOCKER_TLS_CERTDIR", Value: ""},
 			},
+			// Unix socket only (cluster-services-1008). The kubetty container
+			// talks to dockerd through the shared dind-sock socket
+			// (DOCKER_HOST=unix:///var/run/docker/docker.sock); nothing used TCP.
+			//
+			// The first arg must be "dockerd": when the args start with "--",
+			// the image's dockerd-entrypoint.sh prepends its defaults, which
+			// with DOCKER_TLS_CERTDIR="" include an unauthenticated
+			// --host=tcp://0.0.0.0:2375 listener.
+			//
+			// --group=root: docker:25+ images ship a "docker" group (gid 2375)
+			// and dockerd gives the socket to it by default (0660), which locks
+			// out the kubetty user. That user reaches the socket through
+			// supplemental group 0, as it did with docker:24 (no docker group,
+			// so the socket fell back to root).
 			Args: []string{
+				"dockerd",
 				"--host=unix:///var/run/docker/docker.sock",
-				"--host=tcp://0.0.0.0:2375",
+				"--group=root",
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: "data", MountPath: "/var/lib/docker", SubPath: "var-lib-docker"},
@@ -593,6 +734,7 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 	userID := int64(1000)
 	groupID := int64(1000)
 	rootID := int64(0)
+	automountToken := false
 
 	initContainers := []corev1.Container{}
 
@@ -602,24 +744,9 @@ func BuildDeployment(p *projects.Project, cfg ResourceConfig, envSecretName stri
 
 	// Permission setup init container
 	initContainers = append(initContainers, corev1.Container{
-		Name:  "init-permissions",
-		Image: "ubuntu:22.04",
-		Command: []string{"/bin/bash", "-c", `
-set -euo pipefail
-if ! getent group mmattox >/dev/null 2>&1; then
-  groupadd -g 1000 mmattox
-fi
-if ! id -u mmattox >/dev/null 2>&1; then
-  useradd -u 1000 -g mmattox -M -s /usr/sbin/nologin mmattox
-fi
-mkdir -p /data/opt /data/home /data/usr-local-go /data/var-lib-docker
-mkdir -p /data/home/mmattox
-# Idempotent + bounded chown: only touch files not already owned by mmattox
-# (warm restarts become near-instant), and cap runtime so a transient CSI/iSCSI
-# session hang fails the init fast for kubelet to recreate the pod with a fresh
-# session, instead of D-stating indefinitely. Ref: cluster-services-alert-remediation-111.
-timeout 300 find /data/opt /data/home /data/usr-local-go \! -user mmattox -exec chown mmattox:mmattox {} +
-`},
+		Name:            "init-permissions",
+		Image:           "ubuntu:22.04",
+		Command:         []string{"/bin/bash", "-c", initPermissionsScript},
 		SecurityContext: &corev1.SecurityContext{RunAsUser: &rootID},
 		VolumeMounts:    []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
 	})
@@ -668,7 +795,7 @@ fi
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: projectSelectorLabels(p, cfg),
+					Labels: projectPodLabels(p, cfg),
 					Annotations: map[string]string{
 						"prometheus.io/scrape": "true",
 						"prometheus.io/path":   "/metrics",
@@ -676,129 +803,19 @@ fi
 					},
 				},
 				Spec: corev1.PodSpec{
-					Hostname:           p.Name,
-					ServiceAccountName: saName,
+					Hostname:                     p.Name,
+					ServiceAccountName:           saName,
+					AutomountServiceAccountToken: &automountToken,
 					SecurityContext: &corev1.PodSecurityContext{
 						SupplementalGroups: []int64{0},
 					},
-					ImagePullSecrets: buildImagePullSecrets(cfg.ImagePullSecrets),
-					InitContainers:   initContainers,
-					Containers:       containers,
-					Volumes:          volumes,
+					ImagePullSecrets:          buildImagePullSecrets(cfg.ImagePullSecrets),
+					InitContainers:            initContainers,
+					Containers:                containers,
+					Volumes:                   volumes,
+					TopologySpreadConstraints: projectTopologySpreadConstraints(cfg),
 				},
 			},
-		},
-	}
-}
-
-// BuildAdminClusterRole creates a ClusterRole with admin permissions.
-// Name format: {prefix}{project-name}-admin-{env}
-// This is cluster-scoped to allow cross-namespace access based on AdminNamespaces.
-func BuildAdminClusterRole(p *projects.Project, cfg ResourceConfig) *rbacv1.ClusterRole {
-	resourceName := cfg.ClusterRoleName(p.Name, "admin")
-
-	return &rbacv1.ClusterRole{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "ClusterRole",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: projectLabels(p, cfg),
-		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{"", "apps", "batch", "extensions", "networking.k8s.io"},
-				Resources: []string{"*"},
-				Verbs:     []string{"*"},
-			},
-		},
-	}
-}
-
-// BuildReadClusterRole creates a ClusterRole with read-only permissions.
-// Name format: {prefix}{project-name}-read-{env}
-// This is cluster-scoped to allow cross-namespace access based on ReadNamespaces.
-func BuildReadClusterRole(p *projects.Project, cfg ResourceConfig) *rbacv1.ClusterRole {
-	resourceName := cfg.ClusterRoleName(p.Name, "read")
-
-	return &rbacv1.ClusterRole{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "ClusterRole",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: projectLabels(p, cfg),
-		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{"", "apps", "batch", "extensions", "networking.k8s.io"},
-				Resources: []string{"*"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-		},
-	}
-}
-
-// BuildAdminClusterRoleBinding creates a ClusterRoleBinding for admin access.
-// Name format: {prefix}{project-name}-admin-{env}
-// Binds the admin ClusterRole to the project's ServiceAccount.
-func BuildAdminClusterRoleBinding(p *projects.Project, cfg ResourceConfig) *rbacv1.ClusterRoleBinding {
-	resourceName := cfg.ClusterRoleName(p.Name, "admin")
-	saName := fmt.Sprintf("%s-sa", cfg.ResourceName(p.Name))
-
-	return &rbacv1.ClusterRoleBinding{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "ClusterRoleBinding",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: projectLabels(p, cfg),
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      "ServiceAccount",
-				Name:      saName,
-				Namespace: cfg.Namespace,
-			},
-		},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "ClusterRole",
-			Name:     resourceName,
-		},
-	}
-}
-
-// BuildReadClusterRoleBinding creates a ClusterRoleBinding for read-only access.
-// Name format: {prefix}{project-name}-read-{env}
-// Binds the read ClusterRole to the project's ServiceAccount.
-func BuildReadClusterRoleBinding(p *projects.Project, cfg ResourceConfig) *rbacv1.ClusterRoleBinding {
-	resourceName := cfg.ClusterRoleName(p.Name, "read")
-	saName := fmt.Sprintf("%s-sa", cfg.ResourceName(p.Name))
-
-	return &rbacv1.ClusterRoleBinding{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "ClusterRoleBinding",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: projectLabels(p, cfg),
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      "ServiceAccount",
-				Name:      saName,
-				Namespace: cfg.Namespace,
-			},
-		},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "ClusterRole",
-			Name:     resourceName,
 		},
 	}
 }
@@ -846,6 +863,37 @@ func projectLabels(p *projects.Project, cfg ResourceConfig) map[string]string {
 		labelComponent:   "project",
 		labelEnvironment: cfg.Env,
 		labelProject:     p.Name,
+	}
+}
+
+// projectPodLabels returns the labels set on project pods: the selector labels
+// plus the component and environment labels that projectTopologySpreadConstraints
+// selects on. The extra labels stay out of the Deployment selector, which is
+// immutable on existing Deployments.
+func projectPodLabels(p *projects.Project, cfg ResourceConfig) map[string]string {
+	labels := projectSelectorLabels(p, cfg)
+	labels[labelComponent] = "project"
+	labels[labelEnvironment] = cfg.Env
+	return labels
+}
+
+// projectTopologySpreadConstraints spreads the project pods of one environment
+// across nodes, so the scheduler stops stacking sandboxes (and their CPU limits)
+// on a single node. ScheduleAnyway makes it a soft preference: it only scores
+// nodes and can never leave a sandbox Pending.
+func projectTopologySpreadConstraints(cfg ResourceConfig) []corev1.TopologySpreadConstraint {
+	return []corev1.TopologySpreadConstraint{
+		{
+			MaxSkew:           1,
+			TopologyKey:       "kubernetes.io/hostname",
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					labelComponent:   "project",
+					labelEnvironment: cfg.Env,
+				},
+			},
+		},
 	}
 }
 

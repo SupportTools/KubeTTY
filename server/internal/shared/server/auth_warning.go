@@ -10,7 +10,7 @@ import "net/http"
 func AuthWarningMiddleware(authMode string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		// If auth is enabled, pass through without modification
-		if authMode == "local" {
+		if authMode == "local" || authMode == "github" {
 			return next
 		}
 

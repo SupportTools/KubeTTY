@@ -18,6 +18,8 @@ func main() {
 	if os.Getenv("SESSION_ID") == "" {
 		_ = os.Setenv("SESSION_ID", "kubetty-authuser")
 	}
+	// The CLI only uses the database, so it must not need the server's auth settings.
+	_ = os.Setenv("AUTH_MODE", "disabled")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -135,7 +137,11 @@ func handleList(store auth.Store) {
 		if u.IsActive {
 			active = "active"
 		}
-		fmt.Printf("%s\t%s\t%s\n", u.ID, u.Username, active)
+		github := "-"
+		if u.GitHubLogin != "" {
+			github = "github:" + u.GitHubLogin
+		}
+		fmt.Printf("%s\t%s\t%s\t%s\n", u.ID, u.Username, active, github)
 	}
 }
 

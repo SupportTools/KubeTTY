@@ -8,6 +8,7 @@ import {
   UpgradeInfoResponse,
 } from "../types";
 import { parseErrorResponse } from "../utils/errorParser";
+import { isValidGitHubRepo } from "../utils/githubRepo";
 
 interface Props {
   project: AdminProject;
@@ -66,10 +67,15 @@ const AdminProjectDetail = ({
     storageSize: "",
   });
   const [savingResources, setSavingResources] = useState(false);
+  // cluster-services-1024: save to the DB only and leave the pod running
+  const [applyOnNextRestart, setApplyOnNextRestart] = useState(false);
 
   // Manage Secrets modal state
   const [showSecretsModal, setShowSecretsModal] = useState(false);
-  const [secrets, setSecrets] = useState<Record<string, string>>({});
+  // null means "keep the stored value": the API returns key names only.
+  const [secrets, setSecrets] = useState<Record<string, string | null>>({});
+  const [storedSecretKeys, setStoredSecretKeys] = useState<string[]>([]);
+  const [secretsExternallyManaged, setSecretsExternallyManaged] = useState(false);
   const [loadingSecrets, setLoadingSecrets] = useState(false);
   const [savingSecrets, setSavingSecrets] = useState(false);
   const [newSecretKey, setNewSecretKey] = useState("");
@@ -78,6 +84,11 @@ const AdminProjectDetail = ({
 
   // Pause/Unpause state
   const [pausing, setPausing] = useState(false);
+
+  // Image auto-follow switch (cluster-services-1382)
+  const [savingAutoFollow, setSavingAutoFollow] = useState(false);
+  const [githubRepoDraft, setGitHubRepoDraft] = useState(initialProject.githubRepo || "");
+  const [savingGitHubRepo, setSavingGitHubRepo] = useState(false);
 
   // Edit Settings modal state
   const [showEditSettingsModal, setShowEditSettingsModal] = useState(false);
@@ -194,6 +205,7 @@ const AdminProjectDetail = ({
       memoryLimit: project.memoryLimit,
       storageSize: project.storageSize,
     });
+    setApplyOnNextRestart(false);
     setShowEditResourcesModal(true);
     setError(null);
   };
@@ -227,6 +239,7 @@ const AdminProjectDetail = ({
           memoryRequest: editResources.memoryRequest,
           memoryLimit: editResources.memoryLimit,
           storageSize: editResources.storageSize,
+          applyMode: applyOnNextRestart ? "next_restart" : "now",
         }),
       });
       if (!res.ok) {
@@ -314,8 +327,10 @@ const AdminProjectDetail = ({
       if (!res.ok) {
         throw new Error(await parseErrorResponse(res));
       }
-      const data = await res.json();
-      setSecrets(data.secrets || {});
+      const data: { keys?: string[]; externallyManaged?: boolean } = await res.json();
+      setSecrets(Object.fromEntries((data.keys || []).map((key) => [key, null])));
+      setStoredSecretKeys(data.keys || []);
+      setSecretsExternallyManaged(Boolean(data.externallyManaged));
       setShowSecretValues({});
       setNewSecretKey("");
       setNewSecretValue("");
@@ -330,6 +345,7 @@ const AdminProjectDetail = ({
   const handleSecretsCancel = () => {
     setShowSecretsModal(false);
     setSecrets({});
+    setSecretsExternallyManaged(false);
     setShowSecretValues({});
     setNewSecretKey("");
     setNewSecretValue("");
@@ -338,6 +354,11 @@ const AdminProjectDetail = ({
 
   const handleSecretChange = (key: string, value: string) => {
     setSecrets((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleSecretKeep = (key: string) => {
+    setSecrets((prev) => ({ ...prev, [key]: null }));
+    setShowSecretValues((prev) => ({ ...prev, [key]: false }));
   };
 
   const handleSecretDelete = (key: string) => {
@@ -392,6 +413,7 @@ const AdminProjectDetail = ({
       }
       setShowSecretsModal(false);
       setSecrets({});
+      setSecretsExternallyManaged(false);
       setShowSecretValues({});
       setNewSecretKey("");
       setNewSecretValue("");
@@ -408,6 +430,61 @@ const AdminProjectDetail = ({
     if (!dateStr) return "Never";
     const date = new Date(dateStr);
     return date.toLocaleString();
+  };
+
+  // Image auto-follow (cluster-services-1382). A settings-only PUT: the request carries
+  // imageAutoFollow and nothing else, so the server saves it without rolling the pod
+  // (only imageTag/resource fields set status=updating).
+  const autoFollow = project.imageAutoFollow !== false;
+  const handleAutoFollowToggle = async (enabled: boolean) => {
+    setSavingAutoFollow(true);
+    setError(null);
+    try {
+      const res = await authFetch(`/api/admin/projects/${project.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageAutoFollow: enabled }),
+      });
+      if (!res.ok) {
+        throw new Error(await parseErrorResponse(res));
+      }
+      const updated = (await res.json()) as AdminProject;
+      setProject((prev) => ({ ...prev, ...updated }));
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update image auto-follow");
+    } finally {
+      setSavingAutoFollow(false);
+    }
+  };
+
+  // A settings-only PUT like auto-follow: it never rolls the pod.
+  const handleGitHubRepoSave = async () => {
+    const repo = githubRepoDraft.trim();
+    if (!isValidGitHubRepo(repo)) {
+      setError("GitHub repository must be owner/name");
+      return;
+    }
+    setSavingGitHubRepo(true);
+    setError(null);
+    try {
+      const res = await authFetch(`/api/admin/projects/${project.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ githubRepo: repo }),
+      });
+      if (!res.ok) {
+        throw new Error(await parseErrorResponse(res));
+      }
+      const updated = (await res.json()) as AdminProject;
+      setProject((prev) => ({ ...prev, ...updated, githubRepo: updated.githubRepo }));
+      setGitHubRepoDraft(updated.githubRepo || "");
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update the GitHub repository");
+    } finally {
+      setSavingGitHubRepo(false);
+    }
   };
 
   // Pause/Unpause handlers
@@ -472,6 +549,26 @@ const AdminProjectDetail = ({
                 <span>{project.userName}</span>
               </div>
               <div className="detail-item">
+                <label htmlFor="project-github-repo">GitHub repository</label>
+                <span>
+                  <input
+                    id="project-github-repo"
+                    type="text"
+                    value={githubRepoDraft}
+                    placeholder="owner/name (empty: admins only)"
+                    disabled={savingGitHubRepo}
+                    onChange={(e) => setGitHubRepoDraft(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    disabled={savingGitHubRepo || githubRepoDraft.trim() === (project.githubRepo || "")}
+                    onClick={handleGitHubRepoSave}
+                  >
+                    {savingGitHubRepo ? "Saving..." : "Save"}
+                  </button>
+                </span>
+              </div>
+              <div className="detail-item">
                 <label>Namespace</label>
                 <span className="mono">{project.targetNamespace}</span>
               </div>
@@ -491,6 +588,39 @@ const AdminProjectDetail = ({
               )}
             </div>
           </div>
+
+          {project.pendingChanges && project.pendingChanges.length > 0 && (
+            <div className="detail-section">
+              <h3>Pending Changes</h3>
+              <div className="info-box pending-changes-box">
+                The running pod differs from the saved configuration. These changes
+                apply on the next restart; nothing restarts automatically.
+              </div>
+              <table className="admin-table pending-changes-table">
+                <thead>
+                  <tr>
+                    <th>Field</th>
+                    <th>Running</th>
+                    <th>On next restart</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {project.pendingChanges.map((c) => (
+                    <tr key={c.field}>
+                      <td>{c.field}</td>
+                      <td className="mono">{c.running || "(unset)"}</td>
+                      <td className="mono">{c.desired}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {project.driftCheckedAt && (
+                <small className="form-help">
+                  Checked {new Date(project.driftCheckedAt).toLocaleString()}
+                </small>
+              )}
+            </div>
+          )}
 
           {project.statusMessage && (
             <div className="detail-section">
@@ -537,6 +667,27 @@ const AdminProjectDetail = ({
               <div className="detail-item">
                 <label>Image</label>
                 <span className="mono">{project.imageRepository}:{project.imageTag}</span>
+              </div>
+              <div className="detail-item">
+                <label htmlFor="image-auto-follow">Auto-follow recommended image</label>
+                <span className="checkbox-group">
+                  <input
+                    id="image-auto-follow"
+                    type="checkbox"
+                    role="switch"
+                    aria-checked={autoFollow}
+                    checked={autoFollow}
+                    disabled={savingAutoFollow}
+                    onChange={(e) => handleAutoFollowToggle(e.target.checked)}
+                  />{" "}
+                  {autoFollow ? "On" : "Off (pinned)"}
+                </span>
+                <small className="form-help">
+                  {autoFollow
+                    ? "When idle, the project moves to the recommended image automatically."
+                    : `Pinned to ${project.imageTag}; upgrade it by hand.`}{" "}
+                  Changing this does not restart the pod.
+                </small>
               </div>
               <div className="detail-item">
                 <label>Max Tabs (Per Client)</label>
@@ -791,8 +942,26 @@ const AdminProjectDetail = ({
               <div className="modal-body">
                 {error && <p className="error">{error}</p>}
 
+                <div className="form-group checkbox-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={applyOnNextRestart}
+                      onChange={(e) => setApplyOnNextRestart(e.target.checked)}
+                      disabled={savingResources}
+                    />
+                    Apply on next restart
+                  </label>
+                  <small className="form-help">
+                    Save without restarting the pod. The change shows as pending until the
+                    project is next restarted. Storage size cannot be changed this way.
+                  </small>
+                </div>
+
                 <div className="info-box">
-                  Updating resources will restart the project pod. Any running processes will be terminated.
+                  {applyOnNextRestart
+                    ? "The pod keeps running with its current resources. The new values apply on the next restart."
+                    : "Updating resources will restart the project pod. Any running processes will be terminated."}
                 </div>
 
                 <div className="form-group">
@@ -1052,10 +1221,16 @@ const AdminProjectDetail = ({
               <div className="modal-body">
                 {error && <p className="error">{error}</p>}
 
-                <div className="info-box">
-                  Environment secrets are injected as environment variables into the project pod.
-                  Saving changes will restart the project pod.
-                </div>
+                {secretsExternallyManaged ? (
+                  <div className="info-box">
+                    These secrets are managed by an ExternalSecret. Change them in Vault; KubeTTY cannot edit them.
+                  </div>
+                ) : (
+                  <div className="info-box">
+                    Environment secrets are injected as environment variables into the project pod. Stored values
+                    are never shown; type a new value to replace one. Saving changes will restart the project pod.
+                  </div>
+                )}
 
                 <div className="secrets-list">
                   <h4>Current Secrets ({Object.keys(secrets).length})</h4>
@@ -1066,41 +1241,59 @@ const AdminProjectDetail = ({
                       <thead>
                         <tr>
                           <th>Key</th>
-                          <th>Value</th>
-                          <th>Actions</th>
+                          {!secretsExternallyManaged && <th>Value</th>}
+                          {!secretsExternallyManaged && <th>Actions</th>}
                         </tr>
                       </thead>
                       <tbody>
                         {Object.entries(secrets).map(([key, value]) => (
                           <tr key={key}>
                             <td className="mono">{key}</td>
-                            <td className="secret-value-cell">
-                              <input
-                                type={showSecretValues[key] ? "text" : "password"}
-                                className="form-input secret-input"
-                                value={value}
-                                onChange={(e) => handleSecretChange(key, e.target.value)}
-                                disabled={savingSecrets}
-                              />
-                              <button
-                                type="button"
-                                className="icon-button toggle-visibility"
-                                onClick={() => toggleSecretVisibility(key)}
-                                title={showSecretValues[key] ? "Hide value" : "Show value"}
-                              >
-                                {showSecretValues[key] ? "Hide" : "Show"}
-                              </button>
-                            </td>
-                            <td>
-                              <button
-                                type="button"
-                                className="danger-small"
-                                onClick={() => handleSecretDelete(key)}
-                                disabled={savingSecrets}
-                              >
-                                Delete
-                              </button>
-                            </td>
+                            {!secretsExternallyManaged && (
+                              <td className="secret-value-cell">
+                                <input
+                                  type={showSecretValues[key] ? "text" : "password"}
+                                  className="form-input secret-input"
+                                  aria-label={`Value for ${key}`}
+                                  placeholder={value === null ? "Unchanged" : ""}
+                                  value={value ?? ""}
+                                  onChange={(e) => handleSecretChange(key, e.target.value)}
+                                  disabled={savingSecrets}
+                                />
+                                {value !== null && (
+                                  <button
+                                    type="button"
+                                    className="icon-button toggle-visibility"
+                                    onClick={() => toggleSecretVisibility(key)}
+                                    title={showSecretValues[key] ? "Hide value" : "Show value"}
+                                  >
+                                    {showSecretValues[key] ? "Hide" : "Show"}
+                                  </button>
+                                )}
+                              </td>
+                            )}
+                            {!secretsExternallyManaged && (
+                              <td>
+                                {value !== null && storedSecretKeys.includes(key) && (
+                                  <button
+                                    type="button"
+                                    className="secondary"
+                                    onClick={() => handleSecretKeep(key)}
+                                    disabled={savingSecrets}
+                                  >
+                                    Keep stored
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className="danger-small"
+                                  onClick={() => handleSecretDelete(key)}
+                                  disabled={savingSecrets}
+                                >
+                                  Delete
+                                </button>
+                              </td>
+                            )}
                           </tr>
                         ))}
                       </tbody>
@@ -1108,6 +1301,7 @@ const AdminProjectDetail = ({
                   )}
                 </div>
 
+                {!secretsExternallyManaged && (
                 <div className="add-secret-section">
                   <h4>Add New Secret</h4>
                   <div className="add-secret-form">
@@ -1148,18 +1342,21 @@ const AdminProjectDetail = ({
                     Keys must start with a letter or underscore and contain only letters, numbers, and underscores.
                   </small>
                 </div>
+                )}
               </div>
               <div className="modal-actions">
                 <button className="secondary" onClick={handleSecretsCancel} disabled={savingSecrets}>
-                  Cancel
+                  {secretsExternallyManaged ? "Close" : "Cancel"}
                 </button>
-                <button
-                  className="primary-button"
-                  onClick={handleSecretsSave}
-                  disabled={savingSecrets}
-                >
-                  {savingSecrets ? "Saving..." : "Save Secrets"}
-                </button>
+                {!secretsExternallyManaged && (
+                  <button
+                    className="primary-button"
+                    onClick={handleSecretsSave}
+                    disabled={savingSecrets}
+                  >
+                    {savingSecrets ? "Saving..." : "Save Secrets"}
+                  </button>
+                )}
               </div>
             </div>
           </div>

@@ -223,6 +223,52 @@ func TestLoadGatewayConfig(t *testing.T) {
 			errMsg:  "unsupported auth mode",
 		},
 		{
+			name: "github mode requires the callback URL",
+			envVars: map[string]string{
+				"SESSION_ID":                "test-session",
+				"CNPG_HOST":                 "localhost",
+				"CNPG_DATABASE":             "kubetty",
+				"CNPG_USER":                 "user",
+				"CNPG_PASSWORD":             "pass",
+				"AUTH_MODE":                 "github",
+				"AUTH_JWT_SECRET":           "test-secret-must-be-at-least-32-bytes-long",
+				"AUTH_GITHUB_CLIENT_ID":     "Iv1.abc",
+				"AUTH_GITHUB_CLIENT_SECRET": "secret",
+				"AUTH_GITHUB_PRIVATE_KEY":   "-----BEGIN RSA PRIVATE KEY-----",
+				"AUTH_GITHUB_ALLOW":         "org:SupportTools",
+			},
+			wantErr: true,
+			errMsg:  "AUTH_GITHUB_CALLBACK_URL",
+		},
+		{
+			name: "github mode loads the app, rules and break-glass user",
+			envVars: map[string]string{
+				"SESSION_ID":                "test-session",
+				"CNPG_HOST":                 "localhost",
+				"CNPG_DATABASE":             "kubetty",
+				"CNPG_USER":                 "user",
+				"CNPG_PASSWORD":             "pass",
+				"AUTH_MODE":                 "github",
+				"AUTH_JWT_SECRET":           "test-secret-must-be-at-least-32-bytes-long",
+				"AUTH_GITHUB_CLIENT_ID":     "Iv1.abc",
+				"AUTH_GITHUB_CLIENT_SECRET": "secret",
+				"AUTH_GITHUB_PRIVATE_KEY":   "-----BEGIN RSA PRIVATE KEY-----",
+				"AUTH_GITHUB_CALLBACK_URL":  "https://kubetty-dev.support.tools/api/auth/github/callback",
+				"AUTH_GITHUB_ALLOW":         "org:SupportTools,user:octo",
+				"AUTH_BREAKGLASS_USER":      "breakglass",
+				"AUTH_RESTRICTED_USERS":     "kubetty-smoke:test-project",
+			},
+			wantErr: false,
+			validate: func(t *testing.T, cfg GatewayConfig) {
+				if cfg.GitHubAdminTeams != "SupportTools/admins" || cfg.GitHubCacheTTL != time.Minute {
+					t.Errorf("defaults: teams %q ttl %s", cfg.GitHubAdminTeams, cfg.GitHubCacheTTL)
+				}
+				if cfg.BreakGlassUser != "breakglass" || cfg.RestrictedUsers != "kubetty-smoke:test-project" || cfg.GitHubAllow != "org:SupportTools,user:octo" {
+					t.Errorf("got %+v", cfg)
+				}
+			},
+		},
+		{
 			name: "deployment ID defaults to session ID",
 			envVars: map[string]string{
 				"SESSION_ID":    "test-session-deployment",

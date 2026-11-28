@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 env:
-  NODE_VERSION: '22'
+  NODE_VERSION: '22' # runner image bakes Node 22; setup-node resolves it from the toolcache (no job-time download)
   COVERAGE_THRESHOLD: 35
 
 jobs:
@@ -23,13 +23,19 @@ jobs:
     runs-on: self-hosted-linux
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: server/go.mod
-          cache: false
+      # No actions/setup-go: the self-hosted runner image (runner:v21.1-arc2+)
+      # bakes Go at /usr/local/go (1.26.x, GOTOOLCHAIN=local), which satisfies
+      # server/go.mod's `go 1.24.0` floor. setup-go with any version spec missed
+      # the runner tool cache and downloaded a Go tarball at job time
+      # (taskforge-2849). No download fallback: fail loudly on a runner defect.
+      - name: Verify baked Go
+        run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner. It must be pre-baked into the runner image - there is deliberately no download fallback. Fix the runner image."; exit 1; }
+          go version
+          go env GOROOT GOTOOLCHAIN GOCACHE GOMODCACHE
 
       - name: Check Go formatting
         working-directory: server
@@ -59,7 +65,7 @@ jobs:
           fi
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -81,13 +87,19 @@ jobs:
     needs: validate
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: server/go.mod
-          cache: false
+      # No actions/setup-go: the self-hosted runner image (runner:v21.1-arc2+)
+      # bakes Go at /usr/local/go (1.26.x, GOTOOLCHAIN=local), which satisfies
+      # server/go.mod's `go 1.24.0` floor. setup-go with any version spec missed
+      # the runner tool cache and downloaded a Go tarball at job time
+      # (taskforge-2849). No download fallback: fail loudly on a runner defect.
+      - name: Verify baked Go
+        run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner. It must be pre-baked into the runner image - there is deliberately no download fallback. Fix the runner image."; exit 1; }
+          go version
+          go env GOROOT GOTOOLCHAIN GOCACHE GOMODCACHE
 
       - name: Run server tests
         working-directory: server
@@ -98,7 +110,7 @@ jobs:
           go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload server coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: server-coverage
           path: server/coverage.out
@@ -128,13 +140,19 @@ jobs:
           - 5432:5432
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: server/go.mod
-          cache: false
+      # No actions/setup-go: the self-hosted runner image (runner:v21.1-arc2+)
+      # bakes Go at /usr/local/go (1.26.x, GOTOOLCHAIN=local), which satisfies
+      # server/go.mod's `go 1.24.0` floor. setup-go with any version spec missed
+      # the runner tool cache and downloaded a Go tarball at job time
+      # (taskforge-2849). No download fallback: fail loudly on a runner defect.
+      - name: Verify baked Go
+        run: |
+          set -euo pipefail
+          command -v go >/dev/null 2>&1 || { echo "::error::go is missing from this self-hosted runner. It must be pre-baked into the runner image - there is deliberately no download fallback. Fix the runner image."; exit 1; }
+          go version
+          go env GOROOT GOTOOLCHAIN GOCACHE GOMODCACHE
 
       - name: Initialize test database
         run: |
@@ -160,7 +178,10 @@ jobs:
           KUBERNETES_SERVICE_HOST: ''
           KUBERNETES_SERVICE_PORT: ''
         run: |
-          go test -v -race -run Integration ./...
+          # -p 1: every package shares this one database. gateway/tabs tests wipe gateway_tabs, which
+          # raced projects' auto-follow test (its open-tab rows vanished mid-test) when packages ran in
+          # parallel (cluster-services-1438 PR CI).
+          go test -p 1 -v -race -run Integration ./...
 
       - name: Run all tests with database
         working-directory: server
@@ -174,10 +195,13 @@ jobs:
           KUBERNETES_SERVICE_HOST: ''
           KUBERNETES_SERVICE_PORT: ''
         run: |
-          go test -v -race -coverprofile=coverage-integration.out -covermode=atomic ./...
+          # -p 1: every package shares this one database. gateway/tabs tests wipe gateway_tabs, which
+          # raced projects' auto-follow test (its open-tab rows vanished mid-test) when packages ran in
+          # parallel (cluster-services-1438 PR CI).
+          go test -p 1 -v -race -coverprofile=coverage-integration.out -covermode=atomic ./...
 
       - name: Upload integration coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: integration-coverage
           path: server/coverage-integration.out
@@ -202,7 +226,7 @@ jobs:
       - name: Comment coverage on PR
         if: github.event_name == 'pull_request'
         continue-on-error: true
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const coveragePercent = ${{ toJSON(steps.coverage.outputs.percent) }};
@@ -228,10 +252,10 @@ jobs:
     needs: validate
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -265,12 +289,16 @@ jobs:
     needs: validate
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-        with:
-          version: 'v3.15.2'
+      # Helm is baked into the runner image (ci-runners Dockerfile.arc2, checksum-pinned).
+      # Do not download it per job: a job-time fetch from get.helm.sh failed twice on
+      # 2026-10-01 (site IPv6 PMTU black hole) and skipped the deploy. See the TaskForge
+      # CI runner contract, "No job-time downloads" (taskforge-2670).
+      - name: Helm (baked into the runner image)
+        run: |
+          command -v helm >/dev/null || { echo "::error::helm is not on the runner image; fix ci-runners, do not download it here"; exit 1; }
+          helm version --short
 
       - name: Lint Helm chart
         run: |
@@ -363,7 +391,7 @@ jobs:
       - name: Update PR status
         if: github.event_name == 'pull_request' && needs.validate.result == 'success' && needs.test-server.result == 'success' && needs.test-integration.result == 'success' && needs.test-web.result == 'success' && needs.helm-validate.result == 'success'
         continue-on-error: true
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             await github.rest.issues.createComment({

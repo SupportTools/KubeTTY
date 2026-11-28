@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ValidateAuth validates authentication configuration settings.
 // It ensures that:
@@ -21,21 +24,40 @@ func ValidateAuth(cfg AuthConfig) error {
 		return nil
 
 	case "local":
-		// Local authentication requires JWT configuration
-		if cfg.JWTSecret == "" {
-			return fmt.Errorf("JWT secret is required when auth mode is 'local'")
+		return validateTokens(cfg)
+
+	case "github":
+		if err := validateTokens(cfg); err != nil {
+			return err
 		}
-		if cfg.AccessTTL <= 0 {
-			return fmt.Errorf("access token TTL must be greater than 0 when auth mode is 'local'")
-		}
-		if cfg.RefreshTTL <= 0 {
-			return fmt.Errorf("refresh token TTL must be greater than 0 when auth mode is 'local'")
+		switch {
+		case cfg.GitHubClientID == "" || cfg.GitHubClientSecret == "":
+			return fmt.Errorf("AUTH_GITHUB_CLIENT_ID and AUTH_GITHUB_CLIENT_SECRET are required when auth mode is 'github'")
+		case cfg.GitHubPrivateKey == "":
+			return fmt.Errorf("AUTH_GITHUB_PRIVATE_KEY (the GitHub App private key, PEM) is required when auth mode is 'github'")
+		case !strings.HasPrefix(cfg.GitHubCallbackURL, "https://") && !strings.HasPrefix(cfg.GitHubCallbackURL, "http://localhost"):
+			return fmt.Errorf("AUTH_GITHUB_CALLBACK_URL must be an https:// URL when auth mode is 'github'")
+		case strings.TrimSpace(cfg.GitHubAllow) == "":
+			return fmt.Errorf("AUTH_GITHUB_ALLOW (org:<org>, team:<org>/<team>, user:<login>) is required when auth mode is 'github'")
 		}
 		return nil
 
 	default:
-		return fmt.Errorf("unsupported auth mode: %q (valid options: \"disabled\", \"local\")", cfg.Mode)
+		return fmt.Errorf("unsupported auth mode: %q (valid options: \"disabled\", \"local\", \"github\")", cfg.Mode)
 	}
+}
+
+func validateTokens(cfg AuthConfig) error {
+	if cfg.JWTSecret == "" {
+		return fmt.Errorf("JWT secret is required when auth mode is '%s'", cfg.Mode)
+	}
+	if cfg.AccessTTL <= 0 {
+		return fmt.Errorf("access token TTL must be greater than 0 when auth mode is '%s'", cfg.Mode)
+	}
+	if cfg.RefreshTTL <= 0 {
+		return fmt.Errorf("refresh token TTL must be greater than 0 when auth mode is '%s'", cfg.Mode)
+	}
+	return nil
 }
 
 // ValidateDatabase validates database configuration settings.

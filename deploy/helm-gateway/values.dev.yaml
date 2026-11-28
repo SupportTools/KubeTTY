@@ -17,9 +17,21 @@ env:
   # Use semantic version for recommended upgrades (not floating tags like "dev")
   RECOMMENDED_IMAGE_TAG: "v0.8.0"
 
-# Authentication - enabled for dev testing
+# Authentication - GitHub App sign-in (TaskForge 26815). The App's client secret
+# and private key come from Vault secret/kubetty/github-app through ESO
+# (cluster-services kubetty/a1-ops-prd/gateway-secrets/github-app-dev.yaml).
 auth:
-  mode: local
+  mode: github
+  github:
+    clientId: Iv23liM4XZDQoxB1Ml1S
+    callbackUrl: https://kubetty-dev.support.tools/api/auth/github/callback
+    allow: org:SupportTools
+    adminTeams: SupportTools/admins
+    secretName: kubetty-gateway-github
+  # Local admin for GitHub outages; password form at /login/local.
+  breakGlassUser: breakglass
+  # CI smoke user; its password is in Vault secret/kubetty/ci-smoke-user.
+  restrictedUsers: kubetty-smoke:test-project
   jwtSecretSecret:
     name: "kubetty-gateway-dev-auth"
     key: jwt-secret
@@ -27,7 +39,7 @@ auth:
   accessTTL: 1h
   refreshTTL: 720h
   cookieDomain: ""
-  cookieSecure: false
+  cookieSecure: true   # public over HTTPS
 
 # Dev project catalog - empty for dev (uses dynamic projects only)
 catalog:

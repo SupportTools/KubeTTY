@@ -379,4 +379,53 @@ describe('Login', () => {
       expect(alert).toHaveClass('error');
     });
   });
+  describe('GitHub sign-in mode', () => {
+    beforeEach(() => {
+      window.history.pushState(null, '', '/');
+      vi.spyOn(AuthContext, 'useAuth').mockReturnValue({
+        authState: 'unauthenticated',
+        user: null,
+        login: mockLogin,
+        logout: vi.fn(),
+        authFetch: vi.fn(),
+        refreshToken: vi.fn(),
+        authMode: 'github',
+        isAdmin: false
+      });
+    });
+
+    it('shows only the GitHub button', () => {
+      renderWithAuth(<Login />);
+      expect(screen.getByRole('button', { name: 'Sign in with GitHub' })).toBeInTheDocument();
+      expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument();
+    });
+
+    it('starts the GitHub sign-in', async () => {
+      const assign = vi.fn();
+      const original = window.location;
+      Object.defineProperty(window, 'location', { configurable: true, value: { ...original, pathname: '/', search: '', assign } });
+      try {
+        renderWithAuth(<Login />);
+        await userEvent.click(screen.getByRole('button', { name: 'Sign in with GitHub' }));
+        expect(assign).toHaveBeenCalledWith('/api/auth/github/login');
+        expect(mockLogin).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(window, 'location', { configurable: true, value: original });
+      }
+    });
+
+    it('explains a refused GitHub account', () => {
+      window.history.pushState(null, '', '/?auth_error=not_allowed');
+      renderWithAuth(<Login />);
+      expect(screen.getByRole('alert')).toHaveTextContent('not allowed to use KubeTTY');
+    });
+
+    it('serves the break-glass password form only at /login/local', () => {
+      window.history.pushState(null, '', '/login/local');
+      renderWithAuth(<Login />);
+      expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Sign in with GitHub' })).not.toBeInTheDocument();
+      window.history.pushState(null, '', '/');
+    });
+  });
 });

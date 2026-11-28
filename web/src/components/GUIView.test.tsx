@@ -162,13 +162,9 @@ describe('GUIView', () => {
   it('displays status message', async () => {
     render(<GUIView {...defaultProps} />);
 
-    // Wait for connection to start (after 50ms delay) - message is in overlay
-    // Assert inside waitFor: the mocked RFB fires 'connect' after 10ms, which
-    // removes the overlay, so a separate query afterwards can race with it.
+    // The mock RFB connects 10ms after creation and hides the overlay, so read the text in the same check.
     await waitFor(() => {
-      const message = document.querySelector('.gui-view__message');
-      expect(message).toBeInTheDocument();
-      expect(message?.textContent).toContain('Connecting');
+      expect(document.querySelector('.gui-view__message')?.textContent).toContain('Connecting');
     });
   });
 

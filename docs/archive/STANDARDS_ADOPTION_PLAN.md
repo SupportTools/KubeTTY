@@ -1,3 +1,5 @@
+> **Archived 2026-10-01:** Largely completed in v0.6.0 (2025-11-20): task workflow docs, the shared error package (`server/internal/shared/errors`), split binaries and handlers, `pkg/logging`, the Makefile, `.validation.json`, git hooks, tests and CI. Swagger docs were never adopted. Kept for history only.
+
 # KubeTTY Standards Adoption Plan
 
 **Date:** 2025-11-19

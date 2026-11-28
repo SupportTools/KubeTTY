@@ -5,7 +5,7 @@ This guide covers setting up and running KubeTTY in a development environment wi
 ## Prerequisites
 
 - **Go 1.23+** - [Download](https://golang.org/dl/)
-- **Node.js 20+** - [Download](https://nodejs.org/)
+- **Node.js 22.12+** - [Download](https://nodejs.org/)
 - **Docker** - For building container images
 - **kubectl** - Configured with cluster access
 - **Helm 3** - For deployments

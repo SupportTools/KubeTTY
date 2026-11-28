@@ -278,6 +278,28 @@ func TestTabLimitExceededError_Error(t *testing.T) {
 	}
 }
 
+// TestUnknownProjectError verifies CreateTab/CreateVNCTab return a typed error
+// (so HTTP handlers can map it to 404) with the original message preserved.
+func TestUnknownProjectError(t *testing.T) {
+	mgr := New(gatewayconfig.Catalog{}, &fakeStore{}, 2*time.Hour)
+	for name, create := range map[string]func(context.Context, string, string) (tabs.Tab, error){
+		"CreateTab":    mgr.CreateTab,
+		"CreateVNCTab": mgr.CreateVNCTab,
+	} {
+		_, err := create(context.Background(), "missing", "client")
+		var unknown *UnknownProjectError
+		if !errors.As(err, &unknown) {
+			t.Fatalf("%s: error = %v, want *UnknownProjectError", name, err)
+		}
+		if unknown.ProjectID != "missing" {
+			t.Errorf("%s: ProjectID = %q, want %q", name, unknown.ProjectID, "missing")
+		}
+		if want := `unknown project "missing"`; err.Error() != want {
+			t.Errorf("%s: Error() = %q, want %q", name, err.Error(), want)
+		}
+	}
+}
+
 // TestDefaultManagerConfig verifies default configuration values.
 func TestDefaultManagerConfig(t *testing.T) {
 	cfg := DefaultManagerConfig()

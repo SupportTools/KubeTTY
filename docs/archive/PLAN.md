@@ -1,3 +1,5 @@
+> **Archived 2026-10-01:** This is the original 2025-11 implementation plan. Its backend, gateway, auth, tooling, Helm and test work has shipped (see `STATE.md`). Kept for history only.
+
 # Implementation Plan
 
 ## 1. Shared Infrastructure

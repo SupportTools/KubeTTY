@@ -74,6 +74,11 @@ const (
 	replayChunkSize = 64 * 1024
 	// Delay between replay chunks (prevents browser overwhelm)
 	replayChunkDelay = 5 * time.Millisecond
+
+	// closeCodeTakenOver is the application close code sent to a client that
+	// is displaced by a ?force=true takeover.
+	closeCodeTakenOver = 4000
+	takeoverReason     = "session taken over by another client"
 )
 
 // wsClient wraps a websocket connection with a write mutex to prevent concurrent writes.
@@ -253,9 +258,14 @@ type ptySession struct {
 	ptmx      *os.File
 	createdAt time.Time
 
-	mu           sync.RWMutex
-	clients      map[*websocket.Conn]*wsClient
-	reserved     int                // reserved slots for in-progress WebSocket upgrades
+	mu       sync.RWMutex
+	clients  map[*websocket.Conn]*wsClient
+	reserved int // reserved slots for in-progress WebSocket upgrades (current epoch only)
+	// epoch is bumped on every force takeover. Admissions record the epoch they
+	// were granted in; an admission whose epoch is stale by the time its
+	// WebSocket upgrade completes was superseded mid-upgrade and must not be
+	// registered (see takeover / addClient).
+	epoch        uint64
 	outputBuffer *buffer.RingBuffer // Ring buffer for PTY output replay (default 8MB)
 
 	// Metrics reference for broadcast error tracking
@@ -469,6 +479,10 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	forceConnect := forceParam == "true" || forceParam == "1"
 
 	// Session admission policy.
+	// admitEpoch is the takeover epoch this admission was granted in; slotHeld
+	// tracks whether we still own a reservation that must be released.
+	admitEpoch := ps.currentEpoch()
+	slotHeld := false
 	switch sessionMode {
 	case "shared_concurrent":
 		// Allow multiple concurrent clients with no reservation/takeover logic.
@@ -477,7 +491,6 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		// in project service; shell fan-out is coordinated at gateway/tab layer.
 		if forceConnect {
 			if ps.hasClients() {
-				// Force takeover: disconnect existing clients with explanation
 				log.WithFields(log.Fields{
 					"session_uuid": sessionUUID,
 					"conn_id":      connID,
@@ -485,12 +498,22 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 					"client_count": ps.getClientCount(),
 					"session_mode": sessionMode,
 				}).Info("project/ws: Force takeover requested - disconnecting existing client(s)")
-				ps.disconnectAllClients("session taken over by another client")
 			}
+			// Force takeover: atomically disconnect registered clients, invalidate
+			// any admissions still mid-upgrade (they are not in ps.clients yet and
+			// would otherwise survive the takeover), and reserve the slot for us.
+			admitEpoch = ps.takeover(takeoverReason)
+			slotHeld = true
+			defer func() {
+				if slotHeld {
+					ps.releaseSlot(admitEpoch)
+				}
+			}()
 		} else {
 			// Atomically check-and-reserve to prevent TOCTOU race between
 			// hasClients check and addClient after WebSocket upgrade.
-			if !ps.reserveSlot() {
+			var ok bool
+			if admitEpoch, ok = ps.reserveSlot(); !ok {
 				log.WithFields(log.Fields{
 					"session_uuid": sessionUUID,
 					"conn_id":      connID,
@@ -501,19 +524,26 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 				apierrors.WriteError(w, apierrors.Conflict("session already attached", "only one client allowed; use ?force=true to take over"))
 				return
 			}
+			slotHeld = true
 			// If WebSocket upgrade fails below, release the reserved slot.
 			defer func() {
-				ps.releaseSlot()
+				if slotHeld {
+					ps.releaseSlot(admitEpoch)
+				}
 			}()
 		}
 	default:
 		// Safe fallback.
-		if !ps.reserveSlot() {
+		var ok bool
+		if admitEpoch, ok = ps.reserveSlot(); !ok {
 			apierrors.WriteError(w, apierrors.Conflict("session already attached", "only one client allowed; use ?force=true to take over"))
 			return
 		}
+		slotHeld = true
 		defer func() {
-			ps.releaseSlot()
+			if slotHeld {
+				ps.releaseSlot(admitEpoch)
+			}
 		}()
 	}
 
@@ -557,8 +587,25 @@ func (s *server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		"remote_addr":  remoteAddr,
 	}).Info("project/ws: WebSocket connection established")
 
-	// Register this client and get the wsClient wrapper for safe writes
-	wsClient := ps.addClient(conn)
+	// Register this client and get the wsClient wrapper for safe writes.
+	// addClient consumes our reservation (if any) whether or not it succeeds.
+	wsClient := ps.addClient(conn, admitEpoch)
+	slotHeld = false
+	if wsClient == nil {
+		// A force takeover happened while this connection was mid-upgrade:
+		// the client already completed its handshake but was never registered,
+		// so disconnectAllClients could not reach it. Deliver the same 4000
+		// close the registered clients received.
+		disconnectReason = "taken_over"
+		log.WithFields(log.Fields{
+			"session_uuid": sessionUUID,
+			"conn_id":      connID,
+		}).Info("project/ws: Connection superseded by force takeover during upgrade")
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(closeCodeTakenOver, takeoverReason),
+			time.Now().Add(time.Second))
+		return
+	}
 	defer ps.removeClient(conn)
 
 	if s.appMetrics != nil {
@@ -988,11 +1035,20 @@ func (s *server) initPTY(ctx context.Context, shellKey string) error {
 	return nil
 }
 
-func (ps *ptySession) addClient(conn *websocket.Conn) *wsClient {
+// addClient registers conn with the PTY session. epoch is the takeover epoch
+// the connection was admitted in. If a force takeover has happened since then,
+// the connection was superseded while mid-upgrade; it is not registered and
+// nil is returned. Any reservation held for the admission is consumed either way.
+func (ps *ptySession) addClient(conn *websocket.Conn, epoch uint64) *wsClient {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
-	// Consume reserved slot (set by reserveSlot before WebSocket upgrade)
+	if epoch != ps.epoch {
+		// Stale admission: takeover already reset ps.reserved, nothing to consume.
+		return nil
+	}
+
+	// Consume reserved slot (set by reserveSlot/takeover before WebSocket upgrade)
 	if ps.reserved > 0 {
 		ps.reserved--
 	}
@@ -1097,25 +1153,48 @@ func (ps *ptySession) hasClients() bool {
 	return len(ps.clients) > 0 || ps.reserved > 0
 }
 
+// currentEpoch returns the current takeover epoch.
+func (ps *ptySession) currentEpoch() uint64 {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.epoch
+}
+
 // reserveSlot atomically checks for existing clients and reserves a slot.
-// Returns true if the slot was reserved (no existing clients), false if busy.
-func (ps *ptySession) reserveSlot() bool {
+// Returns the epoch the reservation belongs to and true if the slot was
+// reserved (no existing clients), or false if busy.
+func (ps *ptySession) reserveSlot() (uint64, bool) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	if len(ps.clients) > 0 || ps.reserved > 0 {
-		return false
+		return ps.epoch, false
 	}
 	ps.reserved++
-	return true
+	return ps.epoch, true
 }
 
 // releaseSlot releases a previously reserved slot (e.g. after upgrade failure).
-func (ps *ptySession) releaseSlot() {
+// Reservations from an older epoch were already discarded by takeover and
+// are ignored so they cannot release a newer client's reservation.
+func (ps *ptySession) releaseSlot(epoch uint64) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	if ps.reserved > 0 {
+	if epoch == ps.epoch && ps.reserved > 0 {
 		ps.reserved--
 	}
+}
+
+// takeover performs a force takeover atomically: it starts a new epoch (which
+// invalidates every admission still mid-upgrade), disconnects all registered
+// clients with close code 4000, and reserves the single slot for the caller.
+// Returns the new epoch for the caller's admission.
+func (ps *ptySession) takeover(reason string) uint64 {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	ps.epoch++
+	ps.disconnectAllClientsLocked(reason)
+	ps.reserved = 1
+	return ps.epoch
 }
 
 func (ps *ptySession) getClientCount() int {
@@ -1199,7 +1278,11 @@ func (ps *ptySession) broadcastClose() {
 func (ps *ptySession) disconnectAllClients(reason string) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	ps.disconnectAllClientsLocked(reason)
+}
 
+// disconnectAllClientsLocked is disconnectAllClients for callers holding ps.mu.
+func (ps *ptySession) disconnectAllClientsLocked(reason string) {
 	clientCount := len(ps.clients)
 	if clientCount == 0 {
 		return
@@ -1213,7 +1296,7 @@ func (ps *ptySession) disconnectAllClients(reason string) {
 	for conn, client := range ps.clients {
 		// Send close message with reason (use code 4000 for custom application close)
 		_ = client.writeControl(websocket.CloseMessage,
-			websocket.FormatCloseMessage(4000, reason),
+			websocket.FormatCloseMessage(closeCodeTakenOver, reason),
 			time.Now().Add(time.Second))
 		conn.Close()
 		delete(ps.clients, conn)
